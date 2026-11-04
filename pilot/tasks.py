@@ -15,7 +15,7 @@ from types import ModuleType, SimpleNamespace
 import urllib.request
 
 from .program import MAX_WIRE_BYTES, ProgramError, SEED_PROGRAM, run_program
-from .runtime import BudgetExhausted, CallFailed, digest
+from .runtime import BudgetExhausted, CallFailed, ProviderRefusal, call_scope, digest
 from .verification import PLAN_SECONDS, WORKER_SECONDS, plan_digest, prepare_plan, score_solution
 
 ARTIFACT_REV = "cbefbc1aa0f43dd39874ec4bf42211365dbda42e"
@@ -283,7 +283,11 @@ def _response(call: Callable, messages: list[dict], field: str, traces: list[dic
         "No markdown fences or text outside JSON."
     )
     messages = [{"role": "system", "content": protocol}] + messages
-    raw = call("task", messages, 4096)
+    try:
+        raw = call("task", messages, 4096)
+    except ProviderRefusal:
+        traces.append({"messages": messages, "output": "", "max_tokens": 4096, "outcome": "refusal"})
+        raise
     traces.append({"messages": messages, "output": raw, "max_tokens": 4096})
     parsed = json.loads(raw)
     if (not isinstance(parsed, dict) or set(parsed) != {"reasoning", field}
@@ -308,33 +312,42 @@ def evaluate(task: Task, candidate: dict[str, str], rows: list[dict],
     if task.name == "hover" and valid_candidate:
         from .hover import evaluate_hover
         return evaluate_hover(task, candidate, [allowed[row["id"]] for row in rows], call, capture_traces)
-    scores, outputs, trajectories = [], [], []
+    scores, outputs, trajectories, refusals = [], [], [], []
     for row in rows:
         row = allowed[row["id"]]
         output = ""
         traces = []
         feedback = ""
+        refused = False
         try:
-            if not valid_candidate:
-                raise ProgramError("Invalid candidate fields")
-            if task.name == "mbpp":
-                output, traces = run_program(candidate, row["input"], call)
-                score = score_output(task, row, output)
-                feedback = "Solution passed development assertions." if score else "Solution failed development assertions or execution."
-            else:
-                messages = [{"role": "system", "content": candidate["prompt"]}, {"role": "user", "content": row["input"]}]
-                output = _response(call, messages, "answer" if task.name == "aime" else "response", traces)
-                if task.name == "aime":
-                    score = aime_score(output, row["answer"])
-                    feedback = f"Correct integer answer: {row['answer']}. " + row.get("solution", "")
+            with call_scope(row_id=row["id"], task=task.name):
+                if not valid_candidate:
+                    raise ProgramError("Invalid candidate fields")
+                if task.name == "mbpp":
+                    output, traces = run_program(candidate, row["input"], call)
+                    score = score_output(task, row, output)
+                    feedback = "Solution passed development assertions." if score else "Solution failed development assertions or execution."
                 else:
-                    revision = [
-                        {"role": "system", "content": candidate["revision_prompt"]},
-                        {"role": "user", "content": json.dumps({"query": row["input"], "response": output})},
-                    ]
-                    output = _response(call, revision, "final_response", traces)
-                    result = _ifbench_result(task, row, output)
-                    score, feedback = float(result.score), result.feedback
+                    messages = [{"role": "system", "content": candidate["prompt"]}, {"role": "user", "content": row["input"]}]
+                    output = _response(call, messages, "answer" if task.name == "aime" else "response", traces)
+                    if task.name == "aime":
+                        score = aime_score(output, row["answer"])
+                        feedback = f"Correct integer answer: {row['answer']}. " + row.get("solution", "")
+                    else:
+                        revision = [
+                            {"role": "system", "content": candidate["revision_prompt"]},
+                            {"role": "user", "content": json.dumps({"query": row["input"], "response": output})},
+                        ]
+                        output = _response(call, revision, "final_response", traces)
+                        result = _ifbench_result(task, row, output)
+                        score, feedback = float(result.score), result.feedback
+        except ProviderRefusal as error:
+            output, refused = "", True
+            if task.name == "mbpp":
+                traces = getattr(error, "traces", traces)
+            score = score_output(task, row, output) if task.name != "mbpp" else 0.0
+            feedback = "Provider refused the response; rollout ended."
+            refusals.append(row["id"])
         except BudgetExhausted:
             raise
         except (CallFailed, ProgramError, SyntaxError, KeyError, ValueError, TypeError):
@@ -346,4 +359,7 @@ def evaluate(task: Task, candidate: dict[str, str], rows: list[dict],
             assert row["id"] in train_ids
             trajectories.append({"id": row["id"], "input": row["input"], "output": output,
                                  "score": score, "feedback": feedback, "calls": traces})
-    return {"scores": scores, "outputs": outputs, "trajectories": trajectories}
+            if refused:
+                trajectories[-1]["outcome"] = "refusal"
+    return {"scores": scores, "outputs": outputs, "trajectories": trajectories,
+            "refusals": refusals, "refusals_by_row": {key: refusals.count(key) for key in set(refusals)}}

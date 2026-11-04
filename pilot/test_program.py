@@ -138,6 +138,42 @@ sys.stdin.readline()
                                  unpause_error=AssertionError("Failed call resumed candidate"))
                 self.assertIs(caught.exception, error)
 
+    def test_refusal_retains_trace_without_resuming_or_delivering_an_answer(self):
+        from pilot.runtime import ProviderRefusal
+        calls = []
+        def refused(*args):
+            calls.append(args)
+            raise ProviderRefusal("terminal refusal")
+        with self.assertRaises(ProviderRefusal) as caught:
+            self.execute(program.SEED_PROGRAM, refused,
+                         unpause_error=AssertionError("Refused call resumed candidate"))
+        self.assertEqual(len(calls), 1)
+        self.assertEqual(caught.exception.traces, [{
+            "messages": calls[0][1], "output": "", "max_tokens": 4096, "outcome": "refusal"}])
+    def test_second_stage_refusal_retains_answered_and_refused_traces(self):
+        from pilot.runtime import ProviderRefusal
+        source = '''import json,sys
+sys.stdin.readline()
+for stage in range(2):
+ print(json.dumps({"type":"model","messages":[{"role":"user","content":str(stage)}],"max_tokens":1}),flush=True)
+ sys.stdin.readline()
+print(json.dumps({"type":"result","code":"should not run"}),flush=True)
+'''
+        requests = []
+        def call(*args):
+            requests.append(args)
+            if len(requests) == 2:
+                raise ProviderRefusal("terminal refusal")
+            return "first response"
+        with self.assertRaises(ProviderRefusal) as caught:
+            self.execute(source, call)
+        self.assertEqual(len(requests), 2)
+        self.assertEqual(caught.exception.traces, [
+            {"messages": [{"role": "user", "content": "0"}], "output": "first response", "max_tokens": 1},
+            {"messages": [{"role": "user", "content": "1"}], "output": "", "max_tokens": 1, "outcome": "refusal"}])
+
+
+
     @unittest.skipUnless(os.environ.get("PILOT_DOCKER_TESTS") == "1", "Parent-controlled real Docker smoke")
     def test_docker_model_frame_then_exit_is_program_error_and_zero(self):
         source = '''import json,os,sys

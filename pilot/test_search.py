@@ -432,6 +432,23 @@ class SearchTests(unittest.TestCase):
         self.assertEqual(result["stop_reason"], "budget_exhausted")
 
     @unittest.skipUnless(importlib.util.find_spec("gepa"), "official GEPA package is not installed")
+    def test_native_gepa_terminal_refusal_is_not_retried_or_infrastructure_failure(self):
+        from pilot.runtime import ProviderRefusal
+        calls = []
+        def call(*args):
+            calls.append(args)
+            raise ProviderRefusal("Provider refused the response")
+        def evaluate(candidate, rows, capture_traces=False):
+            return {"scores": [0] * len(rows), "outputs": [""] * len(rows),
+                    "trajectories": [{}] * len(rows)}
+        with tempfile.TemporaryDirectory() as directory:
+            result = run_search("gepa", task(), call, evaluate, lambda: True, {}, 0, Path(directory), 1)
+        self.assertEqual(len(calls), 1)
+        self.assertEqual(result["candidate"], {"prompt": "seed"})
+        self.assertEqual(result["valid_proposals"], 0)
+        self.assertEqual(result["stop_reason"], "provider_refusal")
+
+    @unittest.skipUnless(importlib.util.find_spec("gepa"), "official GEPA package is not installed")
     def test_native_gepa_fatal_reflection_failure_does_not_retry_transport(self):
         for failure in (BudgetExhausted("proposer budget exhausted"), ValueError("fatal proposer failure")):
             calls = []

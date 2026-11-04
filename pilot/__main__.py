@@ -12,7 +12,7 @@ from collections import Counter
 from pathlib import Path
 
 from .runtime import (ROOT, MODEL, IMAGE, LIMITS, PRICES, PRICE_SOURCE, Gateway, Ledger,
-                      ModelCalls, Throttle, TransportError, CallFailed, append_json, canonical,
+                      ModelCalls, Throttle, TransportError, CallFailed, ProviderRefusal, RefusalNondeterminism, append_json, canonical,
                       create_pool, digest, open_gateway, pool_domains, retry_comparison)
 
 from .panel import OFFICIAL_PANEL, panel_tasks, reuse_control, validate_measurement
@@ -21,7 +21,7 @@ TASKS = OFFICIAL_PANEL
 ARCHIVED_TASKS = ("mbpp", "ifbench", "aime")
 METHODS = ("hone", "gepa", "plain")
 FROZEN_ADMISSION = ROOT / "evidence/pilot/adversarial-4a"
-AUTHORIZED_CONTROL_OUTPUT = ROOT / "evidence/pilot/controls-6"
+AUTHORIZED_CONTROL_OUTPUT = ROOT / "evidence/pilot/controls-8"
 
 
 def save(path: Path, value: object) -> None:
@@ -37,10 +37,12 @@ def evaluator_identity(task) -> dict:
     paths = ("pilot/tasks.py", "pilot/program.py", "pilot/verification.py", "pilot/adversarial.py",
              "pilot/controls.py", "pilot/runtime.py", "pilot/gateway.mjs", "pilot/__main__.py",
              "pilot/admission.py", "pilot/hover.py", "pilot/published.py", "pilot/published-controls.json",
-             "pilot/panel.py")
-    return {"contract": 6, "task": task.manifest, "evaluator_files": {path: file_hash(ROOT / path) for path in paths},
-            "predeclaration_hash": file_hash(ROOT / "evidence/pilot/predeclaration-6.md"),
-            "prior_predeclaration_hash": file_hash(ROOT / "evidence/pilot/predeclaration-5.md"),
+             "pilot/panel.py", "pilot/gateway-receipts.mjs")
+    return {"contract": 8, "task": task.manifest, "evaluator_files": {path: file_hash(ROOT / path) for path in paths},
+            "predeclaration_hash": file_hash(ROOT / "evidence/pilot/predeclaration-8.md"),
+            "prior_predeclaration_hash": file_hash(ROOT / "evidence/pilot/predeclaration-6.md"),
+            "source_transition_hash": file_hash(ROOT / "evidence/pilot/source-transition-8.json"),
+            "refusal_history_hash": file_hash(ROOT / "evidence/pilot/history-8.json"),
             "transport_correction_hash": file_hash(ROOT / "evidence/pilot/predeclaration-4a.md"),
             "route": MODEL, "decoding": {"temperature": 0, "forceReasoningOff": True, "max_output_tokens": 4096, "cacheRetention": "none"},
             "image": IMAGE}
@@ -176,6 +178,8 @@ def calibration_transport(call):
     def checked(role, messages, max_tokens):
         try:
             return call(role, messages, max_tokens)
+        except ProviderRefusal:
+            raise
         except CallFailed as error:
             raise TransportError("Calibration provider failure; no candidate score recorded") from error
     return checked
@@ -278,7 +282,7 @@ def offline_adversarial(args) -> None:
     from .hover import prepare_retrieval
     from .tasks import load_task
     if args.task != "all":
-        raise ValueError("Offline admission freezes the complete contract-6 panel")
+        raise ValueError("Offline admission freezes the complete contract-8 panel")
     if args.out.exists() and any(args.out.iterdir()):
         raise FileExistsError("Adversarial output already contains evidence")
     os.environ["NLTK_DATA"] = str((args.cache / "nltk").resolve())
@@ -288,8 +292,8 @@ def offline_adversarial(args) -> None:
     receipt = prepare_retrieval(args.cache)
     frozen = {name: representative_rows(task) for name, task in prepared.items()}
     source_cohorts_hash = frozen_hover(prepared["hover"], receipt)
-    declaration = {"version": 6, "seed": P_CONTROL_SEED,
-         "predeclaration_hash": file_hash(ROOT / "evidence/pilot/predeclaration-6.md"),
+    declaration = {"version": 8, "seed": P_CONTROL_SEED,
+         "predeclaration_hash": file_hash(ROOT / "evidence/pilot/predeclaration-8.md"),
          "source_cohorts_hash": source_cohorts_hash,
          "draw_seeds": {"mbpp": 20261104, "hover": 20261105, "ifbench": 20261106},
          "prior_ifbench_status": "invalid cohort",
@@ -305,7 +309,7 @@ def offline_adversarial(args) -> None:
     declaration["ifbench_admission_hash"] = digest(proof)
     save(args.out / "ifbench/admission.json", proof)
     save(args.out / "cohorts.json", declaration)
-    manifest = {"version": "pilot-adversarial-v6", "passed": proof["passed"], "model_calls": 0,
+    manifest = {"version": "pilot-adversarial-v8", "passed": proof["passed"], "model_calls": 0,
                 "ifbench_status": "passed" if proof["passed"] else "failed-gate",
                 "carried_tasks": ["mbpp", "hover"], "cohorts_hash": digest(declaration)}
     if not proof["passed"]:
@@ -340,7 +344,7 @@ def load_adversarial(out: Path, prepared: list) -> dict:
 
 
 def reuse_mbpp(task) -> tuple[dict, dict]:
-    from .admission import MBPP_FILES, mbpp_ast, pinned_source, validate_source_equivalence
+    from .admission import MBPP_FILES, mbpp_ast, pinned_source, transition_source, validate_source_equivalence
     from .adversarial import validate_result
     from .controls import representative_rows
     source = ROOT / "evidence/pilot/mbpp-readmission-4a"
@@ -371,7 +375,7 @@ def reuse_mbpp(task) -> tuple[dict, dict]:
             or pinned_contract != baseline["execution_contract"]
             or any("sha256:" + hashlib.sha256(pinned_source(ROOT, path).encode()).hexdigest() != expected
                    for path, expected in baseline["baseline_files"].items())
-            or file_hash(ROOT / "pilot/search.py") != baseline["baseline_files"]["pilot/search.py"]
+            or "sha256:" + hashlib.sha256(transition_source(ROOT, "pilot/search.py").encode()).hexdigest() != baseline["baseline_files"]["pilot/search.py"]
             or original != proof["identities"]["mbpp"] or control["adversarial_hash"] != digest(proof)
             or original["task"] != task.manifest or original["route"] != MODEL or original["image"] != IMAGE
             or original["decoding"] != evaluator_identity(task)["decoding"]
@@ -398,17 +402,17 @@ def load_admission(out: Path, cache: Path) -> tuple[dict, dict, dict]:
     required = {"cohorts.json", "adversarial.json", "ifbench/admission.json"} | {
         f"{name}/{filename}.json" for name in ("mbpp", "hover") for filename in ("controls", "admission")}
     if not required.issubset(members):
-        raise ValueError("Sealed contract-6 admission is incomplete")
+        raise ValueError("Sealed contract-8 admission is incomplete")
     declaration = json.loads((out / "cohorts.json").read_text())
     manifest = json.loads((out / "adversarial.json").read_text())
-    if (declaration.get("version") != 6 or declaration.get("seed") != P_CONTROL_SEED
+    if (declaration.get("version") != 8 or declaration.get("seed") != P_CONTROL_SEED
             or declaration.get("draw_seeds") != {"mbpp": 20261104, "hover": 20261105, "ifbench": 20261106}
             or declaration.get("prior_ifbench_status") != "invalid cohort"
-            or declaration.get("predeclaration_hash") != file_hash(ROOT / "evidence/pilot/predeclaration-6.md")
-            or manifest.get("version") != "pilot-adversarial-v6" or manifest.get("model_calls") != 0
+            or declaration.get("predeclaration_hash") != file_hash(ROOT / "evidence/pilot/predeclaration-8.md")
+            or manifest.get("version") != "pilot-adversarial-v8" or manifest.get("model_calls") != 0
             or manifest.get("cohorts_hash") != digest(declaration)
             or manifest.get("carried_tasks") != ["mbpp", "hover"]):
-        raise ValueError("Admission differs from predeclaration 6")
+        raise ValueError("Admission differs from predeclaration 8")
     prepared = {name: load_task(name, cache) for name in TASKS}
     expected = {name: {"rows": [row["id"] for row in representative_rows(task)],
                        "cohort_hash": digest([row["id"] for row in representative_rows(task)])}
@@ -476,7 +480,7 @@ def ifbench_status(out: Path, task, proof: dict) -> str:
 def controls(args, pool=None, env=None):
     from .controls import ControlsFailed, measure, representative_rows
     if args.out.resolve() != AUTHORIZED_CONTROL_OUTPUT.resolve():
-        raise ValueError("Contract 6 authorizes only evidence/pilot/controls-6; no replacement attempt directory")
+        raise ValueError("Contract 8 authorizes only evidence/pilot/controls-8; no replacement attempt directory")
     if args.task != "all":
         raise ValueError("Controls require the complete predeclared panel")
     if args.out.exists() and any(args.out.iterdir()):
@@ -508,6 +512,9 @@ def controls(args, pool=None, env=None):
             control = json.loads((out / "controls.json").read_text())
             save(out / "failure.json", {"error_type": type(error).__name__, "status": "admission-failed",
                  "gate": "ranking" if control.get("ranking_passed") is False else "noise"})
+        except RefusalNondeterminism as error:
+            save(out / "failure.json", {"error_type": type(error).__name__, "status": "refusal-nondeterminism"})
+            raise
         except Exception as error:
             save(out / "failure.json", {"error_type": type(error).__name__, "status": "infrastructure-failure"})
             raise
@@ -523,10 +530,10 @@ def controls(args, pool=None, env=None):
     seal(args.out)
     status = ifbench_status(args.out, prepared["ifbench"], proof)
     selected = panel_tasks(status)
-    save(args.out / "panel.json", {"version": 6, "tasks": list(selected), "all_admitted": True,
+    save(args.out / "panel.json", {"version": 8, "tasks": list(selected), "all_admitted": True,
          "ifbench_status": status, "withdrawn": ["aime"], "claim_scope": f"{len(selected)}-task development pilot",
          "cohorts_hash": digest(declaration),
-         "predeclaration_hash": file_hash(ROOT / "evidence/pilot/predeclaration-6.md")})
+         "predeclaration_hash": file_hash(ROOT / "evidence/pilot/predeclaration-8.md")})
     seal(args.out)
     print(canonical({"panel": list(selected), "ifbench_status": status, "full_pilot_authorized": False}), flush=True)
 
@@ -539,8 +546,8 @@ def load_panel(args) -> tuple[str, ...]:
     panel = json.loads((args.controls / "panel.json").read_text())
     status = ifbench_status(args.controls, prepared["ifbench"], proof)
     selected = panel_tasks(status)
-    if (panel.get("version") != 6 or panel.get("all_admitted") is not True
-            or panel.get("predeclaration_hash") != file_hash(ROOT / "evidence/pilot/predeclaration-6.md")
+    if (panel.get("version") != 8 or panel.get("all_admitted") is not True
+            or panel.get("predeclaration_hash") != file_hash(ROOT / "evidence/pilot/predeclaration-8.md")
             or panel.get("cohorts_hash") != digest(declaration) or panel.get("tasks") != list(selected)
             or panel.get("ifbench_status") != status or panel.get("withdrawn") != ["aime"]
             or panel.get("claim_scope") != f"{len(selected)}-task development pilot"):
@@ -605,12 +612,17 @@ def resume_result(out: Path, task_name: str, seed: int, method: str, error_type:
     hidden = sum(call.get("retry_observation", {}).get("hiddenAttempts", 0) for call in calls)
     result = {"task": task_name, "seed": seed, "method": method, "status": "infrastructure_failure",
               "selection_score": incumbent.get("selection_score"), "candidate_hash": digest(incumbent.get("candidate")),
-              "calls": len(calls), "tokens": sum(call["reported_tokens"] for call in calls),
+              "calls": len(calls), "tokens": sum(call.get("charged_tokens", call["reported_tokens"]) for call in calls),
+              "reported_tokens": sum(call["reported_tokens"] for call in calls),
+              "estimated_tokens": sum(call.get("estimated_tokens", 0) for call in calls),
+              "refusals": sum(call.get("outcome") == "refusal" for call in calls),
               "usd_equivalent": sum(call["usd_equivalent"] for call in calls), "hidden_attempts": hidden,
               "hidden_attempt_rate": hidden / len(calls) if calls else 0, "usage_missing_calls": sum(call.get("usage_missing", False) for call in calls),
               "failed_calls": sum(call.get("failed", call.get("status") != 200 or call.get("stop_reason") not in {"stop", "length"} or call.get("usage_missing", False)) for call in calls),
               "proposer_calls": sum(call.get("role") in {"proposer", "repair"} for call in calls),
               "stop_reason": error_type, "accounting_incomplete": True}
+    if error_type == "RefusalNondeterminism":
+        result["status"] = "refusal-nondeterminism"
     save(out / "failure.json", {"error_type": error_type, "rerun_policy": "Never rerun this cell; retain its durable usage prefix and last accepted incumbent."})
     save(out / "result.json", result)
     seal(out)
@@ -629,6 +641,10 @@ def search_one(args, pool, env, task_name: str, seed: int, method: str, smoke: b
     out.mkdir(parents=True)
     try:
         call, ledger, throttle = calls_for(pool, env, out)
+    except RefusalNondeterminism as error:
+        save(out / "failure.json", {"status": "refusal-nondeterminism", "evidence": error.evidence})
+        seal(out)
+        raise
     except Exception as error:
         return resume_result(out, task_name, seed, method, type(error).__name__)
     rollouts = 0
@@ -641,10 +657,15 @@ def search_one(args, pool, env, task_name: str, seed: int, method: str, smoke: b
         artifact_hash = digest(candidate)
         save(out / "artifacts" / (artifact_hash.removeprefix("sha256:") + ".json"), candidate)
         before = {"tokens": ledger.tokens, "usd": ledger.usd, "calls": ledger.calls}
-        result = evaluate(task, candidate, rows, call, capture_traces)
+        from .runtime import call_scope
+        partition = "training" if capture_traces or all(row["id"] in set(task.manifest["train_ids"]) for row in rows) else "selection"
+        arm = f"{partition}:{artifact_hash}"
+        with call_scope(arm=arm):
+            result = evaluate(task, candidate, rows, call, capture_traces)
         append_json(out / "evaluations.jsonl", {"artifact_hash": artifact_hash, "row_ids": [row["id"] for row in rows],
-                    "partition": "training" if capture_traces or all(row["id"] in set(task.manifest["train_ids"]) for row in rows) else "selection",
-                    "scores": result["scores"], "outputs": result["outputs"], "deployment_calls": ledger.calls - before["calls"],
+                    "partition": partition, "arm": arm,
+                    "scores": result["scores"], "outputs": result["outputs"], "refusals": result.get("refusals", []),
+                    "deployment_calls": ledger.calls - before["calls"],
                     "deployment_tokens": ledger.tokens - before["tokens"], "deployment_usd": ledger.usd - before["usd"]})
         return result
     try:
@@ -674,6 +695,12 @@ def search_one(args, pool, env, task_name: str, seed: int, method: str, smoke: b
         seal(out)
         print(canonical(summary), flush=True)
         return summary
+    except RefusalNondeterminism as error:
+        save(out / "failure.json", {"status": "refusal-nondeterminism", "evidence": error.evidence})
+        save(out / "result.json", {"task": task_name, "seed": seed, "method": method,
+             "status": "refusal-nondeterminism", **ledger.summary(throttle)})
+        seal(out)
+        raise
     except Exception as error:
         save(out / "manifest.json", {"identity": identity, "budget": LIMITS, "price_per_million": PRICES,
              "account_domains": pool_domains(pool), "failure": True})
@@ -712,13 +739,24 @@ def replay(args) -> None:
     os.environ["NLTK_DATA"] = str((args.cache / "nltk").resolve())
     evaluation_paths = sorted(args.out.rglob("evaluations.jsonl"))
     admission_manifest = args.out / "adversarial.json"
-    if admission_manifest.exists() and json.loads(admission_manifest.read_text()).get("version") == "pilot-adversarial-v6":
+    if admission_manifest.exists() and json.loads(admission_manifest.read_text()).get("version") == "pilot-adversarial-v8":
         _, _, proof = load_admission(args.out, args.cache)
         if not evaluation_paths:
             print(canonical({"replayed_ifbench_adversarial_records": len(proof["checks"]["records"]),
                              "carried_tasks": ["mbpp", "hover"], "ifbench_adversarial_passed": proof["passed"],
                              "model_calls": 0, "scored_final_tests_loaded": False}))
             return
+    if admission_manifest.exists() and json.loads(admission_manifest.read_text()).get("version") == "pilot-adversarial-v6" and not evaluation_paths:
+        from .admission import validate_source_equivalence, validate_text_admission
+        from .controls import representative_rows
+        verify_bundle(args.out)
+        task = load_task("ifbench", args.cache)
+        proof = json.loads((args.out / "ifbench/admission.json").read_text())
+        validate_source_equivalence(ROOT, proof["identity"], "ifbench")
+        validate_text_admission(proof, task, proof["identity"], representative_rows(task))
+        print(canonical({"replayed_ifbench_adversarial_records": len(proof["checks"]["records"]),
+                         "model_calls": 0, "scored_final_tests_loaded": False}))
+        return
     if admission_manifest.exists() and json.loads(admission_manifest.read_text()).get("version") == "pilot-adversarial-v5" and not evaluation_paths:
         from .admission import validate_text_admission, validate_source_equivalence
         from .controls import representative_rows
@@ -791,10 +829,26 @@ def replay(args) -> None:
         if task.manifest != manifest["identity"]["task"]:
             raise ValueError("Replay task or metric resources differ from retained evidence")
         rows = {row["id"]: row for row in task.train + task.selection}
+        call_path = evaluations.parent / "calls.jsonl"
+        call_rows = [json.loads(line) for line in call_path.read_text().splitlines()] if call_path.exists() else []
+        refusal_receipts = {(call.get("context", {}).get("arm"), call.get("row_id"))
+                            for call in call_rows if call.get("outcome") == "refusal"}
         for line in evaluations.read_text().splitlines():
             record = json.loads(line)
+            refused = record.get("refusals", [])
+            arm = (f"unchanged:{record['trial']}:{record['arm']}" if record.get("control") == "unchanged"
+                   else record.get("control", record.get("arm")))
+            if (not isinstance(refused, list) or len(set(refused)) != len(refused)
+                    or not set(refused).issubset(record["row_ids"])
+                    or any((arm, row_id) not in refusal_receipts for row_id in refused)):
+                raise ValueError("Replay refusal outcome lacks its metered row/arm receipt")
             scores = []
             for row_id, output in zip(record["row_ids"], record["outputs"], strict=True):
+                if row_id in refused:
+                    if output != "":
+                        raise ValueError("Refused rollout contains a fabricated answer")
+                    scores.append(0.0 if task.name == "mbpp" else score_output(task, rows[row_id], output))
+                    continue
                 try:
                     score = score_output(task, rows[row_id], output)
                 except ValueError:
@@ -813,8 +867,8 @@ def main():
     parser.add_argument("command", choices=("prepare", "probe", "throttle-proof", "readmit-mbpp", "adversarial", "controls", "smoke", "pilot", "verify", "replay"))
     parser.add_argument("--cache", type=Path, default=ROOT / ".pilot-cache")
     parser.add_argument("--pool", type=Path, default=ROOT / ".pilot-state/account-pool.json")
-    parser.add_argument("--controls", type=Path, default=ROOT / "evidence/pilot/controls-6")
-    parser.add_argument("--adversarial", type=Path, default=ROOT / "evidence/pilot/adversarial-6")
+    parser.add_argument("--controls", type=Path, default=ROOT / "evidence/pilot/controls-8")
+    parser.add_argument("--adversarial", type=Path, default=ROOT / "evidence/pilot/adversarial-8")
     parser.add_argument("--out", type=Path)
     parser.add_argument("--task", choices=(*TASKS, "all"), default="all")
     parser.add_argument("--seed", type=int, default=0)
@@ -822,7 +876,7 @@ def main():
     if args.out is None:
         args.out = ROOT / "evidence/pilot" / (
             "mbpp-readmission-4a" if args.command == "readmit-mbpp" else
-            "adversarial-6" if args.command == "adversarial" else "controls-6" if args.command == "controls" else "smoke-6")
+            "adversarial-8" if args.command == "adversarial" else "controls-8" if args.command == "controls" else "smoke-8")
     if args.command != "verify":
         execution_limits()
     if args.command in {"verify", "replay"}:

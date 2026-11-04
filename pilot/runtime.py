@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import hashlib
+from contextlib import contextmanager
+from contextvars import ContextVar
 import json
 import math
 import os
@@ -32,6 +34,32 @@ class TransportError(Exception):
 
 class CallFailed(TransportError):
     pass
+
+
+class ProviderRefusal(CallFailed):
+    pass
+
+
+class RefusalNondeterminism(RuntimeError):
+    def __init__(self, evidence: dict):
+        super().__init__("Identical request was both refused and answered; dispatch stopped")
+        self.evidence = evidence
+
+
+_CALL_SCOPE: ContextVar[dict] = ContextVar("pilot_call_scope", default={})
+
+
+@contextmanager
+def call_scope(**metadata):
+    token = _CALL_SCOPE.set({**_CALL_SCOPE.get(), **metadata})
+    try:
+        yield
+    finally:
+        _CALL_SCOPE.reset(token)
+
+
+def current_call_scope() -> dict:
+    return dict(_CALL_SCOPE.get())
 
 
 def canonical(value: object) -> str:
@@ -169,11 +197,83 @@ class Ledger:
     failed_calls: int = 0
     started: float = field(init=False)
     binding_cap: str | None = None
+    history_paths: list[Path] | None = None
+    reported_tokens: int = 0
+    estimated_tokens: int = 0
+    reported_usd: float = 0
+    estimated_usd: float = 0
+    refusals: int = 0
+    transport_failures: int = 0
+    refusals_by_row: dict[str, int] = field(default_factory=dict)
+    refusals_by_arm: dict[str, int] = field(default_factory=dict)
+    refusal_nondeterminism: dict | None = None
+    _outcomes: dict[str, dict[str, dict]] = field(default_factory=dict, init=False)
+    _history_offsets: dict[Path, int] = field(default_factory=dict, init=False)
+    _stop_written: bool = field(default=False, init=False)
 
     def __post_init__(self) -> None:
         self.started = self.clock()
+        self.journal = Path(self.journal)
+        marker = self.journal.parent / "refusal-nondeterminism.json"
+        if marker.is_file():
+            self.refusal_nondeterminism = json.loads(marker.read_text())
+            self._stop_written = True
+        self._refresh_history()
+
+    def _observe_outcome(self, row: dict, journal: Path) -> None:
+        outcome = row.get("outcome")
+        if outcome not in {"answered", "refusal"}:
+            if row.get("status") == 200 and row.get("stop_reason") in {"stop", "length"} and not row.get("failed", False) and not row.get("usage_missing", False):
+                outcome = "answered"
+            else:
+                return
+        request_hash = row.get("request_hash")
+        if not isinstance(request_hash, str):
+            return
+        outcomes = self._outcomes.setdefault(request_hash, {})
+        outcomes.setdefault(outcome, {"journal": str(journal), "call": row.get("call"), "outcome": outcome})
+        if len(outcomes) == 2 and self.refusal_nondeterminism is None:
+            self.refusal_nondeterminism = {"request_hash": request_hash, "outcomes": list(outcomes.values())}
+
+    def _refresh_history(self) -> None:
+        paths = self.history_paths
+        if paths is None:
+            paths = list((ROOT / "evidence" / "pilot").rglob("*calls*.jsonl"))
+        for path in dict.fromkeys([*map(Path, paths), self.journal]):
+            if not path.is_file():
+                continue
+            with path.open("rb") as stream:
+                stream.seek(self._history_offsets.get(path, 0))
+                while line := stream.readline():
+                    if not line.endswith(b"\n"):
+                        break
+                    try:
+                        row = json.loads(line)
+                    except (ValueError, UnicodeError) as error:
+                        raise TransportError("Retained call journal contains an invalid receipt") from error
+                    if not isinstance(row, dict):
+                        raise TransportError("Retained call journal contains an invalid receipt")
+                    self._observe_outcome(row, path)
+                    self._history_offsets[path] = stream.tell()
+        if self.history_paths is None:
+            diagnosis = ROOT / "evidence" / "pilot" / "diagnosis-7.json"
+            if diagnosis.is_file() and diagnosis not in self._history_offsets:
+                proof = json.loads(diagnosis.read_text())
+                for row in proof.get("failed_calls", []):
+                    if row.get("known_classification_present") is True and row.get("reason") == "error" and row.get("provider_fetch_attempts") == 1:
+                        self._observe_outcome({**row, "outcome": "refusal"}, diagnosis)
+                self._history_offsets[diagnosis] = diagnosis.stat().st_size
+
+    def _raise_if_stopped(self) -> None:
+        if self.refusal_nondeterminism is not None:
+            if not self._stop_written:
+                append_json(self.journal.parent / "refusal-nondeterminism.json", self.refusal_nondeterminism)
+                self._stop_written = True
+            raise RefusalNondeterminism(self.refusal_nondeterminism)
 
     def available(self, paused: float = 0) -> bool:
+        self._refresh_history()
+        self._raise_if_stopped()
         values = {"calls": self.calls, "proposer_calls": self.proposer_calls, "tokens": self.tokens, "usd": self.usd,
                   "active_seconds": self.clock() - self.started - paused}
         self.binding_cap = next((key for key, value in values.items() if value >= self.limits[key]), None)
@@ -182,7 +282,7 @@ class Ledger:
     def admit(self, role: str, messages: list[dict], max_tokens: int, paused: float = 0) -> None:
         if role not in {"task", "proposer", "judge", "repair"} or not 1 <= max_tokens <= 4096:
             raise ValueError("Invalid model request contract")
-        input_bound = len(canonical(messages).encode()) + 4096
+        input_bound = len(canonical(messages).encode()) + 8192
         reservation = (input_bound * max(PRICES["input"], PRICES["cacheWrite"]) + max_tokens * PRICES["output"]) / 1_000_000
         if not self.available(paused):
             raise BudgetExhausted("Reported-usage cap exhausted", self.binding_cap)
@@ -204,31 +304,94 @@ class Ledger:
         self.hidden_attempts += hidden
         self.calls_with_hidden_attempts += hidden > 0
         self.retry_log_events += logs
-        message = frame.get("body", {}).get("message", {})
+        body = frame.get("body", {})
+        message = body.get("message", {})
+        provider_receipt = body.get("providerReceipt", {})
+        refusal = provider_receipt.get("refusal", {})
+        is_refusal = refusal.get("type") == "refusal" and refusal.get("provenance") == "anthropic.message_delta.stop_details"
         usage = message.get("usage")
-        counts = {key: 0 for key in PRICES}
         usage_valid = isinstance(usage, dict) and all(type(usage.get(key)) is int and usage[key] >= 0 for key in PRICES)
-        if usage_valid:
-            counts = {key: usage[key] for key in PRICES}
-        else:
+        counts = {key: usage[key] for key in PRICES} if usage_valid else {}
+        if is_refusal:
+            reported = provider_receipt.get("reportedUsage", {})
+            if not isinstance(reported, dict) or any(key not in PRICES or type(value) is not int or value < 0 for key, value in reported.items()):
+                raise TransportError("Invalid refusal usage receipt")
+            counts = {**reported, **counts}
+            usage_valid = usage_valid or provider_receipt.get("usageComplete") is True and all(key in counts for key in PRICES)
+        if not usage_valid:
             self.usage_missing += 1
-        tokens = sum(counts.values())
-        usd = sum(counts[key] * PRICES[key] for key in PRICES) / 1_000_000
-        self.tokens += tokens
-        self.usd += usd
+        reported_tokens = sum(counts.values())
+        reported_usd = sum(value * PRICES[key] for key, value in counts.items()) / 1_000_000
+        charged_tokens, charged_usd = reported_tokens, reported_usd
+        if is_refusal:
+            count_fields = ("inputTokens", "framingAllowance", "inputTokenUpperBound", "maxOutputTokens")
+            if any(type(provider_receipt.get(key)) is not int or provider_receipt[key] < 0 for key in count_fields):
+                raise TransportError("Invalid refusal counting receipt; dispatch cannot continue")
+            if (provider_receipt["framingAllowance"] != 4096
+                    or provider_receipt["inputTokenUpperBound"] != provider_receipt["inputTokens"] + 4096
+                    or provider_receipt.get("countingMethod") != "@oh-my-pi/pi-natives:ClaudeV3:serialized-provider-json+4096"
+                    or provider_receipt["maxOutputTokens"] != request.get("options", {}).get("maxTokens")):
+                raise TransportError("Invalid refusal counting receipt; dispatch cannot continue")
+            input_bound = max(provider_receipt["inputTokenUpperBound"], sum(counts.get(key, 0) for key in ("input", "cacheRead", "cacheWrite")))
+            output_bound = max(provider_receipt["maxOutputTokens"], counts.get("output", 0))
+            if not usage_valid:
+                charged_tokens = input_bound + output_bound
+                charged_usd = (input_bound * max(PRICES["input"], PRICES["cacheWrite"]) + output_bound * PRICES["output"]) / 1_000_000
+        estimated_tokens = charged_tokens - reported_tokens
+        estimated_usd = max(0, charged_usd - reported_usd)
+        charged_usd = reported_usd + estimated_usd
+        self.reported_tokens += reported_tokens
+        self.estimated_tokens += estimated_tokens
+        self.reported_usd += reported_usd
+        self.estimated_usd += estimated_usd
+        self.tokens += charged_tokens
+        self.usd += charged_usd
         text = "".join(block.get("text", "") for block in message.get("content", []) if block.get("type") == "text")
-        failed = frame.get("status") != 200 or message.get("stopReason") not in {"stop", "length"} or not usage_valid
+        failed = is_refusal or frame.get("status") != 200 or message.get("stopReason") not in {"stop", "length"} or not usage_valid
+        outcome = "refusal" if is_refusal else "transport_failure" if failed else "answered"
         self.failed_calls += failed
-        append_json(self.journal, {"call": self.calls, "role": role, "model": MODEL, "request_hash": digest(request), "response_hash": digest(text), "status": frame.get("status"), "stop_reason": message.get("stopReason"), "reported_usage": counts, "reported_tokens": tokens, "usd_equivalent": usd, "seconds": seconds, "retry_observation": observation, "usage_missing": not usage_valid, "failed": failed})
+        self.refusals += is_refusal
+        self.transport_failures += failed and not is_refusal
+        context = {"row_id": None, **current_call_scope()}
+        if is_refusal:
+            row_id = context["row_id"] if context["row_id"] is not None else "no-row"
+            arm = context.get("arm", "no-arm")
+            self.refusals_by_row[row_id] = self.refusals_by_row.get(row_id, 0) + 1
+            self.refusals_by_arm[arm] = self.refusals_by_arm.get(arm, 0) + 1
+        row = {"call": self.calls, "role": role, "model": MODEL, "context": context, "row_id": context["row_id"],
+               "request_hash": digest(request), "response_hash": digest("" if is_refusal else text), "outcome": outcome,
+               "status": frame.get("status"), "stop_reason": "refusal" if is_refusal else message.get("stopReason"),
+               "reported_usage": counts, "reported_tokens": reported_tokens, "estimated_tokens": estimated_tokens,
+               "charged_tokens": charged_tokens, "usage_estimated": bool(estimated_tokens or estimated_usd),
+               "reported_usd_equivalent": reported_usd, "estimated_usd_equivalent": estimated_usd,
+               "usd_equivalent": charged_usd, "seconds": seconds, "retry_observation": observation,
+               "usage_missing": not usage_valid, "failed": failed}
+        if is_refusal:
+            row["refusal"] = {key: refusal.get(key) for key in ("type", "category", "provenance")}
+            row["refusal_counting"] = {key: provider_receipt[key] for key in (*count_fields, "countingMethod")}
+            row["refusal_counting"].update(chargedInputUpperBound=input_bound, chargedOutputUpperBound=output_bound)
+        self._refresh_history()
+        self._observe_outcome(row, self.journal)
+        if self.refusal_nondeterminism is not None:
+            row["refusal_nondeterminism"] = self.refusal_nondeterminism
+        append_json(self.journal, row)
+        self._raise_if_stopped()
+        if is_refusal:
+            raise ProviderRefusal("Terminal provider refusal; no retry permitted")
         if failed:
-            raise CallFailed("Provider call failed; only reported usage charged")
+            raise CallFailed("Provider call failed; unreported usage remains unknown")
         self.proposer_success_calls += role in {"proposer", "repair"}
         return text
 
     def summary(self, throttle: Throttle) -> dict:
         wall = self.clock() - self.started
         rate = self.hidden_attempts / self.calls if self.calls else 0
-        result = {"proposer_success_calls": self.proposer_success_calls, "failed_calls": self.failed_calls}
+        result = {"proposer_success_calls": self.proposer_success_calls, "failed_calls": self.failed_calls,
+                  "reported_tokens": self.reported_tokens, "estimated_tokens": self.estimated_tokens,
+                  "reported_usd_equivalent": self.reported_usd, "estimated_usd_equivalent": self.estimated_usd,
+                  "refusals": self.refusals, "transport_failures": self.transport_failures,
+                  "refusals_by_row": dict(self.refusals_by_row), "refusals_by_arm": dict(self.refusals_by_arm),
+                  "refusal_nondeterminism": self.refusal_nondeterminism}
         result.update({"calls": self.calls, "proposer_calls": self.proposer_calls, "tokens": self.tokens, "usd_equivalent": self.usd, "wall_seconds": wall, "active_seconds": max(0, wall - throttle.accounted_seconds), "pauses": throttle.pauses, "pause_seconds": throttle.paused_seconds, "throttle_seconds": throttle.accounted_seconds, "poll_seconds": max(0, throttle.accounted_seconds - throttle.paused_seconds), "binding_cap": self.binding_cap, "hidden_attempts": self.hidden_attempts, "calls_with_hidden_attempts": self.calls_with_hidden_attempts, "hidden_attempt_rate": rate, "retry_log_events": self.retry_log_events, "usage_missing_calls": self.usage_missing, "retry_rate_flag": rate > 0.01})
         return result
 
@@ -331,6 +494,8 @@ class ModelCalls:
                 frame = {"status": 599, "body": {}}
             try:
                 return self.ledger.settle(role, body, frame, time.monotonic() - started)
+            except ProviderRefusal:
+                raise
             except CallFailed:
                 if broker_healthy(self.throttle.env):
                     healthy_failures += 1
@@ -346,4 +511,4 @@ class ModelCalls:
 def retry_comparison(summaries: dict[str, dict]) -> dict:
     rates = {method: summary["hidden_attempt_rate"] for method, summary in summaries.items()}
     spread = max(rates.values()) - min(rates.values()) if rates else 0
-    return {"rates": rates, "spread": spread, "flagged": spread > 0.01 or any(rate > 0.01 for rate in rates.values()), "limit": "Reported tokens omit internal failed-attempt tokens and non-200 calls whose usage omp does not return. Failed calls are counted, but their unreported token volume is unknown. Observed HTTP attempts and retry logs measure retry incidence, not omitted tokens. Credential-opaque per-attempt and failed-call usage receipts are required before the full matrix."}
+    return {"rates": rates, "spread": spread, "flagged": spread > 0.01 or any(rate > 0.01 for rate in rates.values()), "limit": "Reported usage remains distinct from charged totals, which include labelled conservative estimates for unknown refusal usage. Internal failed-attempt tokens and unreported non-refusal failure tokens remain unknown. Observed HTTP attempts and retry logs measure incidence, not omitted tokens. Credential-opaque per-attempt and failed-call usage receipts remain required before the full matrix."}

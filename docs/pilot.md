@@ -1,8 +1,8 @@
 # Development optimizer pilot
 
-[Diagnosis 7](../evidence/pilot/diagnosis-7.json) identifies both contract-6 failures as terminal Anthropic `Refusal (general_harms)` responses. Installed omp's local stdio gateway synthesized status 502; the logs do not establish a DNS or broker outage. The frozen `controls-6` infrastructure-failure label and all raw evidence remain unchanged. Only the naive control completed, so there is no contrast, noise calibration, admitted complete panel or selected fallback.
+[Predeclaration 8](../evidence/pilot/predeclaration-8.md) records the gate owner's terminal-refusal ruling before new pilot calls. A provider-classified non-retryable refusal ends the current rollout with empty output and score zero, identically for every method, control and seed. Refusals are never retried. A request hash that is both refused and answered stops dispatch immediately and selects neither a panel nor a fallback.
 
-[Predeclaration 7](../evidence/pilot/predeclaration-7.md), committed before any new pilot calls, records the gate owner's approval of at most two additional identical-contract attempts after infrastructure aborts. It does not reclassify terminal refusals as outages or authorize scoring them zero. No new attempt has started. Terminal-refusal treatment requires a gate-owner decision before dispatch. No broker, gateway or system configuration changed, and no upstream issue was filed. [Predeclaration 6](../evidence/pilot/predeclaration-6.md) still defines the measurement rules and preserves MBPP and HoVer admissions and all earlier [invalid-cohort IFBench evidence](../evidence/pilot/invalid-ifbench-cohorts-6.json).
+[Diagnosis 7](../evidence/pilot/diagnosis-7.json) traced the two earlier apparent 502 failures to terminal provider refusals. Their original `controls-6` receipts and infrastructure-failure label remain unchanged. [Predeclaration 7](../evidence/pilot/predeclaration-7.md) still governs genuine infrastructure-only retries. [Predeclaration 6](../evidence/pilot/predeclaration-6.md) still fixes the cohort, controls and gates. MBPP and HoVer admissions stand after exact-source transition checks, archived all-success call checks and score replay. No installed omp, broker or system configuration changed.
 
 The pilot decides whether Hone's proposed search policy warrants a larger comparison. It does not support a public optimizer-quality claim. It compares Hone, pinned official GEPA, and a plain agent loop with the same current subscription model and reported-usage budget.
 
@@ -32,14 +32,16 @@ Auth and usage child processes receive only an explicit allowlist of home, execu
 
 ## Admit the evaluator before search
 
-The following commands describe the completed contract-6 attempt. Its output directories already contain sealed evidence and must not be overwritten or restarted. Predeclaration 7 reserves new evidence directories but dispatch is blocked on the terminal-refusal decision.
+Contract 8 uses fresh evidence directories. Never overwrite or restart a directory that already contains evidence. The offline command performs no model calls. The controls command consumes the one replacement attempt authorized by predeclaration 8 and reuses the unchanged IFBench cohort and gates.
 
 ```sh
-nice -n 10 taskset -c 6 env OPENBLAS_NUM_THREADS=1 OMP_NUM_THREADS=1 MKL_NUM_THREADS=1 JAX_PLATFORMS=cpu pilot/.venv/bin/python -m pilot adversarial --out evidence/pilot/adversarial-6
-nice -n 10 taskset -c 6 env OPENBLAS_NUM_THREADS=1 OMP_NUM_THREADS=1 MKL_NUM_THREADS=1 JAX_PLATFORMS=cpu pilot/.venv/bin/python -m pilot controls --adversarial evidence/pilot/adversarial-6 --out evidence/pilot/controls-6
+nice -n 10 taskset -c 6 env OPENBLAS_NUM_THREADS=1 OMP_NUM_THREADS=1 MKL_NUM_THREADS=1 JAX_PLATFORMS=cpu pilot/.venv/bin/python -m pilot adversarial --out evidence/pilot/adversarial-8
+nice -n 10 taskset -c 6 env OPENBLAS_NUM_THREADS=1 OMP_NUM_THREADS=1 MKL_NUM_THREADS=1 JAX_PLATFORMS=cpu pilot/.venv/bin/python -m pilot controls --adversarial evidence/pilot/adversarial-8 --out evidence/pilot/controls-8
 ```
 
-The first command carries MBPP and HoVer forward without model calls after sealed-evidence and task-specific source equivalence checks. It runs IFBench checker/protocol attacks outside candidate control before auth. The second command measures IFBench once on its corrected official partition. Calibration provider errors abort as infrastructure failures, never zero scores or measured gate failures.
+The first command carries MBPP and HoVer forward without model calls after sealed-evidence and exact old/new source checks. It runs IFBench checker/protocol attacks outside candidate control before auth. The second command measures IFBench once. Terminal refusals are zero-score task responses; transport errors remain infrastructure failures, never candidate scores or measured gate failures. Both the transport and official GEPA reflection bridge prevent refusal redispatch.
+
+Refusal receipts expose only category, request hash, role and row/arm context. A cloned provider stream supplies structured terminal evidence; model text and generic 502 messages cannot classify refusals. Caller metadata never enters task requests. Reported usage stays separate from estimated charges. Unknown refusal usage uses offline Claude-v3 counting of the provider JSON, a 4096-token input allowance, and the full requested output maximum. Charged totals enforce the shared budget. Before dispatch, a separate conservative reservation covers caller bytes, native framing and maximum output. [The source audit](../evidence/pilot/source-audit-8.json) records failing-before regressions, the offline native-router exercise and unchanged successful-path proposer requests for all three methods.
 
 MBPP re-admission is accepted only after 660 successful task calls, nonempty naive/noise outputs and a complete offline score replay. The sealed `audit.json` binds these checks to the control, call and evaluation files. This rejects a silent Docker outage that could fake zero noise. Reuse also requires every consumed score and audit file to be listed in the completed seal. Startup failures are retained; no automatic restart is authorized. Smoke and pilot enforce CPU 6 themselves, not only through the documented shell prefix.
 
@@ -47,7 +49,7 @@ IFBench takes `Random(1).sample(source_rows[300:600], 150)`, then freezes a 40-r
 
 Admission requires known-improved > naive > both broken and shortcut, with broken = 0 and MBPP shortcut = 0. P positives execute published optimized instructions, not trusted answers or a prompt authored here. Sixteen fresh paired unchanged-seed trials measure noise without response caching. Keep `noiseFloor = 3/sqrt(2)*s` and `noiseEnvelope = max(4.5/sqrt(2)*s, max_abs_delta)`. The envelope must be strictly below the positive-control contrast. Projection uses `sqrt(source_rows/n)`: 40 for P and 20 for MBPP. An IFBench checker, headroom, ranking or noise failure selects MBPP + HoVer, labelled a two-task development pilot, without retuning or substitution. Zero estimated noise is not proof of a noiseless evaluator.
 
-A failed control command preserves its evidence and refuses to overwrite that output folder. The current runner authorizes only `evidence/pilot/controls-6`; no new retry dispatch path has been implemented while the refusal boundary is unresolved. Predeclaration 7 reserves `controls-7a` and, only after another infrastructure abort, `controls-7b`. No allowance is consumed by the diagnosis. A completed IFBench checker, headroom, ranking or noise failure selects MBPP + HoVer. Missing or infrastructure-aborted measurements never select that fallback.
+A failed control command preserves its evidence and refuses to overwrite that folder. The current runner authorizes only `evidence/pilot/controls-8`. No automatic restart is introduced. Genuine infrastructure aborts retain predeclaration 7's bounded retry allowance; a refusal or completed gate result cannot use it. A completed IFBench checker, headroom, ranking or noise failure selects MBPP + HoVer. Missing results and refusal nondeterminism do not.
 
 ## Published P controls
 
@@ -156,18 +158,18 @@ Replay first verifies the bundle hashes and task-resource identities, then runs 
 
 `prepare`, `probe`, and `throttle-proof` regenerate the machine/task manifests, real route check, no-account/environment-fallback rejection check, and forced-high/outage pause proof. Current route evidence is `route-proof-v4`; earlier route, preparation and throttle directories carry explicit superseded status files. `aborted-controls-v1` remains inadmissible measurement evidence, not a passing control run.
 
-## Contract-6 terminal result and prospective plan
+## Historical contract-6 result and prospective plan
 
-IFBench's corrected official 150-row training partition and 300-row selection set passed zero-model protocol checks. The one 40-row control attempt then infrastructure-aborted during the improved control. The completed naive mean was 0.841667. Reported totals were 128 calls, 141,064 tokens, $1.160328-equivalent and 1,365.35 seconds of ledger wall time. Calls 127 and 128 returned HTTP 502 with no reported usage; their omitted token volume is unknown. They are not zero-cost successes. Observed hidden attempts were zero. A stale-account-usage pause lasted 254.49 seconds.
+The contract-6 runner labelled the corrected IFBench attempt infrastructure-failure during the improved control. Diagnosis 7 later identified terminal refusals behind both local 502 statuses. The completed naive mean was 0.841667. Frozen totals remain 128 calls, 141,064 reported tokens, $1.160328-equivalent and 1,365.35 seconds of ledger wall time. Calls 127 and 128 lacked usage in Hone's receipts; their omitted volume remains unknown and is not retroactively charged or scored. Hidden attempts were zero. A stale-account-usage pause lasted 254.49 seconds.
 
-Call 128 was the single allowed externally metered transport retry of call 127. The control attempt itself was never restarted. These two external failures are distinct from omp's observed internal hidden-attempt count, which was zero.
+Call 128 was the then-frozen runner's single externally metered retry of call 127. The attempt itself was never restarted. Contract 8 prohibits retrying these terminal refusals. These external invocations remain distinct from omp's observed internal hidden-attempt count, which was zero.
 
-The protected runner retained the abort rather than recording a candidate zero, choosing a smaller panel or restarting. MBPP and HoVer admissions stand, but this infrastructure result does not activate the measured-gate-failure fallback.
+The earlier runner retained its abort rather than inventing a score or fallback. That frozen infrastructure label does not establish an outage or activate a measured-gate-failure fallback.
 
 [The replayable run-plan report](../evidence/pilot/run-plan-6.json) preserves actual calibration per task and per-method smoke phase spend. Regenerate it without model calls:
 
 ```sh
-nice -n 10 taskset -c 6 pilot/.venv/bin/python -m pilot.run_plan --controls evidence/pilot/controls-6 --out evidence/pilot/run-plan-6.json
+nice -n 10 taskset -c 6 pilot/.venv/bin/python -m pilot.run_plan --controls evidence/pilot/controls-6 --out .pilot-state/run-plan-6-replay.json
 ```
 
 The prospective MBPP + HoVer 18-cell estimate is 27.53 million reported tokens and 63.77 serial wall-hours, including 0.49 hours of measured retained-admission setup. Its components are 33.76 active hours, 29.47 usage-polling hours, 0.048 hours of observed-rate pauses and the setup estimate. It is not selected, admitted as a complete panel or authorized. MBPP projections use each method's actual smoke; HoVer uses task-calibration ratios, not invented method-search results. Future proposer frequency and candidate deployment costs are uncertain.

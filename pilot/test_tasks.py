@@ -23,6 +23,7 @@ class TaskTests(unittest.TestCase):
                                       kwargs=[{"min_words": 1, "max_words": 1}, {"min_words": 2, "max_words": 2}])
             result = metric(example, SimpleNamespace(response="This is a long preamble.\nalpha\nThis is a long ending."))
             self.assertEqual(result.score, 0.5)
+            self.assertEqual(metric(example, SimpleNamespace(response="")).score, 0.0)
 
     def task(self):
         row = {"id": "dev:1", "input": "Compute something", "answer": "42", "solution": "protected reasoning"}
@@ -214,6 +215,77 @@ class TaskTests(unittest.TestCase):
         for rows, capture in (([dict(train, id="outside")], False), ([selection], True)):
             with self.subTest(capture=capture), self.assertRaises(ValueError):
                 tasks.evaluate(task, seed, rows, lambda *args: self.fail("called"), capture)
+
+    def test_ifbench_refusal_ends_either_stage_and_scores_empty_response(self):
+        from pilot.runtime import ProviderRefusal, call_scope, current_call_scope
+        row = {"id": "if:refused", "input": "Say alpha", "instruction_id_list": [], "kwargs": []}
+        seed = {"prompt": "generate", "revision_prompt": "revise"}
+        task = tasks.Task("ifbench", [row], [], {}, seed)
+        for refused_stage in (0, 1):
+            requests, checked, contexts = [], [], []
+            def call(role, messages, tokens):
+                requests.append(messages)
+                contexts.append(current_call_scope())
+                if len(requests) == refused_stage + 1:
+                    raise ProviderRefusal("terminal refusal")
+                return '{"reasoning":"","response":"alpha"}'
+            def metric(example, prediction):
+                checked.append(prediction.response)
+                return SimpleNamespace(score=float(prediction.response == "alpha"), feedback="checked")
+            with patch.dict(tasks._METRICS, {id(task.manifest): metric}), call_scope(arm="naive"):
+                result = tasks.evaluate(task, seed, [row], call, True)
+            self.assertEqual(len(requests), refused_stage + 1)
+            self.assertEqual(checked, [""])
+            self.assertEqual(result["scores"], [0.0])
+            self.assertEqual(result["outputs"], [""])
+            self.assertEqual(result["refusals"], [row["id"]])
+            self.assertEqual(result["refusals_by_row"], {row["id"]: 1})
+            self.assertTrue(all(context["row_id"] == row["id"] and context["task"] == "ifbench"
+                                and context["arm"] == "naive" for context in contexts))
+            trace = result["trajectories"][0]
+            self.assertEqual(trace["outcome"], "refusal")
+            self.assertEqual(trace["calls"][-1]["outcome"], "refusal")
+            self.assertEqual(trace["calls"][-1]["output"], "")
+            self.assertNotIn("if:refused", json.dumps(requests))
+
+    def test_refusal_nondeterminism_is_never_scored_as_candidate_failure(self):
+        from pilot.runtime import RefusalNondeterminism
+        task = self.task()
+        def stop(*args):
+            raise RefusalNondeterminism("conflicting outcomes")
+        with self.assertRaises(RefusalNondeterminism):
+            tasks.evaluate(task, task.seed_candidate, task.train, stop)
+
+    def test_call_scope_metadata_does_not_change_model_requests(self):
+        from pilot.runtime import call_scope, current_call_scope
+        task = self.task()
+        requests, contexts = [], []
+        def call(role, messages, tokens):
+            requests.append((role, messages, tokens))
+            contexts.append(current_call_scope())
+            return '{"reasoning":"","answer":"42"}'
+        for arm in ("naive", "unchanged:3:second"):
+            with call_scope(arm=arm):
+                result = tasks.evaluate(task, task.seed_candidate, task.train, call)
+            self.assertEqual(result["scores"], [1.0])
+        self.assertEqual(requests[0], requests[1])
+        self.assertNotEqual(contexts[0]["arm"], contexts[1]["arm"])
+
+    def test_refused_mbpp_program_is_zero_with_no_solution_worker(self):
+        from pilot.runtime import ProviderRefusal
+        row = {"id": "mbpp:refused", "input": "Solve"}
+        seed = {"prompt": "solve", "program": "bounded candidate"}
+        task = tasks.Task("mbpp", [row], [], {}, seed)
+        refusal = ProviderRefusal("terminal refusal")
+        refusal.traces = [{"messages": [], "output": "", "max_tokens": 1, "outcome": "refusal"}]
+        with patch.object(tasks, "run_program", side_effect=refusal), patch.object(
+            tasks, "score_solution", side_effect=AssertionError("Refusal ran solution worker")
+        ):
+            result = tasks.evaluate(task, seed, [row], lambda *args: self.fail("called"), True)
+        self.assertEqual(result["scores"], [0.0])
+        self.assertEqual(result["outputs"], [""])
+        self.assertEqual(result["trajectories"][0]["calls"], refusal.traces)
+        self.assertEqual(result["trajectories"][0]["outcome"], "refusal")
 
     def test_signature_adaptation_never_exposes_body(self):
         source = "def wanted(a, b=2):\n    secret_reference = 999\n    return a + b\n"

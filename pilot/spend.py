@@ -54,8 +54,14 @@ def _dollars(value: object, label: str) -> float:
 
 
 def _totals(calls: list[dict]) -> dict:
-    return {"calls": len(calls), "tokens": sum(call["reported_tokens"] for call in calls),
-            "usd_equivalent": math.fsum(call["usd_equivalent"] for call in calls)}
+    charged = sum(call["charged_tokens"] for call in calls)
+    return {"calls": len(calls), "tokens": charged, "charged_tokens": charged,
+            "reported_tokens": sum(call["reported_tokens"] for call in calls),
+            "estimated_tokens": sum(call["estimated_tokens"] for call in calls),
+            "usd_equivalent": math.fsum(call["usd_equivalent"] for call in calls),
+            "reported_usd_equivalent": math.fsum(call["reported_usd_equivalent"] for call in calls),
+            "estimated_usd_equivalent": math.fsum(call["estimated_usd_equivalent"] for call in calls),
+            "refusals": sum(call.get("outcome") == "refusal" for call in calls)}
 
 
 def _same_dollars(left: float, right: float) -> bool:
@@ -63,7 +69,7 @@ def _same_dollars(left: float, right: float) -> bool:
 
 
 def report_spend(run_root: Path) -> dict:
-    """Reconcile durable search journals without estimating unreported usage.
+    """Reconcile durable search journals, separating reported usage from estimates.
 
     Evaluations record partition, not a search phase or absolute call offsets.
     Their deployment spans consume task and judge calls in ledger order, including
@@ -75,6 +81,8 @@ def report_spend(run_root: Path) -> dict:
     issues.extend(evaluation_issues)
     assigned = {name: [] for name in BUCKETS}
     by_role = {}
+    by_row, by_arm = {}, {}
+    unbounded_missing = 0
     deployment = []
     hidden = affected = logs = missing = failed = observation_missing = 0
     unassigned = []
@@ -86,9 +94,24 @@ def report_spend(run_root: Path) -> dict:
             raise ValueError(f"calls.jsonl:{number}: missing role")
         _integer(call.get("reported_tokens"), f"call {number} reported_tokens")
         _dollars(call.get("usd_equivalent"), f"call {number} usd_equivalent")
+        call["charged_tokens"] = _integer(call.get("charged_tokens", call["reported_tokens"]), f"call {number} charged_tokens")
+        call["estimated_tokens"] = _integer(call.get("estimated_tokens", 0), f"call {number} estimated_tokens")
+        call["reported_usd_equivalent"] = _dollars(call.get("reported_usd_equivalent", call["usd_equivalent"]), f"call {number} reported_usd_equivalent")
+        call["estimated_usd_equivalent"] = _dollars(call.get("estimated_usd_equivalent", 0), f"call {number} estimated_usd_equivalent")
+        estimated = call.get("usage_estimated", False)
+        if type(estimated) is not bool or estimated != (call["estimated_tokens"] > 0 or call["estimated_usd_equivalent"] > 0):
+            raise ValueError(f"call {number}: invalid usage_estimated")
+        if (call["charged_tokens"] != call["reported_tokens"] + call["estimated_tokens"]
+                or not _same_dollars(call["usd_equivalent"], call["reported_usd_equivalent"] + call["estimated_usd_equivalent"])):
+            raise ValueError(f"call {number}: charged usage does not reconcile")
         for flag in ("failed", "usage_missing"):
             if type(call.get(flag)) is not bool:
                 raise ValueError(f"call {number}: invalid {flag}")
+        outcome = call.get("outcome")
+        if outcome is not None and (not isinstance(outcome, str)
+                                    or outcome not in {"answered", "refusal", "transport_failure"}
+                                    or call["failed"] != (outcome != "answered")):
+            raise ValueError(f"call {number}: outcome and failure disagree")
         observation = call.get("retry_observation")
         if not isinstance(observation, dict):
             raise ValueError(f"call {number}: invalid retry_observation")
@@ -99,6 +122,16 @@ def report_spend(run_root: Path) -> dict:
         observation_missing += "hiddenAttempts" not in observation
         missing += call["usage_missing"]
         failed += call["failed"]
+        unbounded_missing += call["usage_missing"] and not estimated
+        context = call.get("context", {})
+        if not isinstance(context, dict):
+            raise ValueError(f"call {number}: invalid context")
+        for field, groups, absent in (("row_id", by_row, "<no-row>"), ("arm", by_arm, "<no-arm>")):
+            value = context.get(field, call.get(field))
+            if value is not None and (not isinstance(value, str) or not value):
+                raise ValueError(f"call {number}: invalid {field}")
+            if field in context or field in call:
+                groups.setdefault(value if value is not None else absent, []).append(call)
         by_role.setdefault(role, []).append(call)
         if role in PROPOSAL_ROLES:
             assigned["proposal"].append(call)
@@ -138,11 +171,13 @@ def report_spend(run_root: Path) -> dict:
         issues.append({"reason": "no_calls"})
     if not evaluations:
         issues.append({"reason": "no_evaluations"})
-    if missing:
-        issues.append({"reason": "missing_reported_usage", "calls": missing})
+    if unbounded_missing:
+        issues.append({"reason": "missing_reported_usage", "calls": unbounded_missing})
 
     buckets = {name: _totals(records) for name, records in assigned.items()}
     total = _totals(calls)
+    row_totals = {row: _totals(records) for row, records in by_row.items()}
+    arm_totals = {arm: _totals(records) for arm, records in by_arm.items()}
     if (sum(bucket["calls"] for bucket in buckets.values()) != total["calls"]
             or sum(bucket["tokens"] for bucket in buckets.values()) != total["tokens"]
             or not _same_dollars(math.fsum(bucket["usd_equivalent"] for bucket in buckets.values()), total["usd_equivalent"])):
@@ -150,6 +185,11 @@ def report_spend(run_root: Path) -> dict:
     return {"schema": "pilot-spend-v1", "status": "incomplete" if issues else "complete",
             "reporter_sha256": _hash(Path(__file__).read_bytes()),
             "buckets": buckets, "total": total, "by_role": {role: _totals(records) for role, records in by_role.items()},
+            "by_row": row_totals, "by_arm": arm_totals,
+            "refusals": total["refusals"],
+            "refusals_by_row": {row: usage["refusals"] for row, usage in row_totals.items() if usage["refusals"]},
+            "refusals_by_arm": {arm: usage["refusals"] for arm, usage in arm_totals.items() if usage["refusals"]},
+            "transport_failures": sum(call["failed"] and call.get("outcome") != "refusal" for call in calls),
             "hidden_attempts": hidden, "calls_with_hidden_attempts": affected,
             "hidden_attempt_rate": hidden / len(calls) if calls else 0,
             "retry_log_events": logs, "retry_observation_missing_calls": observation_missing,
@@ -157,4 +197,4 @@ def report_spend(run_root: Path) -> dict:
             "evaluation_spans": spans, "unassigned_calls": sorted(unassigned, key=lambda call: call["call"]),
             "issues": issues, "input_hashes": {"calls.jsonl": calls_hash, "evaluations.jsonl": evaluations_hash},
             "usd_tolerance": {"absolute": USD_ABS_TOLERANCE, "relative": USD_REL_TOLERANCE},
-            "usage_limit": "Only ledger-reported tokens and dollar equivalents are summed. Internal failed-attempt usage and missing provider usage are unknown. Totals exclude undecodable journal tails and absent records; input hashes and issues retain that boundary. Completed evaluation spans are reconstructed in order, not independently timestamped."}
+            "usage_limit": "Charged totals include reported usage plus explicitly labelled conservative estimates from the ledger; reported usage is never replaced with estimates. Internal failed-attempt usage remains unknown. Totals exclude undecodable journal tails and absent records; input hashes and issues retain that boundary. Completed evaluation spans are reconstructed in order, not independently timestamped."}

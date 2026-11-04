@@ -35,13 +35,16 @@ def validate_measurement(local, task, identity, proof, *, allow_failure=False):
               "draw_seed": seed, "excluded_prior_mbpp_rows": sorted(PREVIOUS_MBPP_ROWS) if task.name == "mbpp" else [],
               "seed_artifact_hash": cli.digest(task.seed_candidate), "cohort_hash": cli.digest(ids)}
     declaration = load("controls-declaration.json")
+    dynamic = {"refusals", "refusals_by_row", "refusals_by_arm"} if identity.get("contract") == 8 else set()
     if (control.get("task") != task.name or control.get("identity") != identity
             or control.get("rows") != ids or control.get("adversarial_hash") != cli.digest(proof)
             or control.get("artifacts") != artifacts(task) or control.get("noise_design") != design
-            or any(control.get(key) != value for key, value in declaration.items())
+            or any(control.get(key) != value for key, value in declaration.items() if key not in dynamic)
             or declaration.get("identity") != identity or declaration.get("rows") != ids
             or load("manifest.json").get("identity") != identity):
         raise ValueError("Control identity, artifacts, declaration or frozen cohort changed")
+    if dynamic and any(declaration.get(key) != (0 if key == "refusals" else {}) for key in dynamic):
+        raise ValueError("Refusal counters must start empty in the frozen declaration")
     evaluations = [json.loads(line) for line in (local / "evaluations.jsonl").read_text().splitlines()]
     records = {}
     for record in evaluations:
@@ -51,11 +54,35 @@ def validate_measurement(local, task, identity, proof, *, allow_failure=False):
                 or record["scores"] != [score_output(task, row, output) for row, output in zip(rows, record["outputs"], strict=True)]):
             raise ValueError("Raw control outputs, scores or cohort disagree")
         records[key] = record
+    if dynamic:
+        from collections import Counter
+        by_arm, by_row, measured_refusals = {}, Counter(), Counter()
+        for record in evaluations:
+            arm = (f"unchanged:{record['trial']}:{record['arm']}"
+                   if record["control"] == "unchanged" else record["control"])
+            refused = record.get("refusals", [])
+            if (not isinstance(refused, list) or len(set(refused)) != len(refused)
+                    or not set(refused).issubset(ids)
+                    or any(output != "" or score != 0 for row_id, output, score in
+                           zip(ids, record["outputs"], record["scores"], strict=True) if row_id in refused)):
+                raise ValueError("Refused rows must have empty outputs and zero scores")
+            by_arm[arm] = len(refused)
+            by_row.update(refused)
+            measured_refusals.update((arm, row_id) for row_id in refused)
+        calls = [json.loads(line) for line in (local / "calls.jsonl").read_text().splitlines()]
+        metered_refusals = Counter((call.get("context", {}).get("arm"), call.get("row_id"))
+                                  for call in calls if call.get("outcome") == "refusal")
+        if (measured_refusals != metered_refusals or control.get("refusals") != sum(by_arm.values())
+                or control.get("refusals_by_arm") != by_arm or control.get("refusals_by_row") != dict(by_row)):
+            raise ValueError("Refusal summaries disagree with row outcomes or metered receipts")
     means = {}
     for name, measured in control["controls"].items():
         raw = records.get(name)
         if raw is None or any(measured[field] != raw[field] for field in ("scores", "outputs")) or measured["mean"] != statistics.fmean(raw["scores"]):
             raise ValueError("Control summary differs from raw evaluations")
+        if dynamic and (measured.get("refusals") != len(raw.get("refusals", []))
+                        or measured.get("refusals_by_row") != dict(Counter(raw.get("refusals", [])))):
+            raise ValueError("Control refusal summary differs from raw row outcomes")
         means[name] = measured["mean"]
     if task.name == "ifbench" and means.get("naive", -1) >= .90:
         if not allow_failure or set(records) != {"naive"} or set(means) != {"naive"}:
@@ -137,7 +164,7 @@ def reuse_control(task) -> tuple[dict, dict]:
         validate_measurement(local, task, original, proof)
         origin = {"source_control_hash": cli.digest(control), "source_adversarial_hash": cli.digest(proof)}
     scope = validate_source_equivalence(cli.ROOT, control["identity"], task.name)
-    return control, {"kind": "retained-" + task.name + "-admission-v6", "source": "evidence/pilot/controls-5",
+    return control, {"kind": "retained-" + task.name + "-admission-v8", "source": "evidence/pilot/controls-5",
                      "source_bundle_hash": json.loads((source / "bundle.json").read_text())["bundle_hash"],
                      "original_admission": origin, "source_equivalence": scope,
                      "current_identity": cli.evaluator_identity(task), "controls_rerun": False, "model_calls": 0}

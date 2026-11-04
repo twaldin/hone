@@ -139,6 +139,42 @@ class ControlTests(unittest.TestCase):
                     self.assertTrue(result["noise_passed"])
                     self.assertGreater(improved_calls, 0)
 
+    def test_refusals_are_measured_zero_and_counted_by_real_row_and_arm(self):
+        from pilot.runtime import ProviderRefusal, current_call_scope
+        task = self.task()
+        provider = self.provider()
+        observed = []
+        refused_row = representative_rows(task)[0]["id"]
+        def call(role, messages, tokens):
+            context = current_call_scope()
+            observed.append(context)
+            response = provider(role, messages, tokens)
+            if context["row_id"] == refused_row:
+                raise ProviderRefusal("terminal refusal")
+            return response
+        with tempfile.TemporaryDirectory() as directory:
+            out = Path(directory)
+            result = self.measure(task, call, out, {})
+            records = [json.loads(line) for line in (out / "evaluations.jsonl").read_text().splitlines()]
+        self.assertEqual(result["refusals"], 34)
+        self.assertEqual(result["refusals_by_row"], {refused_row: 34})
+        self.assertEqual(result["refusals_by_arm"]["naive"], 1)
+        self.assertEqual(result["refusals_by_arm"]["known-improved"], 1)
+        self.assertEqual(result["refusals_by_arm"]["broken"], 0)
+        self.assertEqual(result["refusals_by_arm"]["shortcut"], 0)
+        for trial in range(16):
+            for arm in ("first", "second"):
+                self.assertEqual(result["refusals_by_arm"][f"unchanged:{trial}:{arm}"], 1)
+        self.assertTrue(all(context["task"] == "aime" for context in observed))
+        self.assertEqual({context["arm"] for context in observed}, {
+            "naive", "known-improved",
+            *(f"unchanged:{trial}:{arm}" for trial in range(16) for arm in ("first", "second"))})
+        for record in records:
+            for row_id in record["refusals"]:
+                index = record["row_ids"].index(row_id)
+                self.assertEqual(record["outputs"][index], "")
+                self.assertEqual(record["scores"][index], 0.0)
+
 
 if __name__ == "__main__":
     unittest.main()

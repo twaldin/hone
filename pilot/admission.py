@@ -97,6 +97,13 @@ def pinned_source(root: Path, path: str, expected: str | None = None) -> str:
         raise ValueError("Retained source snapshot head changed")
     if expected is not None and expected in snapshot.get("historical_files", {}):
         return snapshot["historical_files"][expected]
+    if expected is not None:
+        import hashlib
+        baseline = root / "evidence/pilot/source-snapshot-7.json"
+        if baseline.exists():
+            source = json.loads(baseline.read_text())["files"].get(path)
+            if source is not None and "sha256:" + hashlib.sha256(source.encode()).hexdigest() == expected:
+                return source
     return snapshot["files"][path]
 
 
@@ -136,6 +143,56 @@ def task_source_ast(source: str, task_name: str) -> str:
     return digest(ast.dump(module, include_attributes=False))
 
 
+def transition_source(root: Path, path: str) -> str:
+    import hashlib
+    import json
+    declaration = root / "evidence/pilot/source-transition-8.json"
+    if not declaration.exists():
+        return (root / path).read_text()
+    receipt = json.loads(declaration.read_text())
+    snapshot_path = root / "evidence/pilot/source-snapshot-7.json"
+    snapshot = json.loads(snapshot_path.read_text())
+    sha = lambda data: "sha256:" + hashlib.sha256(data).hexdigest()
+    if (receipt.get("version") != "pilot-refusal-transition-v8"
+            or receipt.get("source_head") != "ed610b55c95beea8ee4810dc2a709786f790d04c"
+            or snapshot.get("source_head") != receipt["source_head"]
+            or receipt.get("source_snapshot_hash") != sha(snapshot_path.read_bytes())
+            or receipt.get("predeclaration_hash") != sha((root / "evidence/pilot/predeclaration-8.md").read_bytes())
+            or not set(snapshot["files"]).issubset(receipt["files"])):
+        raise ValueError("Refusal source transition does not authenticate its baseline")
+    for filename, hashes in receipt["files"].items():
+        if (hashes["after"] != sha((root / filename).read_bytes())
+                or hashes["before"] != (sha(snapshot["files"][filename].encode())
+                                        if filename in snapshot["files"] else None)):
+            raise ValueError("Refusal source transition changed: " + filename)
+    if path not in snapshot["files"]:
+        raise ValueError("Retained execution source absent from transition: " + path)
+    return snapshot["files"][path]
+
+
+def retained_transport_proof(root: Path, task_name: str) -> dict | None:
+    import hashlib
+    import json
+    path = root / "evidence/pilot/source-transition-8.json"
+    if not path.exists():
+        return None
+    receipt = json.loads(path.read_text())
+    if set(receipt.get("retained_calls", {})) != {"mbpp", "hover"}:
+        raise ValueError("Refusal transition omits a retained task")
+    proof = receipt["retained_calls"][task_name]
+    source = root / proof["path"]
+    data = source.read_bytes()
+    rows = [json.loads(line) for line in data.splitlines()]
+    if (proof["sha256"] != "sha256:" + hashlib.sha256(data).hexdigest()
+            or not rows or len(rows) != proof["calls"]
+            or any(row.get("status") != 200 or row.get("failed") is not False
+                   or row.get("usage_missing") is not False or row.get("outcome") == "refusal" for row in rows)):
+        raise ValueError("Retained transport is not an entirely answered, metered execution")
+    return {"source_transition_hash": "sha256:" + hashlib.sha256(path.read_bytes()).hexdigest(),
+            "calls_hash": proof["sha256"], "answered_calls": len(rows), "refusals": 0,
+            "model_calls": 0}
+
+
 def validate_source_equivalence(root: Path, original: dict, task_name: str) -> dict:
     import hashlib
     files = original["evaluator_files"]
@@ -152,14 +209,15 @@ def validate_source_equivalence(root: Path, original: dict, task_name: str) -> d
         old = pinned_source(root, path, expected)
         if "sha256:" + hashlib.sha256(old.encode()).hexdigest() != expected:
             raise ValueError("Pinned source does not authenticate original admission: " + path)
-        current = (root / path).read_text()
+        current = transition_source(root, path)
         if path == "pilot/tasks.py":
             before, after = task_source_ast(old, task_name), task_source_ast(current, task_name)
         elif path == "pilot/controls.py":
-            current = current.replace("IFBENCH_CONTROL_SEED = 20261106\n", "")
-            current = current.replace('    if task.name == "ifbench":\n        seed = IFBENCH_CONTROL_SEED\n', "")
-            current = current.replace('IFBENCH_CONTROL_SEED if task.name == "ifbench" else CONTROL_SEED if task.name == "mbpp" else P_CONTROL_SEED',
-                                      'CONTROL_SEED if task.name == "mbpp" else P_CONTROL_SEED')
+            if original.get("contract", 0) < 6:
+                current = current.replace("IFBENCH_CONTROL_SEED = 20261106\n", "")
+                current = current.replace('    if task.name == "ifbench":\n        seed = IFBENCH_CONTROL_SEED\n', "")
+                current = current.replace('IFBENCH_CONTROL_SEED if task.name == "ifbench" else CONTROL_SEED if task.name == "mbpp" else P_CONTROL_SEED',
+                                          'CONTROL_SEED if task.name == "mbpp" else P_CONTROL_SEED')
             before = digest(ast.dump(ast.parse(old), include_attributes=False))
             after = digest(ast.dump(ast.parse(current), include_attributes=False))
         elif path == "pilot/admission.py":
@@ -181,7 +239,10 @@ def validate_source_equivalence(root: Path, original: dict, task_name: str) -> d
         if before != after:
             raise ValueError("Retained task execution source changed: " + path)
         scoped[path] = after
-    return {"source_head": SOURCE_HEAD, "original_files": files, "task_execution_hashes": scoped}
+    result = {"source_head": SOURCE_HEAD, "original_files": files, "task_execution_hashes": scoped}
+    if task_name in ("mbpp", "hover"):
+        result["refusal_transition"] = retained_transport_proof(root, task_name)
+    return result
 
 
 def text_admission(task, identity: dict, rows: list[dict]) -> dict:

@@ -1,0 +1,85 @@
+import hashlib
+import json
+from pathlib import Path
+import tempfile
+import unittest
+
+from pilot.admission import retained_transport_proof, transition_source
+
+
+def sha(data):
+    return "sha256:" + hashlib.sha256(data).hexdigest()
+
+
+class TransitionTests(unittest.TestCase):
+    def setUp(self):
+        self.directory = tempfile.TemporaryDirectory()
+        self.addCleanup(self.directory.cleanup)
+        self.root = Path(self.directory.name)
+        self.evidence = self.root / "evidence/pilot"
+        self.evidence.mkdir(parents=True)
+        (self.root / "pilot").mkdir()
+        self.source = self.root / "pilot/runtime.py"
+        self.source.write_text("new = 'refusal-aware'\n")
+        (self.evidence / "predeclaration-8.md").write_text("frozen refusal policy\n")
+        snapshot = {"source_head": "ed610b55c95beea8ee4810dc2a709786f790d04c",
+                    "files": {"pilot/runtime.py": "old = 'answered'\n"}}
+        self.snapshot = self.evidence / "source-snapshot-7.json"
+        self.snapshot.write_text(json.dumps(snapshot))
+        self.receipt = {"version": "pilot-refusal-transition-v8", "source_head": snapshot["source_head"],
+                        "source_snapshot_hash": sha(self.snapshot.read_bytes()),
+                        "predeclaration_hash": sha((self.evidence / "predeclaration-8.md").read_bytes()),
+                        "files": {"pilot/runtime.py": {"before": sha(snapshot["files"]["pilot/runtime.py"].encode()),
+                                                       "after": sha(self.source.read_bytes())}},
+                        "retained_calls": {}}
+        self.calls = {}
+        for name in ("mbpp", "hover"):
+            path = self.evidence / (name + ".jsonl")
+            path.write_text(json.dumps({"status": 200, "failed": False, "usage_missing": False}) + "\n")
+            self.calls[name] = path
+            self.receipt["retained_calls"][name] = {"path": str(path.relative_to(self.root)),
+                                                    "sha256": sha(path.read_bytes()), "calls": 1}
+        self.save()
+
+    def save(self):
+        (self.evidence / "source-transition-8.json").write_text(json.dumps(self.receipt))
+
+    def test_exact_transition_accepts_answered_archive_but_rejects_unreviewed_runtime(self):
+        self.assertEqual(transition_source(self.root, "pilot/runtime.py"), "old = 'answered'\n")
+        proof = retained_transport_proof(self.root, "mbpp")
+        self.assertEqual(proof["answered_calls"], 1)
+        self.assertEqual(proof["refusals"], 0)
+        self.source.write_text("unreviewed = True\n")
+        with self.assertRaises(ValueError):
+            transition_source(self.root, "pilot/runtime.py")
+
+    def test_changed_baseline_or_declaration_does_not_authorize_carryover(self):
+        self.snapshot.write_text(self.snapshot.read_text() + " ")
+        with self.assertRaises(ValueError):
+            transition_source(self.root, "pilot/runtime.py")
+        self.receipt["source_snapshot_hash"] = sha(self.snapshot.read_bytes())
+        self.save()
+        (self.evidence / "predeclaration-8.md").write_text("different policy\n")
+        with self.assertRaises(ValueError):
+            transition_source(self.root, "pilot/runtime.py")
+
+    def test_even_resealed_refusal_or_unknown_usage_cannot_carry_a_task_admission(self):
+        for defect in ("refusal", "unknown", "failed", "empty"):
+            with self.subTest(defect=defect):
+                row = {"status": 200, "failed": False, "usage_missing": False}
+                if defect == "refusal":
+                    row["outcome"] = "refusal"
+                elif defect == "unknown":
+                    row["usage_missing"] = True
+                elif defect == "failed":
+                    row["failed"] = True
+                data = "" if defect == "empty" else json.dumps(row) + "\n"
+                self.calls["hover"].write_text(data)
+                self.receipt["retained_calls"]["hover"].update(sha256=sha(data.encode()), calls=0 if defect == "empty" else 1)
+                self.save()
+                with self.assertRaises(ValueError):
+                    retained_transport_proof(self.root, "hover")
+
+
+if __name__ == "__main__":
+    unittest.main()

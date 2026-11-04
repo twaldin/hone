@@ -78,6 +78,38 @@ class ReplayTests(unittest.TestCase):
                     cli.archived_ifbench(task, forged, root / "cache")
 
 
+    def test_refused_mbpp_replay_requires_a_metered_row_and_never_executes_a_solution(self):
+        task = Task("mbpp", [{"id": "dev:1", "input": "fixture"}], [], {"task": "mbpp"}, {})
+        with tempfile.TemporaryDirectory() as directory:
+            out = Path(directory)
+            save(out / "manifest.json", {"identity": {"task": task.manifest}})
+            save(out / "evaluations.jsonl", {"row_ids": ["dev:1"], "outputs": [""], "scores": [0.0],
+                                             "control": "naive", "refusals": ["dev:1"]})
+            save(out / "calls.jsonl", {"outcome": "refusal", "row_id": "dev:1", "context": {"arm": "naive"}})
+            args = argparse.Namespace(out=out, cache=out / "cache")
+            with patch("pilot.tasks.load_task", return_value=task), patch(
+                "pilot.tasks.score_output", side_effect=AssertionError("Refusal is not candidate code")
+            ), redirect_stdout(StringIO()) as stream:
+                replay(args)
+            self.assertEqual(json.loads(stream.getvalue())["replayed_rollouts"], 1)
+            (out / "calls.jsonl").unlink()
+            with patch("pilot.tasks.load_task", return_value=task), self.assertRaises(ValueError):
+                replay(args)
+
+    def test_interrupted_refusal_preserves_estimated_charges_and_distinct_stop(self):
+        with tempfile.TemporaryDirectory() as directory:
+            out = Path(directory)
+            append_json(out / "calls.jsonl", {"reported_tokens": 10, "estimated_tokens": 32,
+                                             "charged_tokens": 42, "usd_equivalent": .001,
+                                             "role": "task", "outcome": "refusal", "failed": True,
+                                             "usage_missing": True})
+            result = resume_result(out, "ifbench", 0, "plain", "RefusalNondeterminism")
+            self.assertEqual(result["tokens"], 42)
+            self.assertEqual(result["reported_tokens"], 10)
+            self.assertEqual(result["estimated_tokens"], 32)
+            self.assertEqual(result["refusals"], 1)
+            self.assertEqual(result["status"], "refusal-nondeterminism")
+
     def test_interrupted_cell_preserves_usage_prefix_and_last_accepted_artifact(self):
         with tempfile.TemporaryDirectory() as directory:
             out = Path(directory)

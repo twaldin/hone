@@ -182,6 +182,34 @@ class PanelTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             validate_measurement(self.local, self.task, self.original, self.proof)
 
+    def test_refusal_counts_bind_empty_zero_rows_to_metered_arms(self):
+        self.original["contract"] = 8
+        self.control["adversarial_hash"] = cli.digest(self.proof)
+        self.declaration["identity"] = self.original
+        self.declaration["adversarial_hash"] = self.control["adversarial_hash"]
+        self.declaration.update(refusals=0, refusals_by_row={}, refusals_by_arm={})
+        row_id = self.ids[-1]
+        outputs, scores = ["1"] * 39 + [""], [1.0] * 39 + [0.0]
+        self.control.update(controls={"naive": {"outputs": outputs, "scores": scores, "mean": .975,
+                                               "refusals": 1, "refusals_by_row": {row_id: 1}}},
+                            ranking_passed=None, noise_passed=None, refusals=1,
+                            refusals_by_row={row_id: 1}, refusals_by_arm={"naive": 1})
+        self.evaluations = [{"control": "naive", "row_ids": self.ids, "outputs": outputs,
+                             "scores": scores, "refusals": [row_id]}]
+        self.seal_fixture()
+        cli.save(self.local / "calls.jsonl", {"outcome": "refusal", "row_id": row_id,
+                                            "context": {"arm": "naive"}})
+        cli.seal(self.local)
+        cli.seal(self.local.parent)
+        self.assertEqual(validate_measurement(self.local, self.task, self.original, self.proof,
+                                              allow_failure=True), "headroom")
+        self.control["refusals_by_row"][row_id] = 2
+        cli.save(self.local / "controls.json", self.control)
+        cli.seal(self.local)
+        cli.seal(self.local.parent)
+        with self.assertRaises(ValueError):
+            validate_measurement(self.local, self.task, self.original, self.proof, allow_failure=True)
+
     def test_sealed_forged_measurements_cannot_pass_by_flags(self):
         for defect in ("noise", "contrast", "score", "proof", "calibration"):
             with self.subTest(defect=defect):

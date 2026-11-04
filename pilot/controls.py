@@ -1,12 +1,13 @@
 from __future__ import annotations
 
+from collections import Counter
 from datetime import datetime, timezone
 import math
 from pathlib import Path
 import random
 import statistics
 
-from .runtime import LIMITS, IMAGE, append_json, canonical, digest
+from .runtime import LIMITS, IMAGE, append_json, call_scope, canonical, digest
 from .tasks import Task, evaluate, score_output
 
 PAIRS = 16
@@ -83,6 +84,7 @@ def measure(task: Task, call, out: Path, identity: dict, *, rows: list[dict], ad
     result = {"task": task.name, "identity": identity, "rows": [row["id"] for row in rows],
               "adversarial_hash": digest(adversarial),
               "expected_rank": EXPECTED_RANK, "definitions": definitions, "artifacts": candidates,
+              "refusals": 0, "refusals_by_row": {}, "refusals_by_arm": {},
               "noise_design": {"paired_trials": PAIRS, "rows_per_arm": len(rows), "model_calls_cached": False,
                                "draw_seed": IFBENCH_CONTROL_SEED if task.name == "ifbench" else CONTROL_SEED if task.name == "mbpp" else P_CONTROL_SEED,
                                "excluded_prior_mbpp_rows": sorted(PREVIOUS_MBPP_ROWS) if task.name == "mbpp" else [],
@@ -97,6 +99,7 @@ def measure(task: Task, call, out: Path, identity: dict, *, rows: list[dict], ad
     order = ("naive", "known-improved", "broken", "shortcut") if task.name == "ifbench" else tuple(candidates)
     for name in order:
         candidate = candidates[name]
+        refused = []
         if name == "known-improved" and task.name == "mbpp":
             outputs = [row["reference_code"] for row in rows]
             scores = [score_output(task, row, output) for row, output in zip(rows, outputs, strict=True)]
@@ -104,10 +107,17 @@ def measure(task: Task, call, out: Path, identity: dict, *, rows: list[dict], ad
             outputs = [candidate["output"]] * len(rows)
             scores = [score_output(task, row, output) for row, output in zip(rows, outputs, strict=True)]
         else:
-            execution = evaluate(task, candidate, rows, call)
+            with call_scope(arm=name):
+                execution = evaluate(task, candidate, rows, call)
             scores, outputs = execution["scores"], execution["outputs"]
-        controls[name] = {"scores": scores, "outputs": outputs, "mean": statistics.fmean(scores)}
-        append_json(out / "evaluations.jsonl", {"control": name, "row_ids": result["rows"], "outputs": outputs, "scores": scores})
+            refused = execution["refusals"]
+        result["refusals"] += len(refused)
+        result["refusals_by_arm"][name] = len(refused)
+        result["refusals_by_row"] = dict(Counter(result["refusals_by_row"]) + Counter(refused))
+        controls[name] = {"scores": scores, "outputs": outputs, "mean": statistics.fmean(scores),
+                          "refusals": len(refused), "refusals_by_row": dict(Counter(refused))}
+        append_json(out / "evaluations.jsonl", {"control": name, "row_ids": result["rows"], "outputs": outputs,
+                    "scores": scores, "refusals": refused})
         if task.name == "ifbench" and name == "naive" and controls[name]["mean"] >= 0.90:
             result.update(controls=controls, headroom_replacement="hover", ranking_passed=None, noise_passed=None)
             (out / "controls.json").write_text(canonical(result) + "\n")
@@ -122,11 +132,18 @@ def measure(task: Task, call, out: Path, identity: dict, *, rows: list[dict], ad
         raise ControlsFailed(f"{task.name}: evaluator controls failed the predeclared ranking")
     pairs = []
     for trial in range(PAIRS):
-        first = evaluate(task, task.seed_candidate, rows, call)
-        second = evaluate(task, task.seed_candidate, rows, call)
+        with call_scope(arm=f"unchanged:{trial}:first", trial=trial):
+            first = evaluate(task, task.seed_candidate, rows, call)
+        with call_scope(arm=f"unchanged:{trial}:second", trial=trial):
+            second = evaluate(task, task.seed_candidate, rows, call)
         for arm, execution in (("first", first), ("second", second)):
+            refused = execution["refusals"]
+            result["refusals"] += len(refused)
+            result["refusals_by_arm"][f"unchanged:{trial}:{arm}"] = len(refused)
+            result["refusals_by_row"] = dict(Counter(result["refusals_by_row"]) + Counter(refused))
             append_json(out / "evaluations.jsonl", {"control": "unchanged", "trial": trial, "arm": arm,
-                        "row_ids": result["rows"], "outputs": execution["outputs"], "scores": execution["scores"]})
+                        "row_ids": result["rows"], "outputs": execution["outputs"], "scores": execution["scores"],
+                        "refusals": refused})
         pairs.append({"trial": trial, "first": first["scores"], "second": second["scores"], "delta": mean(second) - mean(first)})
         (out / "noise-pairs.json").write_text(canonical(pairs) + "\n")
     sd = statistics.stdev(pair["delta"] for pair in pairs)

@@ -1,0 +1,145 @@
+{
+  "diagnosis_hash": "sha256:909346c008878d70b33699fd436a7818fc2c86faa138d45cfa13648b98d0ad6d",
+  "journals": [
+    {
+      "calls": 166,
+      "path": "evidence/pilot/aborted-controls-v1/ifbench/calls.jsonl",
+      "sha256": "sha256:0cde1a34070e0615ec6bda8572255782bf2a104e250bad603a3618b43b700fa1"
+    },
+    {
+      "calls": 8,
+      "path": "evidence/pilot/controls/mbpp/calls.jsonl",
+      "sha256": "sha256:c7dac4eb8da7dad013dceb938b022a14b9a91f1d74b66d47cba6259b731f0bad"
+    },
+    {
+      "calls": 311,
+      "path": "evidence/pilot/controls-2/ifbench/calls.jsonl",
+      "sha256": "sha256:c7358a909239b490d209617e5b699c35039ea5bf1766edd29ec5ed3f0c8a74f6"
+    },
+    {
+      "calls": 660,
+      "path": "evidence/pilot/controls-2/mbpp/calls.jsonl",
+      "sha256": "sha256:941c654e632466ff77d0d3a882344d6bb1339bbae59963f5c74f242ac33c4cbb"
+    },
+    {
+      "calls": 77,
+      "path": "evidence/pilot/controls-3/ifbench/calls.jsonl",
+      "sha256": "sha256:467e5b13a50789dbc6099cbc3d9902c81d6dee7e4c4ea14a71dda66f33bc8b64"
+    },
+    {
+      "calls": 660,
+      "path": "evidence/pilot/controls-3/mbpp/calls.jsonl",
+      "sha256": "sha256:0eafc844dd8de3f13c3e7a2792fbf4ac70441c1fcad5abdc5c3456a4c5840216"
+    },
+    {
+      "calls": 1360,
+      "path": "evidence/pilot/controls-4a/aime/calls.jsonl",
+      "sha256": "sha256:5bedac202808d4aa6391e1c031c456f8838835c3524f8aba164a208df280f9c0"
+    },
+    {
+      "calls": 2521,
+      "path": "evidence/pilot/controls-4a/ifbench/calls.jsonl",
+      "sha256": "sha256:59dbf30dca1237b1aa3929b4da7d2ce8f8044fc7cc5cf9ef599a27939889044a"
+    },
+    {
+      "calls": 5440,
+      "path": "evidence/pilot/controls-5/hover/calls.jsonl",
+      "sha256": "sha256:36e45b3977fb4e772c920fb8e0ca96c60af97ddee1487138471567227ec1781f"
+    },
+    {
+      "calls": 128,
+      "path": "evidence/pilot/controls-6/ifbench/calls.jsonl",
+      "sha256": "sha256:85e068595642a82635bbee65c3ae0610157d0e2a5311d9f3bd7a39da0cd6291e"
+    },
+    {
+      "calls": 660,
+      "path": "evidence/pilot/mbpp-readmission-4a/mbpp/calls.jsonl",
+      "sha256": "sha256:960792010b3da0674c0962aa1c68b82b769fbbf819844100f223cfeb04fda0a1"
+    },
+    {
+      "calls": 4082,
+      "path": "evidence/pilot/progress-5/calls-prefix.jsonl",
+      "sha256": "sha256:a74da57c397f13c33528ffbdd47f909a0374fc2c087307327312ae4110c637a2"
+    },
+    {
+      "calls": 1,
+      "path": "evidence/pilot/route-proof/calls.jsonl",
+      "sha256": "sha256:3fdafcc787b9849c445556c1f2c09e60bacee2d3820b6291a198c94ed3716f32"
+    },
+    {
+      "calls": 1,
+      "path": "evidence/pilot/route-proof-v2/calls.jsonl",
+      "sha256": "sha256:b95ccf1c68646fcf2597621e6dede387c0d68b21dd4aae27096c79352894c34a"
+    },
+    {
+      "calls": 1,
+      "path": "evidence/pilot/route-proof-v2/negative-auth-calls.jsonl",
+      "sha256": "sha256:9f4a9bee58332db7bc003c909d3938411d62c635c9110d50d8c6c73c99f2c44c"
+    },
+    {
+      "calls": 1,
+      "path": "evidence/pilot/route-proof-v3/calls.jsonl",
+      "sha256": "sha256:a5c4ae09b01202fbaa9b7b80a7940235c522c0809b454a9c58f960b240feb556"
+    },
+    {
+      "calls": 1,
+      "path": "evidence/pilot/route-proof-v3/negative-auth-calls.jsonl",
+      "sha256": "sha256:9f4a9bee58332db7bc003c909d3938411d62c635c9110d50d8c6c73c99f2c44c"
+    },
+    {
+      "calls": 1,
+      "path": "evidence/pilot/route-proof-v4/calls.jsonl",
+      "sha256": "sha256:1dcf9de5362b8e48b78b94aa98da085865b0d2cbffa80df37ca8b6b96a506a82"
+    },
+    {
+      "calls": 1,
+      "path": "evidence/pilot/route-proof-v4/negative-auth-calls.jsonl",
+      "sha256": "sha256:72d6de7006f325d8fa2a583949113c1d54b58d60a97513193c936e7f64cce02d"
+    },
+    {
+      "calls": 107,
+      "path": "evidence/pilot/smoke-5/mbpp/0/gepa/calls.jsonl",
+      "sha256": "sha256:b4f8ddfc87621774aad832b9a96b1efc5bcd02bbbf6d759f5c23ef75c2f2c9e9"
+    },
+    {
+      "calls": 115,
+      "path": "evidence/pilot/smoke-5/mbpp/0/hone/calls.jsonl",
+      "sha256": "sha256:93afcb6b3acb29959bbe6d5fabfd403a05a757ab695f72de91e343e1b3208fa5"
+    },
+    {
+      "calls": 189,
+      "path": "evidence/pilot/smoke-5/mbpp/0/plain/calls.jsonl",
+      "sha256": "sha256:7b1b2d5af836abb647b55995cca4ce90295fc2c4d83bb74748d1676bf87d4657"
+    }
+  ],
+  "known_refusal_answer_conflicts": {},
+  "known_refusals": {
+    "sha256:e13f06de0a7ff0d02b4c72e104f6104b9e403c71b6eae6b2ba806bb36cd3d1d9": [
+      {
+        "call": 127,
+        "failed": true,
+        "line": 127,
+        "model": "anthropic/claude-sonnet-4-6",
+        "path": "evidence/pilot/controls-6/ifbench/calls.jsonl",
+        "response_hash": "sha256:12ae32cb1ec02d01eda3581b127c1fee3b0dc53572ed6baf239721a03d82e126",
+        "status": 502,
+        "stop_reason": null,
+        "usage_missing": true
+      },
+      {
+        "call": 128,
+        "failed": true,
+        "line": 128,
+        "model": "anthropic/claude-sonnet-4-6",
+        "path": "evidence/pilot/controls-6/ifbench/calls.jsonl",
+        "response_hash": "sha256:12ae32cb1ec02d01eda3581b127c1fee3b0dc53572ed6baf239721a03d82e126",
+        "status": 502,
+        "stop_reason": null,
+        "usage_missing": true
+      }
+    ]
+  },
+  "limit": "Only provider-classified refusals are known refusals. Other historical failures without a native classification are not inferred to be refusals.",
+  "model_calls": 0,
+  "version": "pilot-refusal-history-v8"
+}

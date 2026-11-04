@@ -150,7 +150,8 @@ class HoVerProgramTests(unittest.TestCase):
         task = self.task()
         for candidate in ({}, {"prompt": "fake"}, dict(task.seed_candidate, extra="field"), dict(task.seed_candidate, summarize1=3)):
             result = hover.evaluate_hover(task, candidate, task.train, lambda *args: self.fail("model touched"))
-            self.assertEqual(result, {"scores": [0.0], "outputs": [""], "trajectories": []})
+            self.assertEqual(result, {"scores": [0.0], "outputs": [""], "trajectories": [],
+                                      "refusals": [], "refusals_by_row": {}})
 
     def test_failure_boundary_and_no_selection_trajectories(self):
         task = self.task()
@@ -163,12 +164,44 @@ class HoVerProgramTests(unittest.TestCase):
         ):
             for call in (fail(CallFailed("rejected")), lambda *args: '{"reasoning":"","summary":"ok","score":1}'):
                 result = hover.evaluate_hover(task, task.seed_candidate, task.selection, call)
-                self.assertEqual(result, {"scores": [0.0], "outputs": [""], "trajectories": []})
+                self.assertEqual(result, {"scores": [0.0], "outputs": [""], "trajectories": [],
+                                          "refusals": [], "refusals_by_row": {}})
             for error in (BudgetExhausted("stop"), RuntimeError("infrastructure outage")):
                 with self.assertRaises(type(error)):
                     hover.evaluate_hover(task, task.seed_candidate, task.train, fail(error))
         with self.assertRaisesRegex(RuntimeError, "prepared"):
             hover.evaluate_hover(task, task.seed_candidate, task.train, lambda *args: self.fail("model touched"))
+
+    def test_refusal_at_every_stage_ends_rollout_and_retains_zero_trace(self):
+        from pilot.runtime import ProviderRefusal, call_scope, current_call_scope
+        from pilot.tasks import evaluate
+        task = self.task()
+        for refused_stage in range(4):
+            requests, retrievals = [], []
+            frames = [{"reasoning": "", "summary": "one"}, {"reasoning": "", "query": "two"},
+                      {"reasoning": "", "summary": "three"}]
+            def call(role, messages, tokens):
+                requests.append(messages)
+                self.assertEqual(current_call_scope(), {
+                    "row_id": task.train[0]["id"], "task": "hover", "arm": "naive"})
+                if len(requests) == refused_stage + 1:
+                    raise ProviderRefusal("terminal refusal")
+                return json.dumps(frames[len(requests) - 1])
+            def search(query, k):
+                retrievals.append((query, k))
+                return ["Alpha | text", "Beta | text", "Café | text"]
+            with patch.dict(hover._CACHES, {id(task.manifest): Path("fixture-only")}), patch.dict(
+                hover._RETRIEVERS, {Path("fixture-only/hover-retrieval"): hover.PreparedRetrieval(search, {})}
+            ), call_scope(arm="naive"):
+                result = evaluate(task, task.seed_candidate, task.train, call, True)
+            self.assertEqual(len(requests), refused_stage + 1)
+            self.assertEqual(len(retrievals), 1 if refused_stage < 2 else 2)
+            self.assertEqual(result["scores"], [0.0])
+            self.assertEqual(result["outputs"], [""])
+            self.assertEqual(result["refusals"], [task.train[0]["id"]])
+            self.assertEqual(result["trajectories"][0]["outcome"], "refusal")
+            self.assertEqual(result["trajectories"][0]["calls"][-1]["outcome"], "refusal")
+            self.assertEqual(hover.score_hover_output(task, task.train[0], ""), 0.0)
 
 
 class HoVerResourceTests(unittest.TestCase):

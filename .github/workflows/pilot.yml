@@ -97,3 +97,5 @@ jobs:
           PY
       - name: Run all pilot unittests with real Docker and official metrics
         run: nice -n 10 taskset -c "$PILOT_CI_CPU" pilot/.venv/bin/python -m unittest discover -s pilot -p 'test_*.py' -v
+      - name: Run bounded provider-receipt tests offline
+        run: nice -n 10 taskset -c "$PILOT_CI_CPU" bun test --max-concurrency=1 pilot/gateway-receipts.test.mjs

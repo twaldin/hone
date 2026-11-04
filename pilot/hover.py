@@ -16,7 +16,7 @@ import unicodedata
 import urllib.request
 
 from .program import ProgramError
-from .runtime import BudgetExhausted, CallFailed
+from .runtime import BudgetExhausted, CallFailed, ProviderRefusal, call_scope
 from .tasks import ARTIFACT_REV, Task, _fetch, _response
 
 SOURCE_REV = "39b84697f196308f398a251a7aea9b82ae0f0562"
@@ -422,7 +422,7 @@ def evaluate_hover(task: Task, candidate: dict[str, str], rows: list[dict], call
     if capture_traces and any(row["id"] not in train_ids for row in rows):
         raise ValueError("Selection labels and feedback cannot be captured")
     valid = set(candidate) == set(SEED) and all(isinstance(value, str) for value in candidate.values())
-    scores, outputs, trajectories = [], [], []
+    scores, outputs, trajectories, refusals = [], [], [], []
     search = None
     if valid:
         cache = _CACHES.get(id(task.manifest))
@@ -433,27 +433,34 @@ def evaluate_hover(task: Task, candidate: dict[str, str], rows: list[dict], call
     for requested in rows:
         row = allowed[requested["id"]]
         output, traces, feedback = "", [], ""
+        refused = False
         try:
-            if not valid:
-                raise ProgramError("Invalid candidate fields")
-            def stage(key, field, inputs):
-                return _response(call, [{"role": "system", "content": candidate[key]},
-                                        {"role": "user", "content": json.dumps(inputs)}], field, traces)
-            claim = row["input"]
-            hop1 = search(claim, 7)
-            summary1 = stage("summarize1", "summary", {"claim": claim, "passages": hop1})
-            query2 = stage("query_hop2", "query", {"claim": claim, "summary_1": summary1})
-            hop2 = search(query2, 7)
-            summary2 = stage("summarize2", "summary", {"claim": claim, "context": summary1, "passages": hop2})
-            query3 = stage("query_hop3", "query", {"claim": claim, "summary_1": summary1, "summary_2": summary2})
-            hop3 = search(query3, 10)
-            output = json.dumps(hop1 + hop2 + hop3)
+            with call_scope(row_id=row["id"], task=task.name):
+                if not valid:
+                    raise ProgramError("Invalid candidate fields")
+                def stage(key, field, inputs):
+                    return _response(call, [{"role": "system", "content": candidate[key]},
+                                            {"role": "user", "content": json.dumps(inputs)}], field, traces)
+                claim = row["input"]
+                hop1 = search(claim, 7)
+                summary1 = stage("summarize1", "summary", {"claim": claim, "passages": hop1})
+                query2 = stage("query_hop2", "query", {"claim": claim, "summary_1": summary1})
+                hop2 = search(query2, 7)
+                summary2 = stage("summarize2", "summary", {"claim": claim, "context": summary1, "passages": hop2})
+                query3 = stage("query_hop3", "query", {"claim": claim, "summary_1": summary1, "summary_2": summary2})
+                hop3 = search(query3, 10)
+                output = json.dumps(hop1 + hop2 + hop3)
+                score = score_hover_output(task, row, output)
+                if capture_traces:
+                    gold = sorted({_normalize(fact["key"]) for fact in row["supporting_facts"]})
+                    found = {_normalize(passage.split(" | ")[0]) for passage in hop1 + hop2 + hop3}
+                    feedback = json.dumps({"found_gold_titles": [title for title in gold if title in found],
+                                           "missing_gold_titles": [title for title in gold if title not in found]})
+        except ProviderRefusal:
+            output, refused = "", True
             score = score_hover_output(task, row, output)
-            if capture_traces:
-                gold = sorted({_normalize(fact["key"]) for fact in row["supporting_facts"]})
-                found = {_normalize(passage.split(" | ")[0]) for passage in hop1 + hop2 + hop3}
-                feedback = json.dumps({"found_gold_titles": [title for title in gold if title in found],
-                                       "missing_gold_titles": [title for title in gold if title not in found]})
+            feedback = "Provider refused the response; rollout ended."
+            refusals.append(row["id"])
         except BudgetExhausted:
             raise
         except (CallFailed, ProgramError, SyntaxError, KeyError, ValueError, TypeError):
@@ -463,4 +470,7 @@ def evaluate_hover(task: Task, candidate: dict[str, str], rows: list[dict], call
         if capture_traces:
             trajectories.append({"id": row["id"], "input": row["input"], "output": output,
                                  "score": score, "feedback": feedback, "calls": traces})
-    return {"scores": scores, "outputs": outputs, "trajectories": trajectories}
+            if refused:
+                trajectories[-1]["outcome"] = "refusal"
+    return {"scores": scores, "outputs": outputs, "trajectories": trajectories,
+            "refusals": refusals, "refusals_by_row": {key: refusals.count(key) for key in set(refusals)}}

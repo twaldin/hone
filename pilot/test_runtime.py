@@ -3,8 +3,11 @@ from types import SimpleNamespace
 import json
 from pathlib import Path
 import tempfile
+import shutil
+import subprocess
 import unittest
 from unittest.mock import patch
+from pilot import runtime
 
 from pilot.runtime import BudgetExhausted, CallFailed, Gateway, Ledger, LIMITS, ModelCalls, Throttle, TransportError, capacity_reason, create_pool, open_gateway, retry_comparison
 
@@ -18,6 +21,19 @@ def usage(fraction=0.1):
 def response(tokens=None, hidden=0):
     counts = tokens or {"input": 100, "output": 20, "cacheRead": 30, "cacheWrite": 40}
     return {"status": 200, "body": {"message": {"usage": counts, "content": [{"type": "text", "text": "answer"}], "stopReason": "stop"}, "retryObservation": {"hiddenAttempts": hidden, "logEvents": hidden}}}
+
+
+def refusal_frame(max_tokens=32, reported_usage=None):
+    receipt = {
+        "refusal": {"type": "refusal", "category": "safety", "provenance": "anthropic.message_delta.stop_details"},
+        "countingMethod": "@oh-my-pi/pi-natives:ClaudeV3:serialized-provider-json+4096",
+        "inputTokens": 120, "framingAllowance": 4096, "inputTokenUpperBound": 4216,
+        "maxOutputTokens": max_tokens,
+    }
+    if reported_usage is not None:
+        receipt["reportedUsage"] = reported_usage
+    return {"status": 502, "body": {"providerReceipt": receipt,
+            "retryObservation": {"httpAttempts": 1, "hiddenAttempts": 0, "logEvents": 0}}}
 
 
 class RuntimeTests(unittest.TestCase):
@@ -54,6 +70,12 @@ class RuntimeTests(unittest.TestCase):
             with self.assertRaises(BudgetExhausted, msg=key):
                 ledger.admit("proposer", [{"role": "user", "content": "x"}], 32)
             self.assertEqual(ledger.calls, 0)
+
+    def test_refusal_wire_envelope_is_reserved_before_dispatch(self):
+        ledger = Ledger(self.path / "wire-envelope", limits=dict(LIMITS, usd=.02))
+        with self.assertRaises(BudgetExhausted):
+            ledger.admit("task", [{"role": "user", "content": "x"}], 32)
+        self.assertEqual(ledger.calls, 0)
 
     def test_missing_usage_is_counted_and_not_a_success(self):
         ledger = Ledger(self.path / "missing")
@@ -162,6 +184,183 @@ class RuntimeTests(unittest.TestCase):
         self.assertEqual(ledger.proposer_calls, 2)
         self.assertEqual(ledger.proposer_success_calls, 0)
         self.assertEqual(ledger.tokens, 380)
+
+    def test_terminal_refusal_is_durable_charged_and_never_redispatched_for_any_role(self):
+        class Refused:
+            def __init__(self):
+                self.requests, self.closed = [], False
+            def request(self, body):
+                self.requests.append(body)
+                return refusal_frame()
+            def close(self):
+                self.closed = True
+        for role in ("task", "proposer", "judge", "repair"):
+            with self.subTest(role=role):
+                gateway = Refused()
+                ledger = Ledger(self.path / role / "calls.jsonl")
+                throttle = Throttle(POOL, {}, self.path / "pauses", reader=lambda: usage(), clock=lambda: 1000)
+                call = ModelCalls(gateway, ledger, throttle)
+                with patch("pilot.runtime.broker_healthy", return_value=True), patch("pilot.runtime.open_gateway", return_value=gateway):
+                    with self.assertRaises(CallFailed) as caught:
+                        call(role, [{"role": "user", "content": "fixture prompt"}], 32)
+                self.assertEqual(type(caught.exception).__name__, "ProviderRefusal")
+                self.assertEqual(len(gateway.requests), 1)
+                self.assertFalse(gateway.closed)
+                row = json.loads(ledger.journal.read_text())
+                self.assertEqual(row["outcome"], "refusal")
+                self.assertEqual(row["refusal"]["category"], "safety")
+                self.assertEqual(row["reported_tokens"], 0)
+                self.assertEqual(row["estimated_tokens"], 4248)
+                self.assertEqual(row["charged_tokens"], 4248)
+                self.assertTrue(row["usage_estimated"])
+                self.assertAlmostEqual(row["estimated_usd_equivalent"], (4216 * 3.75 + 32 * 15) / 1_000_000)
+                self.assertEqual(ledger.tokens, 4248)
+                self.assertEqual(ledger.failed_calls, 1)
+                self.assertEqual(ledger.proposer_success_calls, 0)
+                self.assertEqual(row["row_id"], None)
+                summary = ledger.summary(throttle)
+                self.assertEqual(summary["refusals"], 1)
+                self.assertEqual(summary["transport_failures"], 0)
+                self.assertEqual(summary["reported_tokens"], 0)
+                self.assertEqual(summary["estimated_tokens"], 4248)
+
+    def test_refusal_upper_bound_uses_larger_reported_input_and_stops_budget(self):
+        ledger = Ledger(self.path / "bound.jsonl", limits=dict(LIMITS, tokens=5050))
+        frame = refusal_frame(reported_usage={"input": 5000, "output": 2, "cacheRead": 0, "cacheWrite": 0})
+        request = {"options": {"maxTokens": 32}}
+        with self.assertRaises(CallFailed):
+            ledger.settle("task", request, frame, 1)
+        row = json.loads(ledger.journal.read_text())
+        self.assertEqual(row["reported_tokens"], 5002)
+        self.assertEqual(row["estimated_tokens"], 30)
+        self.assertEqual(row["charged_tokens"], 5032)
+        self.assertAlmostEqual(row["usd_equivalent"], (5000 * 3.75 + 32 * 15) / 1_000_000)
+        with self.assertRaises(BudgetExhausted):
+            ledger.admit("task", [{"role": "user", "content": "x"}], 32)
+
+    def test_complete_refusal_usage_remains_reported_without_estimated_overlap(self):
+        ledger = Ledger(self.path / "known-refusal.jsonl")
+        frame = refusal_frame(reported_usage={"input": 100, "output": 2, "cacheRead": 30, "cacheWrite": 40})
+        frame["body"]["providerReceipt"]["usageComplete"] = True
+        with self.assertRaises(runtime.ProviderRefusal):
+            ledger.settle("task", {"options": {"maxTokens": 32}}, frame, 0)
+        row = json.loads(ledger.journal.read_text())
+        self.assertEqual(row["reported_tokens"], 172)
+        self.assertEqual(row["charged_tokens"], 172)
+        self.assertEqual(row["estimated_tokens"], 0)
+        self.assertFalse(row["usage_estimated"])
+        self.assertFalse(row["usage_missing"])
+        self.assertEqual(row["usd_equivalent"], row["reported_usd_equivalent"])
+
+    def test_scope_is_nested_receipt_metadata_and_never_changes_request_hash(self):
+        ledger = Ledger(self.path / "scopes.jsonl")
+        request = {"options": {"maxTokens": 32}}
+        with runtime.call_scope(task="ifbench", arm="unchanged:3:first", trial=3):
+            with runtime.call_scope(row_id="row-17"):
+                with self.assertRaises(CallFailed):
+                    ledger.settle("task", request, refusal_frame(), 0)
+            self.assertNotIn("row_id", runtime.current_call_scope())
+            ledger.settle("task", {"different": True}, response(), 0)
+        self.assertEqual(runtime.current_call_scope(), {})
+        rows = [json.loads(line) for line in ledger.journal.read_text().splitlines()]
+        self.assertEqual(rows[0]["context"], {"task": "ifbench", "arm": "unchanged:3:first", "trial": 3, "row_id": "row-17"})
+        self.assertEqual(rows[0]["row_id"], "row-17")
+        self.assertEqual(rows[0]["request_hash"], runtime.digest(request))
+        self.assertEqual(rows[1]["row_id"], None)
+        summary = ledger.summary(SimpleNamespace(accounted_seconds=0, pauses=0, paused_seconds=0))
+        self.assertEqual(summary["refusals_by_row"], {"row-17": 1})
+        self.assertEqual(summary["refusals_by_arm"], {"unchanged:3:first": 1})
+
+    def test_arbitrary_failure_text_and_unproven_refusal_are_not_classified(self):
+        ledger = Ledger(self.path / "unproven.jsonl")
+        for frame in (
+            {"status": 502, "body": {"error": "Refusal (safety): private explanation"}},
+            {"status": 200, "body": {"message": {"stopReason": "error", "errorMessage": "Refusal"}}},
+            {"status": 502, "body": {"providerReceipt": {"refusal": {"type": "refusal", "category": "safety"}}}},
+        ):
+            with self.assertRaises(CallFailed) as caught:
+                ledger.settle("task", {}, frame, 0)
+            self.assertEqual(type(caught.exception), CallFailed)
+        summary = ledger.summary(SimpleNamespace(accounted_seconds=0, pauses=0, paused_seconds=0))
+        self.assertEqual(summary["refusals"], 0)
+        self.assertEqual(summary["transport_failures"], 3)
+        self.assertNotIn("private explanation", ledger.journal.read_text())
+
+    def test_answer_refusal_nondeterminism_charges_receipt_then_latches_all_dispatch(self):
+        ledger = Ledger(self.path / "nondeterminism.jsonl")
+        request = {"options": {"maxTokens": 32}}
+        ledger.settle("task", request, response(), 0)
+        with self.assertRaises(runtime.RefusalNondeterminism):
+            ledger.settle("task", request, refusal_frame(), 0)
+        rows = [json.loads(line) for line in ledger.journal.read_text().splitlines()]
+        self.assertEqual([row["outcome"] for row in rows], ["answered", "refusal"])
+        self.assertEqual(ledger.tokens, 4438)
+        self.assertEqual(rows[-1]["refusal_nondeterminism"]["request_hash"], runtime.digest(request))
+        self.assertEqual(len(rows[-1]["refusal_nondeterminism"]["outcomes"]), 2)
+        with self.assertRaises(runtime.RefusalNondeterminism):
+            ledger.admit("task", [{"role": "user", "content": "unrelated"}], 32)
+
+    def test_retained_refusal_then_answer_stops_before_next_dispatch(self):
+        prior = self.path / "retained" / "calls.jsonl"
+        request = {"options": {"maxTokens": 32}}
+        runtime.append_json(prior, {"call": 127, "request_hash": runtime.digest(request), "outcome": "refusal"})
+        ledger = Ledger(self.path / "new" / "calls.jsonl", history_paths=[prior])
+        with self.assertRaises(runtime.RefusalNondeterminism):
+            ledger.settle("judge", request, response(), 0)
+        row = json.loads(ledger.journal.read_text())
+        self.assertEqual(row["charged_tokens"], 190)
+        self.assertEqual(row["outcome"], "answered")
+        self.assertEqual(row["refusal_nondeterminism"]["outcomes"][0]["journal"], str(prior))
+
+    def test_retained_mixed_outcomes_durably_stop_before_gateway_request(self):
+        request_hash = runtime.digest({"fixed": True})
+        prior = self.path / "history" / "calls-prefix.jsonl"
+        runtime.append_json(prior, {"call": 1, "request_hash": request_hash, "status": 200, "stop_reason": "stop", "usage_missing": False})
+        runtime.append_json(prior, {"call": 2, "request_hash": request_hash, "outcome": "refusal"})
+        ledger = Ledger(self.path / "blocked" / "calls.jsonl", history_paths=[prior])
+        with self.assertRaises(runtime.RefusalNondeterminism):
+            ledger.admit("proposer", [{"role": "user", "content": "new"}], 32)
+        self.assertEqual(ledger.calls, 0)
+        self.assertTrue((ledger.journal.parent / "refusal-nondeterminism.json").is_file())
+
+    def test_default_history_includes_native_refusal_proof_before_any_dispatch(self):
+        retained = self.path / "evidence" / "pilot"
+        request_hash = runtime.digest({"historical": True})
+        runtime.append_json(retained / "old" / "calls-prefix.jsonl", {
+            "call": 1, "request_hash": request_hash, "status": 200, "stop_reason": "stop", "failed": False, "usage_missing": False,
+        })
+        runtime.append_json(retained / "diagnosis-7.json", {"failed_calls": [{
+            "call": 127, "request_hash": request_hash, "known_classification_present": True,
+            "reason": "error", "provider_fetch_attempts": 1,
+        }]})
+        with patch("pilot.runtime.ROOT", self.path):
+            ledger = Ledger(retained / "new" / "calls.jsonl")
+            with self.assertRaises(runtime.RefusalNondeterminism):
+                ledger.admit("task", [{"role": "user", "content": "new request"}], 32)
+        self.assertEqual(ledger.calls, 0)
+        self.assertEqual(ledger.refusal_nondeterminism["request_hash"], request_hash)
+        self.assertTrue((ledger.journal.parent / "refusal-nondeterminism.json").is_file())
+
+    def test_durable_nondeterminism_stop_survives_reopening_with_no_history(self):
+        journal = self.path / "restart" / "calls.jsonl"
+        proof = {"request_hash": runtime.digest({}), "outcomes": [
+            {"journal": "prior-a", "call": 1, "outcome": "answered"},
+            {"journal": "prior-b", "call": 2, "outcome": "refusal"},
+        ]}
+        runtime.append_json(journal.parent / "refusal-nondeterminism.json", proof)
+        ledger = Ledger(journal, history_paths=[])
+        with self.assertRaises(runtime.RefusalNondeterminism):
+            ledger.admit("task", [{"role": "user", "content": "unrelated"}], 32)
+        self.assertEqual(ledger.calls, 0)
+        self.assertFalse(journal.exists())
+
+    @unittest.skipUnless(shutil.which("bun"), "Bun is unavailable")
+    def test_gateway_receipts_preserve_native_route_behavior_without_network(self):
+        result = subprocess.run(
+            ["bun", "test", str(Path(__file__).with_name("gateway-receipts.test.mjs"))],
+            capture_output=True, text=True, timeout=120,
+        )
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
 
     def test_poll_time_does_not_exhaust_active_work_budget(self):
         now = [1000.0]

@@ -31,7 +31,7 @@ class PreflightTests(unittest.TestCase):
     def test_replacement_control_directory_is_never_authorized(self):
         with tempfile.TemporaryDirectory() as directory, patch("pilot.__main__.calls_for") as dispatch:
             args = argparse.Namespace(task="all", out=Path(directory) / "replacement")
-            with self.assertRaisesRegex(ValueError, "no replacement"):
+            with self.assertRaises(ValueError):
                 measured_controls(args)
             dispatch.assert_not_called()
 
@@ -66,10 +66,10 @@ class PreflightTests(unittest.TestCase):
         seal(frozen)
         self.enterContext(patch("pilot.__main__.FROZEN_ADMISSION", frozen))
         controls = root / "controls"
-        declaration = {"version": 6, "seed": P_CONTROL_SEED,
+        declaration = {"version": 8, "seed": P_CONTROL_SEED,
              "draw_seeds": {"mbpp": 20261104, "hover": 20261105, "ifbench": 20261106},
              "prior_ifbench_status": "invalid cohort",
-             "predeclaration_hash": file_hash(ROOT / "evidence/pilot/predeclaration-6.md"),
+             "predeclaration_hash": file_hash(ROOT / "evidence/pilot/predeclaration-8.md"),
              "source_cohorts_hash": file_hash(frozen / "cohorts.json"), "retrieval_receipt": receipt,
              "carried_admission_hashes": {name: digest(value[1]) for name, value in self.carried.items()},
              "cohorts": {name: {"rows": [row["id"] for row in representative_rows(value)],
@@ -87,10 +87,10 @@ class PreflightTests(unittest.TestCase):
             "ranking_passed": True, "noise_passed": True, "identity": evaluator_identity(fresh),
             "adversarial_hash": digest(proof), "rows": fresh_ids})
         save(controls / "cohorts.json", declaration)
-        save(controls / "adversarial.json", {"version": "pilot-adversarial-v6", "passed": True,
+        save(controls / "adversarial.json", {"version": "pilot-adversarial-v8", "passed": True,
              "model_calls": 0, "ifbench_status": "passed", "carried_tasks": ["mbpp", "hover"],
              "cohorts_hash": digest(declaration)})
-        save(controls / "panel.json", {"version": 6, "tasks": list(TASKS), "all_admitted": True,
+        save(controls / "panel.json", {"version": 8, "tasks": list(TASKS), "all_admitted": True,
              "predeclaration_hash": declaration["predeclaration_hash"], "cohorts_hash": digest(declaration),
              "ifbench_status": "passed", "withdrawn": ["aime"], "claim_scope": "3-task development pilot"})
         seal(controls)

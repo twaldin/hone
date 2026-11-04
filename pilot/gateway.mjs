@@ -1,11 +1,13 @@
 import { dirname, join } from "node:path";
 import { readFileSync } from "node:fs";
+import { createProviderReceiptObserver, providerResult } from "./gateway-receipts.mjs";
 
 const load = (name) => import(import.meta.resolve(name, process.argv[2]));
 const { discoverAuthStorage } = await load("@oh-my-pi/pi-coding-agent/session/auth-broker-config");
 const { getBundledModel } = await load("@oh-my-pi/pi-catalog/models");
 const { createAuthGatewayRouter, serveAuthGatewayStdio } = await load("@oh-my-pi/pi-ai/auth-gateway");
 const { registerLogSink } = await load("@oh-my-pi/pi-utils/logger");
+const { countTokens, Encoding } = await load("@oh-my-pi/pi-natives");
 const packageRoot = dirname(dirname(process.argv[2]));
 const { version } = JSON.parse(readFileSync(join(packageRoot, "package.json"), "utf8"));
 const selector = "anthropic/claude-sonnet-4-6";
@@ -32,9 +34,8 @@ let logEvents = 0;
 const dispose = registerLogSink((event) => {
   if (active && /retrying|slow mode retry|retry attempt|resampl/i.test(event.message) && !/without retry|no retry|not retry/i.test(event.message)) logEvents++;
 });
-const router = createAuthGatewayRouter({
-  storage,
-  resolveModel: (id) => id === selector ? model : undefined,
+const receiptObserver = createProviderReceiptObserver({
+  countTokens: (text) => countTokens(text, Encoding.ClaudeV3),
   fetch: (input, init) => {
     const headers = init?.headers ?? (input instanceof Request ? input.headers : undefined);
     const apiKeyPresent = headers instanceof Headers ? headers.has("x-api-key") : Array.isArray(headers) ? headers.some(([name]) => name.toLowerCase() === "x-api-key") : headers && Object.keys(headers).some((name) => name.toLowerCase() === "x-api-key");
@@ -45,6 +46,11 @@ const router = createAuthGatewayRouter({
     httpAttempts++;
     return fetch(input, init);
   },
+});
+const router = createAuthGatewayRouter({
+  storage,
+  resolveModel: (id) => id === selector ? model : undefined,
+  fetch: receiptObserver.fetch,
 });
 try {
   await serveAuthGatewayStdio({
@@ -61,12 +67,11 @@ try {
       httpAttempts = 0;
       apiKeyHeaderRejections = 0;
       logEvents = 0;
+      receiptObserver.reset();
       try {
         const response = await router.route(request, "hone-development-pilot", client);
-        const body = await response.json();
-        const retryObservation = { httpAttempts, apiKeyHeaderRejections, hiddenAttempts: Math.max(0, httpAttempts - 1), logEvents, coverage: "Anthropic SDK opaque fetch override plus omp logger" };
-        if (response.status !== 200) return Response.json({ error: "Provider request failed", retryObservation }, { status: response.status });
-        return Response.json({ ...body, retryObservation });
+        const retryObservation = { httpAttempts, apiKeyHeaderRejections, hiddenAttempts: Math.max(0, httpAttempts - 1), logEvents, coverage: "omp native Anthropic fetch override plus omp logger" };
+        return await providerResult(response, receiptObserver, retryObservation);
       } finally {
         active = false;
       }

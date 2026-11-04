@@ -11,7 +11,7 @@ import time
 import uuid
 from collections.abc import Callable
 
-from .runtime import IMAGE
+from .runtime import IMAGE, ProviderRefusal
 
 MAX_CALLS = 2
 MAX_OUTPUT_TOKENS = 4096
@@ -136,6 +136,10 @@ def run_program(candidate: dict[str, str], task_input: str,
                     before = time.monotonic()
                     try:
                         text = call("task", messages, tokens)
+                    except ProviderRefusal as error:
+                        traces.append({"messages": messages, "output": "", "max_tokens": tokens, "outcome": "refusal"})
+                        error.traces = traces
+                        raise
                     finally:
                         deadline += time.monotonic() - before
                     # Failed provider calls leave the container paused until removal.

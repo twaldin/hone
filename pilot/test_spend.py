@@ -21,6 +21,20 @@ def evaluation(partition, calls, tokens, usd):
             "deployment_tokens": tokens, "deployment_usd": usd}
 
 
+def totals(calls, tokens, usd):
+    return {"calls": calls, "tokens": tokens, "charged_tokens": tokens, "reported_tokens": tokens,
+            "estimated_tokens": 0, "usd_equivalent": usd, "reported_usd_equivalent": usd,
+            "estimated_usd_equivalent": 0, "refusals": 0}
+
+
+def refused_call(number=1, role="task", row="row", arm="naive"):
+    record = call_record(number, role, tokens=3, usd=.06, failed=True, missing=True)
+    record.update(outcome="refusal", charged_tokens=103, estimated_tokens=100, usage_estimated=True,
+                  reported_usd_equivalent=.01, estimated_usd_equivalent=.05,
+                  context={"row_id": row, "task": "ifbench", "arm": arm}, row_id=row,
+                  refusal_category="provider-refusal")
+    return record
+
 class SpendTests(unittest.TestCase):
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory()
@@ -45,18 +59,18 @@ class SpendTests(unittest.TestCase):
                              evaluation("training", 1, 120, 0.12), evaluation("selection", 1, 130, 0.13)])
         result = report_spend(self.root)
         self.assertEqual(result["status"], "complete")
-        self.assertEqual(result["buckets"]["proposal"], {"calls": 4, "tokens": 260, "usd_equivalent": 0.26})
-        self.assertEqual(result["buckets"]["training_evaluation"], {"calls": 5, "tokens": 390, "usd_equivalent": 0.39})
-        self.assertEqual(result["buckets"]["selection_evaluation"], {"calls": 4, "tokens": 260, "usd_equivalent": 0.26})
-        self.assertEqual(result["buckets"]["unassigned"], {"calls": 0, "tokens": 0, "usd_equivalent": 0})
-        self.assertEqual(result["total"], {"calls": 13, "tokens": 910, "usd_equivalent": 0.91})
+        self.assertEqual(result["buckets"]["proposal"], totals(4, 260, 0.26))
+        self.assertEqual(result["buckets"]["training_evaluation"], totals(5, 390, 0.39))
+        self.assertEqual(result["buckets"]["selection_evaluation"], totals(4, 260, 0.26))
+        self.assertEqual(result["buckets"]["unassigned"], totals(0, 0, 0))
+        self.assertEqual(result["total"], totals(13, 910, 0.91))
         self.assertEqual(result["hidden_attempts"], 2)
         self.assertEqual(result["hidden_attempt_rate"], 2 / 13)
         self.assertEqual(result["calls_with_hidden_attempts"], 1)
         self.assertEqual(result["retry_log_events"], 3)
         self.assertEqual(result["failed_calls"], 3)
         self.assertEqual(result["usage_missing_calls"], 0)
-        self.assertEqual(result["by_role"]["judge"], {"calls": 2, "tokens": 220, "usd_equivalent": 0.22})
+        self.assertEqual(result["by_role"]["judge"], totals(2, 220, 0.22))
         self.assertEqual([span["call_ids"] for span in result["evaluation_spans"]], [[1, 2], [3], [7, 8, 9], [10], [12], [13]])
         self.assertEqual(result["issues"], [])
         for name in ("calls.jsonl", "evaluations.jsonl"):
@@ -67,7 +81,7 @@ class SpendTests(unittest.TestCase):
                        call_record(2, hidden=1, logs=2)], [evaluation("training", 2, 10, 0.01)])
         result = report_spend(self.root)
         self.assertEqual(result["status"], "incomplete")
-        self.assertEqual(result["buckets"]["training_evaluation"], {"calls": 2, "tokens": 10, "usd_equivalent": 0.01})
+        self.assertEqual(result["buckets"]["training_evaluation"], totals(2, 10, 0.01))
         self.assertEqual(result["total"], result["buckets"]["training_evaluation"])
         self.assertEqual(result["failed_calls"], 1)
         self.assertEqual(result["usage_missing_calls"], 1)
@@ -79,8 +93,8 @@ class SpendTests(unittest.TestCase):
         self.journals([call_record(1), call_record(2, "repair", 0, 0, failed=True, missing=True)],
                       [evaluation("selection", 1, 10, 0.01)])
         result = report_spend(self.root)
-        self.assertEqual(result["buckets"]["proposal"], {"calls": 1, "tokens": 0, "usd_equivalent": 0})
-        self.assertEqual(result["total"], {"calls": 2, "tokens": 10, "usd_equivalent": 0.01})
+        self.assertEqual(result["buckets"]["proposal"], totals(1, 0, 0))
+        self.assertEqual(result["total"], totals(2, 10, 0.01))
         self.assertEqual(result["failed_calls"], 1)
         self.assertEqual(result["usage_missing_calls"], 1)
         self.assertEqual(result["status"], "incomplete")
@@ -90,8 +104,8 @@ class SpendTests(unittest.TestCase):
                        call_record(4, "judge", 30, 0.03, failed=True)], [evaluation("selection", 1, 10, 0.01)])
         result = report_spend(self.root)
         self.assertEqual(result["status"], "incomplete")
-        self.assertEqual(result["buckets"]["unassigned"], {"calls": 2, "tokens": 50, "usd_equivalent": 0.05})
-        self.assertEqual(result["total"], {"calls": 4, "tokens": 70, "usd_equivalent": 0.07})
+        self.assertEqual(result["buckets"]["unassigned"], totals(2, 50, 0.05))
+        self.assertEqual(result["total"], totals(4, 70, 0.07))
         self.assertEqual(result["unassigned_calls"], [
             {"call": 3, "role": "task", "reason": "no_completed_evaluation"},
             {"call": 4, "role": "judge", "reason": "no_completed_evaluation"}])
@@ -101,8 +115,8 @@ class SpendTests(unittest.TestCase):
                       [evaluation("training", 1, 10, 0.01)])
         result = report_spend(self.root)
         self.assertEqual(result["status"], "incomplete")
-        self.assertEqual(result["buckets"]["unassigned"], {"calls": 2, "tokens": 30, "usd_equivalent": 0.03})
-        self.assertEqual(result["total"], {"calls": 3, "tokens": 40, "usd_equivalent": 0.04})
+        self.assertEqual(result["buckets"]["unassigned"], totals(2, 30, 0.03))
+        self.assertEqual(result["total"], totals(3, 40, 0.04))
         self.assertEqual([call["reason"] for call in result["unassigned_calls"]], ["unknown_role", "unknown_role"])
         self.assertEqual(set(result["by_role"]), {"retry", "task", "future-role"})
 
@@ -113,7 +127,7 @@ class SpendTests(unittest.TestCase):
             stream.write(tail)
         result = report_spend(self.root)
         self.assertEqual(result["status"], "incomplete")
-        self.assertEqual(result["total"], {"calls": 1, "tokens": 10, "usd_equivalent": 0.01})
+        self.assertEqual(result["total"], totals(1, 10, 0.01))
         self.assertEqual(result["issues"], [{"file": "calls.jsonl", "line": 2, "reason": "truncated_record",
                                              "bytes": len(tail), "sha256": "sha256:" + hashlib.sha256(tail).hexdigest()}])
         self.assertIn("unknown", result["usage_limit"])
@@ -124,8 +138,8 @@ class SpendTests(unittest.TestCase):
             stream.write(b'{"partition":"training"')
         result = report_spend(self.root)
         self.assertEqual(result["status"], "incomplete")
-        self.assertEqual(result["total"], {"calls": 2, "tokens": 20, "usd_equivalent": 0.02})
-        self.assertEqual(result["buckets"]["unassigned"], {"calls": 1, "tokens": 10, "usd_equivalent": 0.01})
+        self.assertEqual(result["total"], totals(2, 20, 0.02))
+        self.assertEqual(result["buckets"]["unassigned"], totals(1, 10, 0.01))
         self.assertTrue(any(issue["reason"] == "truncated_record" for issue in result["issues"]))
 
     def test_complete_json_without_newline_keeps_reported_totals_but_marks_interruption(self):
@@ -133,7 +147,7 @@ class SpendTests(unittest.TestCase):
         (self.root / "calls.jsonl").write_text(json.dumps(call_record(1)))
         result = report_spend(self.root)
         self.assertEqual(result["status"], "incomplete")
-        self.assertEqual(result["total"], {"calls": 1, "tokens": 10, "usd_equivalent": 0.01})
+        self.assertEqual(result["total"], totals(1, 10, 0.01))
         self.assertEqual(result["issues"], [{"file": "calls.jsonl", "line": 1, "reason": "unterminated_record"}])
 
     def test_invalid_terminated_or_interior_json_is_rejected(self):
@@ -175,7 +189,7 @@ class SpendTests(unittest.TestCase):
         self.journals([call_record(1)], [evaluation("training", 0, 0, 0), evaluation("selection", 1, 10, 0.01)])
         result = report_spend(self.root)
         self.assertEqual(result["status"], "complete")
-        self.assertEqual(result["buckets"]["training_evaluation"], {"calls": 0, "tokens": 0, "usd_equivalent": 0})
+        self.assertEqual(result["buckets"]["training_evaluation"], totals(0, 0, 0))
         self.assertEqual([span["call_ids"] for span in result["evaluation_spans"]], [[], [1]])
 
     def test_empty_journals_and_missing_files_do_not_claim_completed_measurement(self):
@@ -185,7 +199,7 @@ class SpendTests(unittest.TestCase):
         self.journals([], [])
         result = report_spend(self.root)
         self.assertEqual(result["status"], "incomplete")
-        self.assertEqual(result["total"], {"calls": 0, "tokens": 0, "usd_equivalent": 0})
+        self.assertEqual(result["total"], totals(0, 0, 0))
         self.assertEqual(result["hidden_attempt_rate"], 0)
         self.assertEqual(result["hidden_attempts"], 0)
         self.assertEqual(result["failed_calls"], 0)
@@ -197,7 +211,7 @@ class SpendTests(unittest.TestCase):
         (self.root / "evaluations.jsonl").unlink()
         result = report_spend(self.root)
         self.assertEqual(result["status"], "incomplete")
-        self.assertEqual(result["total"], {"calls": 2, "tokens": 20, "usd_equivalent": 0.02})
+        self.assertEqual(result["total"], totals(2, 20, 0.02))
         self.assertEqual(result["buckets"]["unassigned"]["calls"], 1)
         self.assertEqual(result["buckets"]["proposal"]["calls"], 1)
         self.assertEqual(result["input_hashes"]["evaluations.jsonl"], None)
@@ -229,6 +243,56 @@ class SpendTests(unittest.TestCase):
                 self.journals([call_record(1)], [record])
                 with self.assertRaises(ValueError):
                     report_spend(self.root)
+
+    def test_estimated_refusal_charges_reconcile_without_becoming_reported_usage(self):
+        self.journals([refused_call(), call_record(2, tokens=7, usd=.04),
+                       refused_call(3, "proposer", None, "proposal")],
+                      [evaluation("training", 2, 110, .10)])
+        result = report_spend(self.root)
+        self.assertEqual(result["status"], "complete")
+        phase = result["buckets"]["training_evaluation"]
+        self.assertEqual(phase["tokens"], 110)
+        self.assertEqual(phase["charged_tokens"], 110)
+        self.assertEqual(phase["reported_tokens"], 10)
+        self.assertEqual(phase["estimated_tokens"], 100)
+        self.assertAlmostEqual(phase["reported_usd_equivalent"], .05)
+        self.assertAlmostEqual(phase["estimated_usd_equivalent"], .05)
+        self.assertEqual(phase["refusals"], 1)
+        self.assertEqual(result["refusals"], 2)
+        self.assertEqual(result["refusals_by_row"], {"row": 1, "<no-row>": 1})
+        self.assertEqual(result["refusals_by_arm"], {"naive": 1, "proposal": 1})
+        self.assertEqual(result["by_row"]["row"]["estimated_tokens"], 100)
+        self.assertEqual(result["by_arm"]["proposal"]["reported_tokens"], 3)
+        self.assertEqual(result["failed_calls"], 2)
+        self.assertEqual(result["transport_failures"], 0)
+        self.assertEqual(result["usage_missing_calls"], 2)
+        self.assertEqual(result["total"]["tokens"], 213)
+
+    def test_estimates_cannot_mask_inconsistent_charges_or_evaluation_spans(self):
+        for field, value in (("charged_tokens", 102), ("estimated_tokens", -1),
+                             ("estimated_usd_equivalent", .04), ("usage_estimated", False)):
+            with self.subTest(field=field):
+                record = refused_call()
+                record[field] = value
+                self.journals([record], [evaluation("training", 1, 103, .06)])
+                with self.assertRaises(ValueError):
+                    report_spend(self.root)
+        self.journals([refused_call()], [evaluation("training", 1, 3, .06)])
+        with self.assertRaises(ValueError):
+            report_spend(self.root)
+
+    def test_reported_refusal_is_not_an_estimate_or_transport_failure(self):
+        record = call_record(1, failed=True)
+        record.update(outcome="refusal", charged_tokens=10, estimated_tokens=0, usage_estimated=False,
+                      reported_usd_equivalent=.01, estimated_usd_equivalent=0,
+                      context={"row_id": "row", "arm": "naive"})
+        self.journals([record], [evaluation("selection", 1, 10, .01)])
+        result = report_spend(self.root)
+        self.assertEqual(result["status"], "complete")
+        self.assertEqual(result["total"]["reported_tokens"], 10)
+        self.assertEqual(result["total"]["estimated_tokens"], 0)
+        self.assertEqual(result["refusals"], 1)
+        self.assertEqual(result["transport_failures"], 0)
 
 
 if __name__ == "__main__":
