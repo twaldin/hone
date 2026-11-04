@@ -1,0 +1,32 @@
+{
+  "actual_unit_admission": "failed at IFBench NLP asset lookup before account/gateway/model startup",
+  "admitted_index_copy_verified": true,
+  "admitted_index_source_written": false,
+  "exception": "LookupError: Resource punkt not found",
+  "executed_head": "19b70ddcc9f373ec2abf22302fee02fdc8c7f386",
+  "exit_status": 1,
+  "final_test_labels_read": false,
+  "live_main_pid": 0,
+  "next_action_requires_ruling": "Resume with NLTK_DATA set to the existing lane NLP cache before Python startup. Do not rebuild the index, re-admit, restart this failed unit or run any cell under this stopped attempt.",
+  "pilot_estimated_tokens": 0,
+  "pilot_model_calls": 0,
+  "pilot_reported_tokens": 0,
+  "pilot_usd_equivalent": 0,
+  "preflight_environment_difference": {
+    "preflight_NLTK_DATA": "/home/tim/worktrees/hone/hone-hone-pilot-seed0-1/.pilot-cache/nltk",
+    "unit_NLTK_DATA": "not supplied"
+  },
+  "reason": "pre-search-harness-failure",
+  "restart": "no",
+  "root_cause": "The launcher omitted NLTK_DATA; main calls load_panel before environment sets the cache path. The asset directory is installed and worked in the standalone check.",
+  "schema": "pilot-seed0-startup-stop-v9",
+  "search_cells_completed": 0,
+  "search_cells_started": 0,
+  "search_output_directory_created": false,
+  "service_runtime_seconds": 101.429,
+  "standalone_admission": "passed with explicit NLTK_DATA before Python startup",
+  "started_main_pid": 3839792,
+  "status": "STOP_BEFORE_FIRST_SEARCH",
+  "unit": "hone-seed0-9-20261104T225929.service",
+  "unit_restarted": false
+}
