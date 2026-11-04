@@ -79,6 +79,8 @@ Without either setting, Hone looks for capsules in `./capsules` under the direct
 
 ## Development optimizer pilot
 
+**Blocked — do not run the pilot or merge this branch.** Exact-head review found that IFBench omits the official seed-1 training cap from 300 rows to 150. Its frozen controls do not admit the official partition. [The verified stop](evidence/pilot/review-stop-5.json) preserves the evidence and requests a new predeclaration before further model calls.
+
 [`pilot/`](pilot/) compares Hone's paired, noise-calibrated policy, pinned official GEPA, and a plain agent loop on development-only IFBench, bounded MBPP agent programs, and HoVer if its one admission attempt passes. It uses one subscription route, an account allowlist, usage throttling, and matched reported-usage budgets. Final-test labels stay sealed.
 
 The pilot is an admission experiment, not an optimizer-quality claim. Its accounting accepts disclosed token undercounts from internal retries and failed calls; complete attempt and failed-call receipts are required before a full comparison. See [the pilot contract and commands](docs/pilot.md).
@@ -89,7 +91,7 @@ Contract 4 admission stopped without searches. AIME's 16-pair noise envelope was
 
 [Predeclaration 5](evidence/pilot/predeclaration-5.md), committed before new pilot calls, withdraws AIME without changing its failed evidence. It admits the previously named HoVer reserve once with the same 40-row controls and 16-pair noise gate. If HoVer fails, the panel is MBPP + IFBench only, labelled a two-task development pilot. There are no further substitutions. The larger pilot remains unauthorized pending review of the three method smokes.
 
-HoVer passed its frozen ranking and noise gates: improved 0.600, naive 0.325, envelope 0.178765 below contrast 0.275. The admitted panel is MBPP + IFBench + HoVer. All three seed-0 MBPP smokes completed after the security rebase and execution re-seal. [Measured results](evidence/pilot/results-5.json) include phase costs and accounting limits; all methods retained the same seed artifact, so no optimizer advantage is established. Neither matrix is authorized.
+HoVer passed its frozen ranking and noise gates: improved 0.600, naive 0.325, envelope 0.178765 below contrast 0.275. All three seed-0 MBPP smokes completed after the security rebase and execution re-seal. The runner reported a three-task panel, but the later verified IFBench partition defect invalidates that admission. [Measured results](evidence/pilot/results-5.json) retain phase costs and accounting limits; all methods retained the same seed artifact, so no optimizer advantage is established. Neither matrix is authorized.
 
 ## Status and limitations
 

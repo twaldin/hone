@@ -279,7 +279,7 @@
     }
   },
   "schema": "pilot-contract-5-complete-v1",
-  "scope": "Three-task development pilot harness; no optimizer-quality claim. Smokes run only seed-0 MBPP, not the 27- or 18-run matrix.",
+  "scope": "Recorded development pilot attempt; the runner-reported three-task admission is invalid because IFBench omitted the official 150-row training cap. Seed-0 MBPP smokes are retained evidence, not a quality claim or matrix authorization.",
   "security": {
     "committed_before_smoke": true,
     "merge": "ba38511431f0dd5f0fd506ddea406ae274e68e3e",
@@ -308,7 +308,9 @@
       "status": "INFERENCE_FROM_CONTROLS_NOT_MEASURED_SEARCH"
     }
   },
-  "status": "smokes-complete-replayed",
+  "status": "blocked-official-ifbench-partition",
+  "admission_valid": false,
+  "blocking_review": "evidence/pilot/review-stop-5.json",
   "throttle": {
     "dispatch": "after-resume-only",
     "forced_high_fraction": 0.99,
@@ -384,7 +386,7 @@
         "wall_hours_per_run": 3.175996627287835
       }
     ],
-    "status": "INFERENCE_NOT_A_MATRIX_RESULT"
+    "status": "SUPERSEDED_INFERENCE_INVALID_IFBENCH_BASIS"
   },
   "verification": {
     "capsule_kit_vitest": {

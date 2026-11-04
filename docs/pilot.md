@@ -1,5 +1,7 @@
 # Development optimizer pilot
 
+**Blocked — do not run further model calls or merge this branch.** Exact-head experiment review found that the IFBench loader omits the official inherited seed-1 sample of 150 training rows. Twenty-one of its 40 measured control rows are outside that official partition. The numerical gate passes do not admit the official task. [The independently verified stop](../evidence/pilot/review-stop-5.json) preserves all frozen measurements unchanged. Correcting the loader and running a fresh admission requires a new predeclaration from the gate owner; the commands below are not authorization.
+
 The pilot decides whether Hone's proposed search policy warrants a larger comparison. It does not support a public optimizer-quality claim. It compares Hone, pinned official GEPA, and a plain agent loop with the same current subscription model and reported-usage budget.
 
 [Predeclaration 4](../evidence/pilot/predeclaration-4.md), committed as `030c792` before new model calls, replaces the authored P controls with published optimized instructions and a fresh 40-row draw. [Correction 4a](../evidence/pilot/predeclaration-4a.md) removes a CPU-0 gateway override and prevents provider failures from deciding calibration scores. The transport change requires MBPP re-admission; contract-3 measurements alone cannot authorize the corrected harness. [Handoff 3](../evidence/pilot/handoff-3.md) records the earlier IFBench ranking failure.
@@ -66,7 +68,7 @@ The replay input is the pinned archive at `https://media.githubusercontent.com/m
 
 | Task | Training | Selection | Metric and source | Why this task |
 | --- | ---: | ---: | --- | --- |
-| P IFBench | 300 | 300 | Official loose instruction fraction from GEPA artifact `cbefbc1aa0f43dd39874ec4bf42211365dbda42e`. Selection is development-file rows 0–299, training is rows 300–599. This follows released code rather than the plan's 150-training figure. | Tests prompt optimization against explicit instruction constraints and a non-LLM checker. |
+| P IFBench, admission invalid | 300 measured; 150 required | 300 | Official loose instruction fraction from GEPA artifact `cbefbc1aa0f43dd39874ec4bf42211365dbda42e`. Selection is development-file rows 0–299. The loader incorrectly keeps all rows 300–599 instead of the inherited seed-1 sample of 150. | Tests explicit instruction constraints with a non-LLM checker, but needs a new predeclared official-partition admission. |
 | P HoVer | 150 | 300 | Official GEPA three-support-document partition, 40% test, 40% validation, 20% train after seed-0 shuffle, with independent seed-1 caps. Discrete normalized supporting-title subset metric. | Passed its single frozen admission attempt; replaces withdrawn AIME and adds four-module retrieval optimization without an LLM judge. |
 | A MBPP | 374 | 90 | Official full training and validation files at `google-research-datasets/mbpp`, revision `4bb6404fdc6cacfda99d4ac4205087b89d32030c`. Score all published development assertions passing. | Supplies a CC-BY-4.0 executable agent-program task with deterministic assertions and a bounded, isolated deployment. |
 
@@ -150,12 +152,12 @@ Replay first verifies the bundle hashes and task-resource identities, then runs 
 
 ## Measured contract-5 results
 
-[The complete report](../evidence/pilot/results-5.json) links the frozen controls, raw calls, phase reconciliation and replay results. MBPP and IFBench reuse their admitted controls unchanged; AIME's failed evidence remains withdrawn.
+[The report](../evidence/pilot/results-5.json) links the frozen controls, raw calls, phase reconciliation and replay results. MBPP and HoVer passed their measured gates. IFBench's unchanged numerical results below came from the wrong training cohort and cannot admit the official partition. AIME's failed evidence remains withdrawn. The complete panel is blocked.
 
 | Task | Improved | Naive | Broken | Shortcut | Noise envelope | Contrast |
 | --- | ---: | ---: | ---: | ---: | ---: | ---: |
 | MBPP | 0.950 | 0.700 | 0 | 0 | 0.086535 | 0.250 |
-| IFBench | 0.950 | 0.800 | 0 | 0.2125 | 0.067409 | 0.150 |
+| IFBench, wrong cohort | 0.950 | 0.800 | 0 | 0.2125 | 0.067409 | 0.150 |
 | HoVer | 0.600 | 0.325 | 0 | 0 | 0.178765 | 0.275 |
 
 Each seed-0 MBPP smoke used the unchanged 90-row selection set, $10-equivalent ceiling and one-proposal limit. Dollar-equivalent phase columns include all reported invocation usage.
@@ -168,7 +170,7 @@ Each seed-0 MBPP smoke used the unchanged 90-row selection set, $10-equivalent c
 
 All three had zero hidden attempts, missing retry observations, failed calls, missing usage, unassigned calls and throttle pauses. Official GEPA made a real subscription reflection call and proposed an unchanged prompt. Hone rejected its proposal at the paired training gate; plain rejected its child after full selection. All three retained the identical seed artifact. Different scores for the identical seed are measurement variation, not an optimizer-quality result. These smokes prove the exercised integration paths, not a successful promotion or the full matrix.
 
-**Planning inference, not a matrix result:** task-specific measured token/cost/time ratios project about 35.3 million reported tokens and 86.9 serial wall-hours for 27 cells at the observed polling/quota duty cycle, with the two-hour active cap projected to bind on MBPP and IFBench. This assumes future proposal frequency, artifact behavior and latency resemble the samples; they may not. The report preserves the calculation and assumptions. The broad ceilings remain $270-equivalent, 324 million reported tokens and 54 active hours; quota and broker pauses have no finite wall-time bound.
+**Superseded planning inference, not a valid run plan:** pre-review task-specific token/cost/time ratios projected about 35.3 million reported tokens and 86.9 serial wall-hours for 27 cells at the observed polling/quota duty cycle. The IFBench basis is now known to use a non-official cohort, so the estimate cannot authorize a matrix and needs reassessment after a new admission. It also assumes future proposal frequency, artifact behavior and latency resemble the samples. The report preserves the calculation and assumptions. The broad ceilings remain $270-equivalent, 324 million reported tokens and 54 active hours; quota and broker pauses have no finite wall-time bound.
 
 HoVer's calibration also projects about $3.67349 per 300-row selection pass, or $11.02047 for three passes before training or proposal. Like IFBench's $10.49264 projection, this is a fixed-budget feasibility risk, not a measured search result. No cap or selection set was changed. The assistant must review the measured smoke phase costs before authorizing either matrix. Credential-opaque per-attempt and failed-call usage receipts in omp remain a prerequisite for the full matrix.
 
