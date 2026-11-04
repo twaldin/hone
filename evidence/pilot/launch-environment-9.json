@@ -1,0 +1,48 @@
+{
+  "schema": "pilot-launch-environment-correction-v9",
+  "authorization": "Ruling: authorized. This is a launch-environment omission, not a measurement change; nothing ran.",
+  "required_unit_environment": {
+    "NLTK_DATA": "/home/tim/worktrees/hone/hone-hone-pilot-seed0-1/.pilot-cache/nltk"
+  },
+  "implementation": {
+    "configuration_owner": "pilot.__main__.configure_nlp",
+    "entrypoint_setup": "main calls configure_nlp after argument parsing, before admission or NLP imports",
+    "child_environment_setup": "environment uses configure_nlp for the existing lane cache path",
+    "account_pool_order": "environment remains after load_panel; no account-pool setup moves before admission",
+    "main_source_before_sha256": "b12ab03ab039e63340eeab2e71c029c4c33e836e6eca4936dd6fbc77c4c590d0",
+    "main_source_after_sha256": "a03815841cbbe5edcfbbc0aa26512b859bb56e9cf9766cf1b4bc3e31db7285bb",
+    "source_transition_change": "Only pilot/__main__.py's current-source hash advances in source-transition-9.json. The original baseline, prior transition and predeclaration hash are unchanged."
+  },
+  "regression": {
+    "test": "pilot.test_environment.EnvironmentTests.test_admission_finds_nlp_assets_without_launch_environment",
+    "command": "nice -n 10 taskset -c 6 env OPENBLAS_NUM_THREADS=1 OMP_NUM_THREADS=1 MKL_NUM_THREADS=1 pilot/.venv/bin/python -m unittest pilot.test_environment.EnvironmentTests.test_admission_finds_nlp_assets_without_launch_environment -v",
+    "before_head": "e8457d59dbf53658ef9d13afd25fe121b88eed19",
+    "before": "FAIL: admission's real nltk.data.find raises LookupError: Resource punkt not found",
+    "behavior": "A fresh subprocess without NLTK_DATA runs main and admission consumes a fixture resource through real nltk.data.find. It stops at that admission boundary without transport or model calls.",
+    "after": "PASS in the final 265-test suite"
+  },
+  "discarded_candidate": {
+    "change": "Moved the entire environment call before admission",
+    "result": "Rejected by the full suite: 9 failures preserve pre-admission account-pool isolation",
+    "resolution": "Move only NLP initialization; leave pool setup behind admission",
+    "offline_smoke": "Cancelled the superseded zero-model preflight before changing its source; no search was launched"
+  },
+  "full_suite": {
+    "command": "nice -n 10 taskset -c 6 env OPENBLAS_NUM_THREADS=1 OMP_NUM_THREADS=1 MKL_NUM_THREADS=1 JAX_PLATFORMS=cpu PILOT_DOCKER_TESTS=1 PILOT_OFFICIAL_METRIC_TESTS=1 NLTK_DATA=/home/tim/worktrees/hone/hone-hone-pilot-seed0-1/.pilot-cache/nltk pilot/.venv/bin/python -m unittest discover -s pilot -p 'test_*.py' -v",
+    "tests": 265,
+    "seconds": 30.404,
+    "result": "OK"
+  },
+  "unchanged": {
+    "predeclaration_9_sha256": "2ea1f4e7b68e8ddd0d9fe04326a69abdfd624c9650e4eaa1c8aaf4e5b5f0b940",
+    "search_seed": 0,
+    "cells": 6,
+    "measurement_gates": true,
+    "stop_and_handback_rules": true,
+    "scoring_and_budgets": true,
+    "admitted_index_artifact": true,
+    "broker_and_omp_configuration": true
+  },
+  "pilot_model_calls_during_correction": 0,
+  "final_test_labels_read": false
+}

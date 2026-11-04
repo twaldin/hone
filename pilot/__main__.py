@@ -51,6 +51,12 @@ def evaluator_identity(task) -> dict:
             "image": IMAGE}
 
 
+def configure_nlp(cache: Path) -> str:
+    path = str((cache / "nltk").resolve())
+    os.environ["NLTK_DATA"] = path
+    return path
+
+
 def environment(pool_path: Path) -> tuple[dict, dict]:
     if not pool_path.exists():
         create_pool(pool_path)
@@ -65,9 +71,8 @@ def environment(pool_path: Path) -> tuple[dict, dict]:
         "PI_CODING_AGENT_DIR", "OMP_AGENT_DIR",
     ) if key in os.environ}
     env["OMP_AUTH_BROKER_ACCOUNT_POOL_FILE"] = str(pool_path.resolve())
-    env["NLTK_DATA"] = str((ROOT / ".pilot-cache/nltk").resolve())
+    env["NLTK_DATA"] = configure_nlp(ROOT / ".pilot-cache")
     env["PILOT_PYTHON_IMAGE"] = IMAGE
-    os.environ["NLTK_DATA"] = env["NLTK_DATA"]
     os.environ["PILOT_PYTHON_IMAGE"] = IMAGE
     return pool, env
 
@@ -936,6 +941,7 @@ def main():
     parser.add_argument("--task", choices=(*TASKS, "all"), default="all")
     parser.add_argument("--seed", type=int, default=0)
     args = parser.parse_args()
+    configure_nlp(args.cache)
     if args.out is None:
         args.out = ROOT / "evidence/pilot" / (
             "mbpp-readmission-4a" if args.command == "readmit-mbpp" else
@@ -955,7 +961,6 @@ def main():
         offline_adversarial(args)
         return
     if args.command == "controls":
-        os.environ["NLTK_DATA"] = str((args.cache / "nltk").resolve())
         controls(args)
         return
     if args.command in {"prepare", "probe", "throttle-proof"}:
