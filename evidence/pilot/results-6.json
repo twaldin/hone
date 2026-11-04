@@ -36,12 +36,13 @@
       ],
       "http_status": 502,
       "missing_usage_calls": 2,
+      "allowed_transport_retry": "Call128 is the single allowed externally metered retry of call127; the control attempt itself was never restarted.",
       "root_cause": "Not available in retained transport receipts; no cause inferred from HTTP status alone.",
       "status": "infrastructure-failure",
       "unreported_failed_call_tokens": "unknown"
     },
     "improved_complete": false,
-    "naive_mean": 0.8416666666666668,
+    "naive_mean": 0.8416666666666666,
     "noise_pairs_complete": 0,
     "partition": "Random(1).sample(source[300:600],150),source[:300]",
     "ranking_complete": false,
@@ -161,12 +162,13 @@
     "docker": true,
     "frozen_evaluator_files_modified_after_dispatch": false,
     "official_metrics": true,
-    "pilot_tests_passed": 176,
+    "pilot_tests_passed": 178,
     "red_before_green_after": [
       "Official IFBench ordered150-row partition regression.",
       "Authentic original12-file MBPP source inventory/older orchestration snapshot.",
-      "Run-plan reporter with a sealed infrastructure abort and no panel."
+      "Run-plan reporter with a sealed infrastructure abort and no panel.",
+      "Reporter rejects an unsealed panel and never projects from infrastructure-aborted partial controls."
     ],
-    "seconds": 22.151
+    "seconds": 20.507
   }
 }

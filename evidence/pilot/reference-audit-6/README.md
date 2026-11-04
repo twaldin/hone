@@ -14,6 +14,10 @@ The single full audit took 248.29510742099956 seconds. It loaded no final-test d
 
 The reference pass rate is 452/464, or approximately 97.414%. All 464 rows are gradeable. Gradeability means that the trusted planner can express the official assertions, not that the reference worker passes them.
 
+The audited `tasks.py` and `__main__.py` bytes match commit `c8b55d2042d07104aedeca54dba7e715df83f57c`. Later loader changes affect IFBench only; retained-admission checks establish unchanged MBPP execution. The report identifies the audit module and all consumed source bytes by hash.
+
+The single failing reference in MBPP's 20-row control cohort is `mbpp:train:959`. Its float/int mismatch explains the known-improved reference score of 0.95. The admitted contrast remains 0.25 against a noise envelope of 0.086535.
+
 Exact failing IDs:
 
 - `mbpp:train:653`

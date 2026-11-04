@@ -33,13 +33,20 @@ def project(sample: dict) -> dict:
 def build(controls: Path) -> dict:
     from .__main__ import verify_bundle
     verify_bundle(controls)
+    members = json.loads((controls / "bundle.json").read_text())["files"]
+    for name in ("panel.json", "ifbench/failure.json"):
+        if (controls / name).exists() and name not in members:
+            raise ValueError("Run-plan outcome is not sealed")
     panel_path = controls / "panel.json"
     panel = json.loads(panel_path.read_text()) if panel_path.exists() else None
-    failure = json.loads((controls / "ifbench/failure.json").read_text()) if panel is None else None
-    if panel is None and failure.get("status") != "infrastructure-failure":
+    failure_path = controls / "ifbench/failure.json"
+    failure = json.loads(failure_path.read_text()) if failure_path.exists() else None
+    if panel is None and (failure is None or failure.get("status") != "infrastructure-failure"):
         raise ValueError("Missing panel without a sealed infrastructure-abort receipt")
     if panel is not None and (panel["version"] != 6 or panel["all_admitted"] is not True):
         raise ValueError("A complete contract-6 panel or sealed infrastructure abort is required")
+    if panel is not None and failure is not None and failure.get("status") == "infrastructure-failure":
+        raise ValueError("Infrastructure abort cannot also supply an admitted panel")
     inputs = {}
 
     def load(path):
@@ -56,13 +63,13 @@ def build(controls: Path) -> dict:
                          "ifbench": controls / "ifbench"}
     calibrations = {}
     for task, path in calibration_paths.items():
+        if task == "ifbench" and failure is not None and failure.get("status") == "infrastructure-failure":
+            incomplete = {"status": "infrastructure-failure-not-a-gate-failure",
+                          "failure": load(path / "failure.json"), "usage": load(path / "usage.json"),
+                          "complete_calibration": False, "usable_for_projection": False,
+                          "reason": "Calibration infrastructure-aborted. Completed prefixes do not establish admission; missing failed-call usage is unknown."}
+            continue
         if not (path / "controls.json").exists():
-            if task == "ifbench" and failure is not None:
-                incomplete = {"status": "infrastructure-failure-not-a-gate-failure",
-                              "failure": load(path / "failure.json"), "usage": load(path / "usage.json"),
-                              "complete_calibration": False, "usable_for_projection": False,
-                              "reason": "Only naive completed. There is no improved contrast or noise calibration; missing failed-call usage is unknown."}
-                continue
             if task == "ifbench" and panel["ifbench_status"] == "failed-gate":
                 continue
             raise ValueError("Calibration results missing: " + task)

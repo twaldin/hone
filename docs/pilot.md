@@ -112,7 +112,7 @@ Credential-opaque per-attempt admission and usage receipts, including failed-cal
 
 ### Fixed-budget feasibility
 
-Keep the $10 ceiling and complete selection sets. Contract-4a IFBench calibration spent $15.85554-equivalent and 1,655,348 reported tokens across 1,360 model-evaluated rollouts. Scaling that observed mean gives about $3.49755 and 365,150 tokens for one 300-row selection pass, or $10.49264 for three passes before training or proposal. This is an inference from calibration, not a measured search or a lower bound. The three MBPP smokes report actual phase spend. Selection overhead is part of the fixed-budget result, not grounds to omit rows or grant Hone more budget. The assistant reviews those measured costs before authorizing the pilot.
+Keep the $10 ceiling and complete selection sets. The earlier IFBench illustration, $3.49755 per selection pass and $10.49264 for three, came from the invalid contract-4a training cohort. It is historical only, not a price estimate for corrected official IFBench. Contract 6 has no complete IFBench calibration and no three-task point forecast. The current prospective plan uses only standing MBPP and HoVer measurements. Selection overhead remains charged; it is not grounds to omit rows or grant Hone more budget.
 
 ## Run and replay
 
@@ -156,6 +156,8 @@ Replay first verifies the bundle hashes and task-resource identities, then runs 
 
 IFBench's corrected official 150-row training partition and 300-row selection set passed zero-model protocol checks. The one 40-row control attempt then infrastructure-aborted during the improved control. The completed naive mean was 0.841667. Reported totals were 128 calls, 141,064 tokens, $1.160328-equivalent and 1,365.35 seconds of ledger wall time. Calls 127 and 128 returned HTTP 502 with no reported usage; their omitted token volume is unknown. They are not zero-cost successes. Observed hidden attempts were zero. A stale-account-usage pause lasted 254.49 seconds.
 
+Call 128 was the single allowed externally metered transport retry of call 127. The control attempt itself was never restarted. These two external failures are distinct from omp's observed internal hidden-attempt count, which was zero.
+
 The protected runner retained the abort rather than recording a candidate zero, choosing a smaller panel or restarting. MBPP and HoVer admissions stand, but this infrastructure result does not activate the measured-gate-failure fallback.
 
 [The replayable run-plan report](../evidence/pilot/run-plan-6.json) preserves actual calibration per task and per-method smoke phase spend. Regenerate it without model calls:
@@ -190,7 +192,7 @@ All three had zero hidden attempts, missing retry observations, failed calls, mi
 
 **Superseded planning inference, not a valid run plan:** pre-review task-specific token/cost/time ratios projected about 35.3 million reported tokens and 86.9 serial wall-hours for 27 cells at the observed polling/quota duty cycle. The IFBench basis is now known to use a non-official cohort, so the estimate cannot authorize a matrix and needs reassessment after a new admission. It also assumes future proposal frequency, artifact behavior and latency resemble the samples. The report preserves the calculation and assumptions. The broad ceilings remain $270-equivalent, 324 million reported tokens and 54 active hours; quota and broker pauses have no finite wall-time bound.
 
-HoVer's calibration also projects about $3.67349 per 300-row selection pass, or $11.02047 for three passes before training or proposal. Like IFBench's $10.49264 projection, this is a fixed-budget feasibility risk, not a measured search result. No cap or selection set was changed. The assistant must review the measured smoke phase costs before authorizing either matrix. Credential-opaque per-attempt and failed-call usage receipts in omp remain a prerequisite for the full matrix.
+HoVer's admitted calibration projects about $3.67349 per 300-row selection pass, or $11.02047 for three passes before training or proposal. This is a fixed-budget feasibility risk, not a measured search result. The earlier IFBench $10.49264 figure belongs only to invalid-cohort history and is not used by the current plan. No cap or selection set was changed. The assistant must review measured smoke phase costs before authorizing either matrix. Credential-opaque per-attempt and failed-call usage receipts in omp remain a prerequisite for the full matrix.
 
 ## CI and baseline failures
 

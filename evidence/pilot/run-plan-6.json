@@ -284,14 +284,14 @@
       "task": "hover"
     }
   ],
-  "generator_sha256": "3f286de018097d3ffa6388fc35ec0b80da8c7a3b2b70dbcceff440ea467c55ef",
+  "generator_sha256": "f0e7292bb47aaf26b92203a6bf321171241994896a98fd4490960fd0359cd9b2",
   "incomplete_ifbench_calibration": {
     "complete_calibration": false,
     "failure": {
       "error_type": "TransportError",
       "status": "infrastructure-failure"
     },
-    "reason": "Only naive completed. There is no improved contrast or noise calibration; missing failed-call usage is unknown.",
+    "reason": "Calibration infrastructure-aborted. Completed prefixes do not establish admission; missing failed-call usage is unknown.",
     "status": "infrastructure-failure-not-a-gate-failure",
     "usable_for_projection": false,
     "usage": {

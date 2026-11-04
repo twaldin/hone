@@ -1,4 +1,8 @@
 import unittest
+import json
+import shutil
+import tempfile
+from pathlib import Path
 from unittest.mock import patch
 
 from pilot.run_plan import build, project
@@ -43,3 +47,24 @@ class ProjectionTests(unittest.TestCase):
         self.assertFalse(fallback["authorized"])
         self.assertGreater(fallback["projection"]["total_wall_hours_including_measured_setup"],
                            fallback["projection"]["wall_hours"])
+
+    def test_unsealed_panel_cannot_override_a_sealed_infrastructure_abort(self):
+        with tempfile.TemporaryDirectory(prefix=".pilot-plan-test-", dir=ROOT) as directory:
+            controls = Path(directory) / "controls"
+            shutil.copytree(ROOT / "evidence/pilot/controls-6", controls)
+            (controls / "panel.json").write_text(json.dumps({
+                "version": 6, "all_admitted": True, "tasks": ["mbpp", "hover"], "ifbench_status": "failed-gate"}))
+            with self.assertRaises(ValueError):
+                build(controls)
+
+    def test_infrastructure_abort_after_partial_controls_never_supplies_a_calibration(self):
+        from pilot.__main__ import seal
+        with tempfile.TemporaryDirectory(prefix=".pilot-plan-test-", dir=ROOT) as directory:
+            controls = Path(directory) / "controls"
+            shutil.copytree(ROOT / "evidence/pilot/controls-6", controls)
+            (controls / "ifbench/controls.json").write_text(json.dumps({
+                "controls": {"naive": {"mean": 0.8}}, "rows": list(range(40))}))
+            seal(controls)
+            result = build(controls)
+            self.assertIsNone(result["plans"]["three_task"]["projection"])
+            self.assertFalse(result["incomplete_ifbench_calibration"]["usable_for_projection"])
