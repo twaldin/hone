@@ -1,0 +1,296 @@
+{
+  "accounting_limit": "Only omp transport-reported usage is priced. The checkpoint observed two hidden attempts, whose unreported token volume remains unknown. Complete credential-opaque omp per-attempt and failed-call receipts remain prerequisite to the later full benchmark matrix. No upstream issue filed.",
+  "authorization": {
+    "full_pilot_authorized": false,
+    "merged": false,
+    "pr_opened": false,
+    "requires_assistant_smoke_review": true
+  },
+  "carried_controls": {
+    "ifbench": {
+      "admitted": true,
+      "broken": 0.0,
+      "contrast": 0.15,
+      "known_improved": 0.95,
+      "naive": 0.8,
+      "new_model_calls": 0,
+      "noise_envelope": 0.06740879254592823,
+      "noise_floor": 0.044939195030618814,
+      "pairs": 16,
+      "rows": 40,
+      "shortcut": 0.2125
+    },
+    "mbpp": {
+      "admitted": true,
+      "broken": 0.0,
+      "contrast": 0.25,
+      "known_improved": 0.95,
+      "naive": 0.7,
+      "new_model_calls": 0,
+      "noise_envelope": 0.08653485569410733,
+      "noise_floor": 0.05768990379607155,
+      "pairs": 16,
+      "rows": 20,
+      "shortcut": 0.0
+    }
+  },
+  "checkpoint_call_prefix": {
+    "calls": 4082,
+    "captured_at": "2026-11-04T03:57:13Z",
+    "complete_prefix_bytes": 2568330,
+    "complete_prefix_sha256": "sha256:a74da57c397f13c33528ffbdd47f909a0374fc2c087307327312ae4110c637a2",
+    "controller_pid": 1870139,
+    "controller_source_head": "ed8f64cca716a38a65792cb8f46e408b2063b905",
+    "failed_calls": 0,
+    "final_usage": false,
+    "hidden_attempt_rate": 0.0004899559039686428,
+    "hidden_attempts": 2,
+    "ignored_unterminated_tail_bytes": 0,
+    "noise_gate_decided": false,
+    "retry_log_events": 0,
+    "roles": {
+      "task": 4082
+    },
+    "tokens": 2890324,
+    "usage_missing_calls": 0,
+    "usd_equivalent": 12.55284
+  },
+  "checkpoint_hover_controls": {
+    "broken": 0.0,
+    "known_improved": 0.6,
+    "naive": 0.325,
+    "noise_envelope": null,
+    "noise_floor": null,
+    "noise_gate_decided": false,
+    "pairs_completed": 11,
+    "pairs_required": 16,
+    "ranking_passed": true,
+    "rows": 40,
+    "shortcut": 0.0
+  },
+  "checkpoint_pause_summary": {
+    "completed_pause_seconds": 31.98144793510437,
+    "episodes_started": 1,
+    "events": [
+      {
+        "at": 1793764694.496548,
+        "event": "paused",
+        "reason": "stale-account-usage"
+      },
+      {
+        "at": 1793764726.4779966,
+        "event": "resumed",
+        "seconds": 31.98144793510437
+      }
+    ],
+    "open_pause_at_capture": false,
+    "reasons": [
+      "stale-account-usage"
+    ]
+  },
+  "controller": {
+    "commands": [
+      "/home/tim/worktrees/hone/hone-hone-pilot-harness-1/pilot/.venv/bin/python -m pilot adversarial --out evidence/pilot/adversarial-5",
+      "/home/tim/worktrees/hone/hone-hone-pilot-harness-1/pilot/.venv/bin/python -m pilot controls --adversarial evidence/pilot/adversarial-5 --out evidence/pilot/controls-5"
+    ],
+    "cpu_affinity": [
+      6
+    ],
+    "full_pilot_authorized": false,
+    "local_verification": {
+      "official_metrics": true,
+      "real_docker": true,
+      "regression": "Nested controls replay failed before fix and passed after.",
+      "result": "passed",
+      "tests": 166
+    },
+    "log": ".pilot-state/controls-5.log",
+    "main_pid": 1870139,
+    "max_cpu_heavy_workers": 1,
+    "max_model_requests_inflight": 1,
+    "next_condition": "Wait for this PID/unit. Never re-invoke controls. At completion check the security merge before smoke.",
+    "nice": 10,
+    "offline_output": "evidence/pilot/adversarial-5",
+    "output": "evidence/pilot/controls-5",
+    "pilot_model_calls_before_predeclaration_5": 0,
+    "restart": "no",
+    "source_head": "ed8f64cca716a38a65792cb8f46e408b2063b905",
+    "started_at": "2026-11-03T23:51:01Z",
+    "unit": "hone-hone-pilot-harness-1-controls5.service",
+    "venue_workers": [
+      {
+        "cpus": [
+          0,
+          5
+        ],
+        "executable": "python",
+        "pid": 1861496
+      },
+      {
+        "cpus": [
+          0,
+          5
+        ],
+        "executable": "python",
+        "pid": 1861502
+      }
+    ]
+  },
+  "controller_still_running_at_report_check": true,
+  "created_at": "2026-11-04T04:05:35Z",
+  "frozen_smoke_command": "nice -n 10 taskset -c 6 env OPENBLAS_NUM_THREADS=1 OMP_NUM_THREADS=1 MKL_NUM_THREADS=1 JAX_PLATFORMS=cpu pilot/.venv/bin/python -m pilot smoke --controls evidence/pilot/controls-5 --out evidence/pilot/smoke-5",
+  "future_pilot_command_not_authorized": "nice -n 10 taskset -c 6 env OPENBLAS_NUM_THREADS=1 OMP_NUM_THREADS=1 MKL_NUM_THREADS=1 JAX_PLATFORMS=cpu pilot/.venv/bin/python -m pilot pilot --controls evidence/pilot/controls-5 --out .pilot-runs/pilot",
+  "goal": "Frozen proven pilot harness, followed by three real method smokes and assistant review before any larger pilot.",
+  "immutable_offline_admission": "evidence/pilot/adversarial-5",
+  "live_evidence": "evidence/pilot/controls-5",
+  "next_actions": [
+    "Wait for PID 1870139 / hone-hone-pilot-harness-1-controls5.service. Never re-invoke controls or choose another output directory.",
+    "When it exits, verify controls-5 and its terminal panel/failure. Preserve any failed HoVer gate; use only the declared two-task fallback. An infrastructure abort authorizes neither fallback nor search.",
+    "Check the security merge at that time and apply the ruled rebase/image-seal decision.",
+    "Replay completed controls, run the frozen MBPP seed-0 smokes once, replay them, report phase spend and hidden rates, then PR/CI/exact-head cross-family READY. Stop before merge."
+  ],
+  "panel_admitted": false,
+  "parent_publication_head": "38f27beb12f8aab7703d6226e8ddca549c54a508",
+  "partial_checkpoint": "evidence/pilot/progress-5/checkpoint.json",
+  "planning": {
+    "ifbench_selection_cost_inference": {
+      "not_a_measured_search": true,
+      "one_300_row_pass_usd_equivalent": 3.497545588235294,
+      "source": "controls-4a IFBench calibration",
+      "three_passes_usd_equivalent": 10.492636764705882
+    },
+    "point_estimate": "Blocked until the three real smoke cells measure their spend and wall time. No projection is substituted for actual smoke evidence.",
+    "search_cap_unchanged_usd_equivalent": 10,
+    "selection_sets_unchanged": true,
+    "three_task_safety_ceilings": {
+      "active_hours": 54,
+      "reported_tokens": 324000000,
+      "runs": 27,
+      "usd_equivalent": 270
+    },
+    "throttled_wall_time": "Not bounded by active caps while usage/broker pauses persist. Final controller and smoke usage summaries are still pending.",
+    "two_task_safety_ceilings": {
+      "active_hours": 36,
+      "reported_tokens": 216000000,
+      "runs": 18,
+      "usd_equivalent": 180
+    }
+  },
+  "predeclaration": {
+    "committed_before_new_pilot_calls": "0bd3067",
+    "fallback_if_hover_gate_fails": [
+      "mbpp",
+      "ifbench"
+    ],
+    "further_substitutions": false,
+    "one_attempt": true,
+    "path": "evidence/pilot/predeclaration-5.md",
+    "preserved_failure": "evidence/pilot/controls-4a/aime",
+    "reserve": "hover",
+    "retuning_or_gate_changes_after_results": false,
+    "withdrawn_task": "aime"
+  },
+  "principles_applied": {
+    "Explain the Number": "The full 16-pair gate remains undecided; no partial envelope or inferred method spend is called a result.",
+    "Model the Domain": "Exactly two terminal panel choices; missing and infrastructure outcomes cannot select either."
+  },
+  "real_gepa_subscription_reflection_exercised": false,
+  "restart_attempts": 0,
+  "reviews": {
+    "final_ready": false,
+    "grok_model": "xai-oauth/grok-4.7",
+    "opus_model": "anthropic/claude-opus-5-5",
+    "preflight": "evidence/pilot/preflight-review-5.json",
+    "verdict": "SAFE_TO_MEASURE on 0eb5cd9babd0054a85c6e16c53b6cf5799d7884d, followed by verified pre-dispatch replay/reporting corrections. Not final READY."
+  },
+  "search_model_calls_started": 0,
+  "security_decision": {
+    "note": "The pilot runs bounded Python workers and the native Bun policy bridge; it does not launch the old mutation image. hone-task:latest and hone-mutation:latest were absent at preflight.",
+    "python_image_identity_verified": true,
+    "rebased": false,
+    "rule": "At completion, check the security dependency PR. If merged then, rebase onto main and re-seal used images before smoke. Otherwise do not wait; record the current seal.",
+    "smoke_started": false,
+    "status": "waiting-for-HoVer-completion",
+    "unused_legacy_image_tags_present": false,
+    "used_python_image": "python@sha256:623674a14ef93d052bb9b0de4dbf5f28eb578a35263838941cc8aa43213c1487"
+  },
+  "smokes": {
+    "gepa": {
+      "hidden_attempt_rate": null,
+      "proposal": null,
+      "selection_evaluation": null,
+      "status": "not-run",
+      "training_evaluation": null,
+      "wall_seconds": null
+    },
+    "hone": {
+      "hidden_attempt_rate": null,
+      "proposal": null,
+      "selection_evaluation": null,
+      "status": "not-run",
+      "training_evaluation": null,
+      "wall_seconds": null
+    },
+    "plain": {
+      "hidden_attempt_rate": null,
+      "proposal": null,
+      "selection_evaluation": null,
+      "status": "not-run",
+      "training_evaluation": null,
+      "wall_seconds": null
+    }
+  },
+  "source_head": "ed8f64cca716a38a65792cb8f46e408b2063b905",
+  "status": "partial-controls-running-no-search",
+  "throttle_proof": {
+    "allowed_domains": {
+      "gmail.com": 2,
+      "purdue.edu": 1
+    },
+    "api_keys_allowed": false,
+    "forced_fraction": 0.99,
+    "path": "evidence/pilot/throttle-proof-4a/result.json",
+    "pause_seconds": 0.11356163024902344,
+    "pauses": 1,
+    "readings": [
+      "high",
+      "outage",
+      "live-normal"
+    ],
+    "real_broker_interrupted": false,
+    "threshold": 0.8
+  },
+  "verification": {
+    "full_hover_controls_replay": "not yet possible: control job and 16 pairs are incomplete",
+    "hash_verified": [
+      "evidence/pilot/adversarial-5",
+      "evidence/pilot/controls-4a",
+      "evidence/pilot/mbpp-readmission-4a"
+    ],
+    "local_official_metrics": true,
+    "local_real_docker": true,
+    "local_result": "passed",
+    "local_tests": 166,
+    "main_baseline_failures": "The three CLI failures remain documented at the original baseline; not rerun to confirm.",
+    "previous_publication_ci": {
+      "conclusion": "success",
+      "head": "38f27beb12f8aab7703d6226e8ddca549c54a508",
+      "url": "https://github.com/twaldin/hone/actions/runs/41742774463"
+    },
+    "root_replay_regression": "Failed before fix, passed after; root control replay now reaches nested scored rollouts.",
+    "source_ci": {
+      "conclusion": "success",
+      "head": "ed8f64cca716a38a65792cb8f46e408b2063b905",
+      "url": "https://github.com/twaldin/hone/actions/runs/41742123726"
+    }
+  },
+  "withdrawn_aime": {
+    "contrast": 0.07500000000000001,
+    "evidence_unchanged": true,
+    "known_improved": 0.275,
+    "naive": 0.2,
+    "noise_envelope": 0.07616286004346215,
+    "noise_passed": false,
+    "verification": "Original controls-4a bundle hashes verified; no AIME measurements rerun."
+  }
+}

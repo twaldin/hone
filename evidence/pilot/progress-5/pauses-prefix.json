@@ -1,0 +1,20 @@
+{
+  "completed_pause_seconds": 31.98144793510437,
+  "episodes_started": 1,
+  "events": [
+    {
+      "at": 1793764694.496548,
+      "event": "paused",
+      "reason": "stale-account-usage"
+    },
+    {
+      "at": 1793764726.4779966,
+      "event": "resumed",
+      "seconds": 31.98144793510437
+    }
+  ],
+  "open_pause_at_capture": false,
+  "reasons": [
+    "stale-account-usage"
+  ]
+}

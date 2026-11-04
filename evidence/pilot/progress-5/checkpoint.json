@@ -1,0 +1,140 @@
+{
+  "account_domains": {
+    "gmail.com": 2,
+    "purdue.edu": 1
+  },
+  "call_prefix": {
+    "calls": 4082,
+    "captured_at": "2026-11-04T03:57:13Z",
+    "complete_prefix_bytes": 2568330,
+    "complete_prefix_sha256": "sha256:a74da57c397f13c33528ffbdd47f909a0374fc2c087307327312ae4110c637a2",
+    "controller_pid": 1870139,
+    "controller_source_head": "ed8f64cca716a38a65792cb8f46e408b2063b905",
+    "failed_calls": 0,
+    "final_usage": false,
+    "hidden_attempt_rate": 0.0004899559039686428,
+    "hidden_attempts": 2,
+    "ignored_unterminated_tail_bytes": 0,
+    "noise_gate_decided": false,
+    "retry_log_events": 0,
+    "roles": {
+      "task": 4082
+    },
+    "tokens": 2890324,
+    "usage_missing_calls": 0,
+    "usd_equivalent": 12.55284
+  },
+  "cohort_hash": "sha256:2d1289fdd7436b0fced632b874cec3e22d4c19c15143a0770db416bc7394e802",
+  "contrast": 0.27499999999999997,
+  "control_file_sha256": "sha256:3a8e449308efd8cb8f6b7c67cad42af782e54374785865ee7bdf2a0afd0d431d",
+  "control_means": {
+    "broken": 0.0,
+    "known-improved": 0.6,
+    "naive": 0.325,
+    "shortcut": 0.0
+  },
+  "control_rows": 40,
+  "controller": {
+    "commands": [
+      "/home/tim/worktrees/hone/hone-hone-pilot-harness-1/pilot/.venv/bin/python -m pilot adversarial --out evidence/pilot/adversarial-5",
+      "/home/tim/worktrees/hone/hone-hone-pilot-harness-1/pilot/.venv/bin/python -m pilot controls --adversarial evidence/pilot/adversarial-5 --out evidence/pilot/controls-5"
+    ],
+    "cpu_affinity": [
+      6
+    ],
+    "full_pilot_authorized": false,
+    "local_verification": {
+      "official_metrics": true,
+      "real_docker": true,
+      "regression": "Nested controls replay failed before fix and passed after.",
+      "result": "passed",
+      "tests": 166
+    },
+    "log": ".pilot-state/controls-5.log",
+    "main_pid": 1870139,
+    "max_cpu_heavy_workers": 1,
+    "max_model_requests_inflight": 1,
+    "next_condition": "Wait for this PID/unit. Never re-invoke controls. At completion check the security merge before smoke.",
+    "nice": 10,
+    "offline_output": "evidence/pilot/adversarial-5",
+    "output": "evidence/pilot/controls-5",
+    "pilot_model_calls_before_predeclaration_5": 0,
+    "restart": "no",
+    "source_head": "ed8f64cca716a38a65792cb8f46e408b2063b905",
+    "started_at": "2026-11-03T23:51:01Z",
+    "unit": "hone-hone-pilot-harness-1-controls5.service",
+    "venue_workers": [
+      {
+        "cpus": [
+          0,
+          5
+        ],
+        "executable": "python",
+        "pid": 1861496
+      },
+      {
+        "cpus": [
+          0,
+          5
+        ],
+        "executable": "python",
+        "pid": 1861502
+      }
+    ]
+  },
+  "controller_elapsed_seconds": 14991.972933677956,
+  "created_at": "2026-11-04T04:00:53Z",
+  "kind": "in-flight-control-checkpoint",
+  "measurement_budget": {
+    "active_seconds": 86400,
+    "calls": 30000,
+    "proposer_calls": 500,
+    "tokens": 12000000,
+    "usd": 100
+  },
+  "noise": {
+    "completed_pairs": 11,
+    "gate_decided": false,
+    "noise_envelope": null,
+    "noise_floor": null,
+    "required_pairs": 16
+  },
+  "noise_pairs_file_sha256": "sha256:55583f5c0f79084a9f53e8a0d78bac44b934b6bef87cfaaf5f76981941ee0df9",
+  "panel_exists": false,
+  "partial": true,
+  "pauses_file_exists": true,
+  "per_method_spend": {
+    "gepa": {
+      "hidden_attempt_rate": null,
+      "proposal": null,
+      "selection_evaluation": null,
+      "status": "not-run",
+      "training_evaluation": null,
+      "wall_seconds": null
+    },
+    "hone": {
+      "hidden_attempt_rate": null,
+      "proposal": null,
+      "selection_evaluation": null,
+      "status": "not-run",
+      "training_evaluation": null,
+      "wall_seconds": null
+    },
+    "plain": {
+      "hidden_attempt_rate": null,
+      "proposal": null,
+      "selection_evaluation": null,
+      "status": "not-run",
+      "training_evaluation": null,
+      "wall_seconds": null
+    }
+  },
+  "ranking_passed": true,
+  "recorded_pause_events": 2,
+  "resume_from_snapshot": false,
+  "security_merge_decision": "Deferred until this controller finishes, as ruled. No rebase or smoke has occurred.",
+  "smoke_searches_started": 0,
+  "snapshot_non_atomic": true,
+  "usage_limit": "Only omp-reported usage is priced. Two observed hidden attempts do not disclose their token volume; internal failed-attempt usage remains unknown. No complete-noise result or optimizer comparison is claimed.",
+  "wall_time_scope": "Call prefix and pair files are separately captured. Final ledger wall time, active time and pauses are not yet published. Controller elapsed includes offline admission and preparation."
+}
