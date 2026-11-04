@@ -89,6 +89,8 @@ Contract 4 admission stopped without searches. AIME's 16-pair noise envelope was
 
 [Predeclaration 5](evidence/pilot/predeclaration-5.md), committed before new pilot calls, withdraws AIME without changing its failed evidence. It admits the previously named HoVer reserve once with the same 40-row controls and 16-pair noise gate. If HoVer fails, the panel is MBPP + IFBench only, labelled a two-task development pilot. There are no further substitutions. The larger pilot remains unauthorized pending review of the three method smokes.
 
+HoVer passed its frozen ranking and noise gates: improved 0.600, naive 0.325, envelope 0.178765 below contrast 0.275. The admitted panel is MBPP + IFBench + HoVer. All three seed-0 MBPP smokes completed after the security rebase and execution re-seal. [Measured results](evidence/pilot/results-5.json) include phase costs and accounting limits; all methods retained the same seed artifact, so no optimizer advantage is established. Neither matrix is authorized.
+
 ## Status and limitations
 
 - **Running a capsule from a fresh clone is not smooth yet.** Production runs require an admission receipt and the pinned image, and there is no public command that builds both for you.

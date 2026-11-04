@@ -67,7 +67,7 @@ The replay input is the pinned archive at `https://media.githubusercontent.com/m
 | Task | Training | Selection | Metric and source | Why this task |
 | --- | ---: | ---: | --- | --- |
 | P IFBench | 300 | 300 | Official loose instruction fraction from GEPA artifact `cbefbc1aa0f43dd39874ec4bf42211365dbda42e`. Selection is development-file rows 0–299, training is rows 300–599. This follows released code rather than the plan's 150-training figure. | Tests prompt optimization against explicit instruction constraints and a non-LLM checker. |
-| P HoVer, one admission attempt | 150 | 300 | Official GEPA three-support-document partition, 40% test, 40% validation, 20% train after seed-0 shuffle, with independent seed-1 caps. Discrete normalized supporting-title subset metric. | Replaces withdrawn AIME only if all frozen gates pass; adds four-module retrieval optimization without an LLM judge. |
+| P HoVer | 150 | 300 | Official GEPA three-support-document partition, 40% test, 40% validation, 20% train after seed-0 shuffle, with independent seed-1 caps. Discrete normalized supporting-title subset metric. | Passed its single frozen admission attempt; replaces withdrawn AIME and adds four-module retrieval optimization without an LLM judge. |
 | A MBPP | 374 | 90 | Official full training and validation files at `google-research-datasets/mbpp`, revision `4bb6404fdc6cacfda99d4ac4205087b89d32030c`. Score all published development assertions passing. | Supplies a CC-BY-4.0 executable agent-program task with deterministic assertions and a bounded, isolated deployment. |
 
 AIME's historical 45/45 development split and contract-4a measurements remain available for replay, not search. Its failed noise gate is not part of an admitted panel.
@@ -112,7 +112,7 @@ Keep the $10 ceiling and complete selection sets. Contract-4a IFBench calibratio
 
 ## Run and replay
 
-Successful offline admission alone is insufficient. Each selected task must pass ranking and noise. HoVer must have a recorded terminal admission outcome, including its failure if the panel has two tasks. When its controls finish, check main's handlebars 4.7.10, vitest 3.2.6 and tinypool 2.1.2 update. If merged then, rebase onto main and re-seal images before smoke. Otherwise do not wait; record the current seal and proceed.
+HoVer passed its single frozen admission attempt. The lane rebased onto security merge `ba38511431f0dd5f0fd506ddea406ae274e68e3e` before any smoke, installed Handlebars 4.7.10, Vitest 3.2.6 and Tinypool 2.1.2, and committed the [new execution seal](../evidence/pilot/security-seal-5.json): `sha256:561c9d10fbbe7768a725921c4c54ac8bc24d412eed6f060834e85fcc192772ce`. The pilot uses one pinned Python image for its isolated processes and host Bun for the native policy bridge; it does not exercise the full containerized optimizer/mutation launcher. The Python image content digest stayed unchanged. A fresh production-command probe verified Python 3.12.16, UID 65534, CPU 6, nice 10, read-only storage and denied network access. All 13 admitted scoring-source hashes stayed unchanged.
 
 ```sh
 nice -n 10 taskset -c 6 env OPENBLAS_NUM_THREADS=1 OMP_NUM_THREADS=1 MKL_NUM_THREADS=1 JAX_PLATFORMS=cpu pilot/.venv/bin/python -m pilot smoke --controls evidence/pilot/controls-5 --out evidence/pilot/smoke-5
@@ -147,6 +147,30 @@ nice -n 10 taskset -c 6 pilot/.venv/bin/python -m pilot replay --out evidence/pi
 Replay first verifies the bundle hashes and task-resource identities, then runs the protected metrics again. MBPP replay executes archived solution code in the same isolated worker boundary.
 
 `prepare`, `probe`, and `throttle-proof` regenerate the machine/task manifests, real route check, no-account/environment-fallback rejection check, and forced-high/outage pause proof. Current route evidence is `route-proof-v4`; earlier route, preparation and throttle directories carry explicit superseded status files. `aborted-controls-v1` remains inadmissible measurement evidence, not a passing control run.
+
+## Measured contract-5 results
+
+[The complete report](../evidence/pilot/results-5.json) links the frozen controls, raw calls, phase reconciliation and replay results. MBPP and IFBench reuse their admitted controls unchanged; AIME's failed evidence remains withdrawn.
+
+| Task | Improved | Naive | Broken | Shortcut | Noise envelope | Contrast |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: |
+| MBPP | 0.950 | 0.700 | 0 | 0 | 0.086535 | 0.250 |
+| IFBench | 0.950 | 0.800 | 0 | 0.2125 | 0.067409 | 0.150 |
+| HoVer | 0.600 | 0.325 | 0 | 0 | 0.178765 | 0.275 |
+
+Each seed-0 MBPP smoke used the unchanged 90-row selection set, $10-equivalent ceiling and one-proposal limit. Dollar-equivalent phase columns include all reported invocation usage.
+
+| Method | Selection | Calls | Tokens | Proposal | Training | Selection cost | Total | Wall seconds |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| Hone | 0.766667 | 115 | 21,661 | $0.016053 | $0.032064 | $0.116382 | $0.164499 | 385.34 |
+| Official GEPA | 0.766667 | 107 | 21,275 | $0.016845 | $0.020376 | $0.112452 | $0.149673 | 375.06 |
+| Plain | 0.777778 | 189 | 33,097 | $0.016053 | $0.010908 | $0.235674 | $0.262635 | 647.85 |
+
+All three had zero hidden attempts, missing retry observations, failed calls, missing usage, unassigned calls and throttle pauses. Official GEPA made a real subscription reflection call and proposed an unchanged prompt. Hone rejected its proposal at the paired training gate; plain rejected its child after full selection. All three retained the identical seed artifact. Different scores for the identical seed are measurement variation, not an optimizer-quality result. These smokes prove the exercised integration paths, not a successful promotion or the full matrix.
+
+**Planning inference, not a matrix result:** task-specific measured token/cost/time ratios project about 35.3 million reported tokens and 86.9 serial wall-hours for 27 cells at the observed polling/quota duty cycle, with the two-hour active cap projected to bind on MBPP and IFBench. This assumes future proposal frequency, artifact behavior and latency resemble the samples; they may not. The report preserves the calculation and assumptions. The broad ceilings remain $270-equivalent, 324 million reported tokens and 54 active hours; quota and broker pauses have no finite wall-time bound.
+
+HoVer's calibration also projects about $3.67349 per 300-row selection pass, or $11.02047 for three passes before training or proposal. Like IFBench's $10.49264 projection, this is a fixed-budget feasibility risk, not a measured search result. No cap or selection set was changed. The assistant must review the measured smoke phase costs before authorizing either matrix. Credential-opaque per-attempt and failed-call usage receipts in omp remain a prerequisite for the full matrix.
 
 ## CI and baseline failures
 

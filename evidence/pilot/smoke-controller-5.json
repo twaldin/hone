@@ -1,0 +1,23 @@
+{
+  "command": "/home/tim/worktrees/hone/hone-hone-pilot-harness-1/pilot/.venv/bin/python -m pilot smoke --controls evidence/pilot/controls-5 --out evidence/pilot/smoke-5",
+  "execution_seal_committed_before_start": true,
+  "execution_seal_digest": "sha256:561c9d10fbbe7768a725921c4c54ac8bc24d412eed6f060834e85fcc192772ce",
+  "full_pilot_authorized": false,
+  "log": ".pilot-state/smoke-5.log",
+  "main_pid": 2992301,
+  "max_cpu_heavy_workers": 1,
+  "max_model_requests_inflight": 1,
+  "methods": [
+    "hone",
+    "gepa",
+    "plain"
+  ],
+  "restart": "no",
+  "search_cap_usd_equivalent": 10,
+  "seed": 0,
+  "selection_rows": 90,
+  "source_head": "ce6c45fd7d6c72dcb24e74f67ff90368d60c407d",
+  "started_at": "2026-11-04T05:24:42Z",
+  "task": "mbpp",
+  "unit": "hone-hone-pilot-harness-1-smoke5.service"
+}
