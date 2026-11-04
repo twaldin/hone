@@ -1,0 +1,41 @@
+{
+  "limits": [
+    "This is an actual Bun fetch to a local fake provider, not an Anthropic model call or measurement admission.",
+    "The Node-compatible zlib API was exercised under Bun1.4.4, not a separate Node runtime.",
+    "The production source hashes and source-admission proof did not change for this evidence/test/docs follow-up."
+  ],
+  "native_fixture_regression": {
+    "assertions": 70,
+    "bun_failed": 0,
+    "bun_passed": 12,
+    "gzip_explicitly_asserted_in_native_large_prompt_case": true
+  },
+  "observer_sha256": "sha256:78b1a32c3525a6f546a8a1452116d11eb34caca6725c0ad4f55721182a377a0a",
+  "replay_bun": "\nimport { realpathSync } from \"node:fs\";\nimport { gzipSync, gunzipSync, gunzip } from \"node:zlib\";\nimport { promisify } from \"node:util\";\nimport { createProviderReceiptObserver } from \"./pilot/gateway-receipts.mjs\";\nconst entry=realpathSync(Bun.which(\"omp\"));\nconst {countTokens,Encoding}=await import(import.meta.resolve(\"@oh-my-pi/pi-natives\",entry));\nconst original=JSON.stringify({model:\"claude-sonnet-4-6\",max_tokens:4096,messages:[{role:\"user\",content:\"bounded loopback request \".repeat(128)}],stream:true});\nconst event=value=>`event: ${value.type}\\ndata: ${JSON.stringify(value)}\\n\\n`.replaceAll(\"\\\\n\",\"\\n\");\nlet requests=0,wireMatched=false,noCredentialHeaders=false;\nconst server=Bun.serve({hostname:\"127.0.0.1\",port:0,fetch:async request=>{\n  requests++;\n  noCredentialHeaders=!request.headers.has(\"authorization\")&&!request.headers.has(\"x-api-key\");\n  if(request.headers.get(\"content-encoding\")!==\"gzip\")throw new Error(\"Expected gzip wire input\");\n  wireMatched=gunzipSync(await request.arrayBuffer()).toString(\"utf8\")===original;\n  if(!wireMatched)throw new Error(\"Wire input changed\");\n  return new Response(event({type:\"message_start\",message:{usage:{input_tokens:12,output_tokens:0}}})+event({type:\"message_delta\",delta:{stop_reason:\"refusal\",stop_details:{type:\"refusal\",category:\"general_harms\"}},usage:{output_tokens:2}})+event({type:\"message_stop\"}),{headers:{\"content-type\":\"text/event-stream\"}});\n}});\ntry{\n  const observer=createProviderReceiptObserver({fetch:globalThis.fetch,countTokens:text=>countTokens(text,Encoding.ClaudeV3)});\n  const response=await observer.fetch(server.url,{method:\"POST\",headers:{\"content-encoding\":\"gzip\"},body:gzipSync(original)});\n  await response.text();\n  const receipt=await observer.finish();\n  if(!receipt||receipt.countingError||receipt.inputTokens!==countTokens(original,Encoding.ClaudeV3)||receipt.maxOutputTokens!==4096||requests!==1||!wireMatched||!noCredentialHeaders)throw new Error(\"Actual Bun fetch receipt did not settle correctly\");\n  let limitCode;\n  try{await promisify(gunzip)(gzipSync(Buffer.alloc(17*1024*1024)),{maxOutputLength:16*1024*1024});}catch(error){limitCode=error.code;}\n  if(limitCode!==\"ERR_BUFFER_TOO_LARGE\")throw new Error(\"Bun gunzip limit not enforced\");\n  console.log(JSON.stringify({runtime:\"bun\",runtime_version:Bun.version,real_bun_fetch:true,requests,wire_gzip_unchanged:wireMatched,body_readable_after_fetch:true,native_token_count:receipt.inputTokens,max_output_tokens:receipt.maxOutputTokens,refusal_category:receipt.refusal.category,no_credential_headers:noCredentialHeaders,decompression_limit_mib:16,decompression_fixture_mib:17,decompression_error:limitCode,model_calls:0,server_closed_in_finally:true}));\n}finally{await server.stop(true);}\n",
+  "replay_command": "Run the replay_bun string with bun --eval from the repository root with omp18.16.0 installed. It opens only a temporary loopback server and always stops it; no model request or credentials are used.",
+  "result": {
+    "body_readable_after_fetch": true,
+    "decompression_error": "ERR_BUFFER_TOO_LARGE",
+    "decompression_fixture_mib": 17,
+    "decompression_limit_mib": 16,
+    "max_output_tokens": 4096,
+    "model_calls": 0,
+    "native_token_count": 677,
+    "no_credential_headers": true,
+    "real_bun_fetch": true,
+    "refusal_category": "general_harms",
+    "requests": 1,
+    "runtime": "bun",
+    "runtime_version": "1.4.4",
+    "server_closed_in_finally": true,
+    "wire_gzip_unchanged": true
+  },
+  "schema": "pilot-real-http-codec-proof-v8a",
+  "smoke_replay": {
+    "command": "nice -n10 taskset -c6 env OPENBLAS_NUM_THREADS=1 OMP_NUM_THREADS=1 MKL_NUM_THREADS=1 NUMEXPR_NUM_THREADS=1 pilot/.venv/bin/python -m pilot replay --out evidence/pilot/smoke-5",
+    "model_calls": 0,
+    "replayed_rollouts": 408,
+    "scored_final_tests_loaded": false
+  },
+  "source_head": "35911984bc8ac8e33bbeba39a7a20f171efab242"
+}

@@ -137,6 +137,7 @@ test.skipIf(!omp).each([
   const model = getBundledModel("anthropic", "claude-sonnet-4-6");
   let attempts = 0;
   let sent;
+  let sentEncoding;
   const observer = createProviderReceiptObserver({
     countTokens: (text) => countTokens(text, Encoding.ClaudeV3),
     fetch: async (_input, init) => {
@@ -144,6 +145,7 @@ test.skipIf(!omp).each([
       const headers = init.headers;
       const encoding = headers instanceof Headers ? headers.get("content-encoding")
         : headers[Object.keys(headers).find((name) => name.toLowerCase() === "content-encoding")];
+      sentEncoding = encoding;
       sent = encoding === "gzip" ? gunzipSync(init.body).toString("utf8")
         : typeof init.body === "string" ? init.body : new TextDecoder().decode(init.body);
       return new Response(event(start) + event(terminal) + event(stop), { headers: { "content-type": "text/event-stream" } });
@@ -164,6 +166,7 @@ test.skipIf(!omp).each([
     const value = await response.json();
     expect(response.status).toBe(502);
     expect(attempts).toBe(1);
+    if (question.length > 1024) expect(sentEncoding).toBe("gzip");
     expect(value.providerReceipt.refusal).toEqual({ type: "refusal", category, provenance });
     expect(value.providerReceipt.inputTokens).toBe(countTokens(sent, Encoding.ClaudeV3));
     expect(value.providerReceipt.inputTokenUpperBound).toBe(countTokens(sent, Encoding.ClaudeV3) + 4096);

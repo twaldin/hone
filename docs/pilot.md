@@ -53,7 +53,7 @@ IFBench takes `Random(1).sample(source_rows[300:600], 150)`, then freezes a 40-r
 
 Admission requires known-improved > naive > both broken and shortcut, with broken = 0 and MBPP shortcut = 0. P positives execute published optimized instructions, not trusted answers or a prompt authored here. Sixteen fresh paired unchanged-seed trials measure noise without response caching. Keep `noiseFloor = 3/sqrt(2)*s` and `noiseEnvelope = max(4.5/sqrt(2)*s, max_abs_delta)`. The envelope must be strictly below the positive-control contrast. Projection uses `sqrt(source_rows/n)`: 40 for P and 20 for MBPP. An IFBench checker, headroom, ranking or noise failure selects MBPP + HoVer, labelled a two-task development pilot, without retuning or substitution. Zero estimated noise is not proof of a noiseless evaluator.
 
-A failed control command preserves its evidence and refuses to overwrite that folder. The current runner authorizes only `evidence/pilot/controls-8`. No automatic restart is introduced. Genuine infrastructure aborts retain predeclaration 7's bounded retry allowance; a refusal or completed gate result cannot use it. A completed IFBench checker, headroom, ranking or noise failure selects MBPP + HoVer. Missing results and refusal nondeterminism do not.
+A failed control command preserves its evidence and refuses to overwrite that folder. The current runner authorizes only `evidence/pilot/controls-7b`, the last infrastructure allowance. No automatic restart is introduced. A refusal or completed gate result cannot use infrastructure retry eligibility. A completed IFBench checker, headroom, ranking or noise failure selects MBPP + HoVer. Missing results and refusal nondeterminism do not.
 
 ## Published P controls
 
