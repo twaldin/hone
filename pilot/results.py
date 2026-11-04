@@ -2,8 +2,8 @@
 
 The seed vector is the first complete selection evaluation. A changed winner uses
 its last complete evaluation whose mean matches the retained score (absolute
-1e-12 tolerance); repeated evaluations are never pooled. Split GEPA evaluations
-are reported as incomplete evidence, never reconstructed across calls.
+1e-12 tolerance); repeated evaluations are never pooled. Incomplete selection
+evaluations are reported as incomplete evidence, never reconstructed across calls.
 """
 from __future__ import annotations
 
@@ -21,7 +21,7 @@ METHODS = ("hone", "gepa", "plain")
 RESAMPLES = 10_000
 REPLAY_SEED = 20261109
 PRACTICAL_THRESHOLD = 0.02
-LABEL = "Adaptive development selection; descriptive uncertainty only, no superiority claim. No Holm correction."
+LABEL = "Development pilot, seed 0. Adaptive development selection; descriptive uncertainty only, no superiority claim. No Holm correction."
 
 
 def _hash(data: bytes) -> str:
@@ -174,7 +174,7 @@ COUNTERS = ("refusals", "hidden_attempts", "calls_with_hidden_attempts", "usage_
 
 
 def _sum_available(records: list[dict | None]) -> dict:
-    present = [record for record in records if record is not None]
+    present = [record for record in records if record]
     keys = sorted({key for record in present for key, value in record.items() if type(value) in (int, float)})
     return {"available_cells": len(present), "expected_cells": len(records),
             "totals": {key: math.fsum(record[key] for record in present) if len(present) == len(records)

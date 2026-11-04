@@ -1,6 +1,7 @@
 {
   "admission": {
     "evidence": "evidence/pilot/seed0-9/preflight-stop.json",
+    "failure_observed_head": "665182d663203da2460272f01ff3e91ac0db0afe",
     "gate_rerun_after_failure": false,
     "original_admitted_receipt_located": "/home/tim/worktrees/hone/hone-hone-pilot-harness-1/.pilot-cache/hover-retrieval/index-receipt.json",
     "original_index_copied": false,
@@ -16,6 +17,7 @@
     "seconds": 147.5,
     "status": "failed-before-search"
   },
+  "current_source_transition_hash": "sha256:06ab95e381a065f8cf66e5c15b7b29f1c41219924634aa2484350345d6f53a48",
   "failing_before": {
     "command": "nice -n 10 taskset -c 6 python3 -m unittest pilot.test_dispatch -v",
     "exit_code": 1,
@@ -41,6 +43,14 @@
       "docker_enabled": true,
       "exit_code": 0,
       "official_metrics_enabled": true,
+      "seconds": 30.895,
+      "tests": 261
+    },
+    "initial_full_python": {
+      "command": "nice -n 10 taskset -c 6 env OPENBLAS_NUM_THREADS=1 OMP_NUM_THREADS=1 MKL_NUM_THREADS=1 JAX_PLATFORMS=cpu PILOT_DOCKER_TESTS=1 PILOT_OFFICIAL_METRIC_TESTS=1 NLTK_DATA=<worktree>/.pilot-cache/nltk pilot/.venv/bin/python -m unittest discover -s pilot -p test_*.py -v",
+      "docker_enabled": true,
+      "exit_code": 0,
+      "official_metrics_enabled": true,
       "seconds": 46.777,
       "tests": 260
     },
@@ -59,6 +69,29 @@
   },
   "pilot_model_calls": 0,
   "predeclaration_commit": "a5ebc90",
+  "review_correction": {
+    "failing_before_command": "nice -n 10 taskset -c 6 python3 -m unittest pilot.test_dispatch.StartupPauseTests -v",
+    "failing_before_head": "665182d663203da2460272f01ff3e91ac0db0afe",
+    "failing_before_result": "KeyError: 'pause_seconds'; dispatcher chose consecutive-infrastructure-failures instead of pause-limit",
+    "finding": "Gateway startup failure after completed throttle pause lost pause accounting",
+    "other_corrections": [
+      "Missing cells have zero available timing/accounting records",
+      "Explicit Development pilot, seed 0 label",
+      "Generic incomplete-selection wording",
+      "Historical dispatcher replay pinned to fb813867"
+    ],
+    "passing_after_full_suite_tests": 261,
+    "passing_after_test": "test_failed_startup_preserves_pauses_and_next_cell_remaining_allowance",
+    "startup_smoke": {
+      "durable_result_matches_return": true,
+      "model_calls": 0,
+      "pause_seconds": 12600.0,
+      "pauses": 1,
+      "scope": "real search_one/calls_for/open_gateway and Throttle with virtual time, offline read boundary and failing gateway constructor",
+      "status": "infrastructure_failure",
+      "throttle_seconds": 12600.0
+    }
+  },
   "runtime": {
     "bun_version": "1.4.4",
     "cpu": 6,

@@ -7,6 +7,8 @@ import unittest
 from unittest.mock import patch
 
 from pilot import __main__ as cli
+from pilot import runtime
+from pilot.tasks import Task
 
 
 class DispatchTests(unittest.TestCase):
@@ -88,6 +90,65 @@ class DispatchTests(unittest.TestCase):
         self.assertEqual(len(visited), 6)
         self.assertEqual(report["dispatch_stop"]["reason"], "unknown-usage-rate")
         self.assertEqual(len(report["runs"]), 6)
+
+
+class StartupPauseTests(unittest.TestCase):
+    def test_failed_startup_preserves_pauses_and_next_cell_remaining_allowance(self):
+        with tempfile.TemporaryDirectory() as directory, ExitStack() as stack:
+            out = Path(directory) / "runs"
+            real_search = cli.search_one
+            visited = []
+            throttles = []
+
+            def throttle(pool, env, journal, **kwargs):
+                now = [1000.0]
+                index = len(throttles)
+                elapsed = 12600 if index == 0 else 10800
+                readings = iter([{"generatedAt": 1000 * now[0], "reports": []}] * (elapsed // 900) + [None])
+
+                def read():
+                    if next(readings) is None:
+                        return {"generatedAt": now[0] * 1000, "reports": []}
+                    raise runtime.TransportError("broker moving")
+
+                def sleep(seconds):
+                    now[0] += seconds
+                    if now[0] > 20000:
+                        raise AssertionError("pause allowance did not stop dispatch")
+
+                item = runtime.Throttle(pool, env, journal, interval=900, reader=read,
+                                        clock=lambda: now[0], sleep=sleep, **kwargs)
+                throttles.append(item)
+                return item
+
+            def search(args, pool, env, task, seed, method, smoke):
+                visited.append((task, seed, method))
+                if len(visited) == 1:
+                    return {"task": task, "seed": seed, "method": method, "status": "completed",
+                            "calls": 100, "hidden_attempts": 0, "usage_missing_calls": 0, "pause_seconds": 7200}
+                return real_search(args, pool, env, task, seed, method, smoke)
+
+            stack.enter_context(patch.object(sys, "argv", ["pilot", "pilot", "--seed", "0", "--out", str(out)]))
+            stack.enter_context(patch.object(cli, "execution_limits"))
+            stack.enter_context(patch.object(cli, "load_panel", return_value=("mbpp", "hover")))
+            stack.enter_context(patch.object(cli, "machine_proof"))
+            stack.enter_context(patch.object(cli, "environment", return_value=({"anthropic": {"accounts": []}}, {})))
+            stack.enter_context(patch.object(cli, "load_control", return_value={}))
+            stack.enter_context(patch.object(cli, "evaluator_identity", return_value={}))
+            stack.enter_context(patch("pilot.tasks.load_task", side_effect=lambda name, cache: Task(name, [], [], {}, {"prompt": "seed"})))
+            stack.enter_context(patch.object(cli, "Throttle", side_effect=throttle))
+            stack.enter_context(patch.object(cli, "search_one", side_effect=search))
+            stack.enter_context(patch("pilot.runtime.capacity_reason", side_effect=lambda reading, pool, now: None))
+            stack.enter_context(patch("pilot.runtime.Gateway", side_effect=runtime.TransportError("bad ready frame")))
+            stack.enter_context(patch("pilot.runtime.broker_healthy", return_value=True))
+            cli.main()
+            report = json.loads((out / "comparison.json").read_text())
+            self.assertEqual(visited, [("mbpp", 0, method) for method in cli.METHODS])
+            self.assertEqual(report["runs"][1]["pause_seconds"], 12600)
+            self.assertEqual(throttles[1].pause_limit_seconds, 1800)
+            self.assertEqual(report["runs"][2]["status"], "pause_limit_exceeded")
+            self.assertEqual(report["dispatch_stop"]["reason"], "pause-limit")
+            self.assertEqual(report["dispatch_stop"]["pause_seconds"], 22500)
 
 
 if __name__ == "__main__":

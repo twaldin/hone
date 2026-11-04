@@ -172,8 +172,8 @@ def route_proof(pool: dict, env: dict, out: Path) -> None:
 
 
 def calls_for(pool: dict, env: dict, out: Path, limits: dict | None = None,
-              history_roots: list[Path] | None = None, pause_limit_seconds: float | None = None):
-    throttle = Throttle(pool, env, out / "pauses.jsonl", pause_limit_seconds=pause_limit_seconds)
+              history_roots: list[Path] | None = None, throttle: Throttle | None = None):
+    throttle = throttle if throttle is not None else Throttle(pool, env, out / "pauses.jsonl")
     ledger = Ledger(out / "calls.jsonl", limits=dict(limits or LIMITS),
                     history_roots=[ROOT / "evidence/pilot", ROOT / ".pilot-runs", *(history_roots or [])])
     return ModelCalls(open_gateway(throttle), ledger, throttle), ledger, throttle
@@ -644,20 +644,22 @@ def search_one(args, pool, env, task_name: str, seed: int, method: str, smoke: b
     if out.exists():
         return resume_result(out, task_name, seed, method)
     out.mkdir(parents=True)
+    throttle = Throttle(pool, env, out / "pauses.jsonl",
+                        pause_limit_seconds=getattr(args, "remaining_pause_seconds", None))
     try:
-        call, ledger, throttle = calls_for(pool, env, out, history_roots=[args.out],
-            pause_limit_seconds=getattr(args, "remaining_pause_seconds", None))
+        call, ledger, throttle = calls_for(pool, env, out, history_roots=[args.out], throttle=throttle)
     except RefusalNondeterminism as error:
         save(out / "failure.json", {"status": "refusal-nondeterminism", "evidence": error.evidence})
         seal(out)
         raise
     except Exception as error:
         result = resume_result(out, task_name, seed, method, type(error).__name__)
+        result.update(pause_seconds=throttle.paused_seconds, throttle_seconds=throttle.accounted_seconds,
+                      poll_seconds=max(0, throttle.accounted_seconds - throttle.paused_seconds), pauses=throttle.pauses)
         if isinstance(error, PauseLimitExceeded):
-            result.update(status="pause_limit_exceeded", pause_seconds=error.paused_seconds,
-                          throttle_seconds=error.accounted_seconds, pauses=error.pauses)
-            save(out / "result.json", result)
-            seal(out)
+            result["status"] = "pause_limit_exceeded"
+        save(out / "result.json", result)
+        seal(out)
         return result
     rollouts = 0
     def protected_evaluate(candidate, rows, capture_traces=False):

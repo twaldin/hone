@@ -1,7 +1,7 @@
 {
   "files": {
     "pilot/__main__.py": {
-      "after": "sha256:167f9ce955f5b17f03d8d27653891b9204843ddf1d8ed4623141b8a494f06562",
+      "after": "sha256:5f90dfac907eaf3223abef27e087ddc9be5b38e44e373ab77d39aba51558a9e1",
       "before": "sha256:34b410e85e7341df95bdd710d49d5e258ffb9d2a5b2b61dd6770f0d25914bd75"
     },
     "pilot/admission.py": {

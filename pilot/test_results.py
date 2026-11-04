@@ -106,7 +106,7 @@ class ExtractionTests(unittest.TestCase):
         pair, _ = extract_pair(manifest, search, result, evaluations)
         self.assertEqual(pair[0], {"a": 0, "b": 1})
 
-    def test_split_gepa_evaluations_not_silently_joined(self):
+    def test_incomplete_evaluations_not_silently_joined(self):
         manifest, search, result, evaluations = fixture(method="gepa")
         evaluations = [evaluations[0], evaluation(search["candidate"], [1], ["a"]),
                        evaluation(search["candidate"], [1], ["b"])]
@@ -177,6 +177,9 @@ class ReportTests(unittest.TestCase):
         self.assertEqual(hone["spend"]["observed_subtotals"]["calls"], 4)
         self.assertEqual(hone["phases"]["proposal"]["observed_subtotals"]["tokens"], 10)
         self.assertIsNone(hone["timing"]["totals"]["wall_seconds"])
+        self.assertEqual(hone["timing"]["available_cells"], 1)
+        self.assertEqual(report["methods"]["gepa"]["timing"]["available_cells"], 0)
+        self.assertEqual(report["methods"]["gepa"]["accounting"]["available_cells"], 0)
         self.assertEqual(report["cells"][0]["accounting"]["hidden_attempts"], 3)
         self.assertEqual(report["cells"][0]["input_hashes"]["result.json"],
                          "sha256:" + hashlib.sha256((root / "result.json").read_bytes()).hexdigest())
@@ -203,6 +206,7 @@ class ReportTests(unittest.TestCase):
         main(["--runs", str(self.root), "--out", str(out)])
         report = json.loads(out.read_text())
         self.assertEqual(report["seed"], 0)
+        self.assertTrue(report["label"].startswith("Development pilot, seed 0."))
         self.assertIn("no superiority", report["label"])
         self.assertEqual((root / "evaluations.jsonl").read_bytes(), before)
         with self.assertRaises(ValueError):

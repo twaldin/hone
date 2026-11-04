@@ -361,12 +361,12 @@
       "unknown_usage": "Internal failed-attempt tokens and unreported failed-call usage remain unknown; conservative estimates are not reported usage."
     }
   ],
-  "label": "Adaptive development selection; descriptive uncertainty only, no superiority claim. No Holm correction.",
+  "label": "Development pilot, seed 0. Adaptive development selection; descriptive uncertainty only, no superiority claim. No Holm correction.",
   "matrix_status": "partial_or_stopped",
   "methods": {
     "gepa": {
       "accounting": {
-        "available_cells": 2,
+        "available_cells": 0,
         "expected_cells": 2,
         "observed_subtotals": {},
         "totals": {}
@@ -381,7 +381,7 @@
         "totals": {}
       },
       "timing": {
-        "available_cells": 2,
+        "available_cells": 0,
         "expected_cells": 2,
         "observed_subtotals": {},
         "totals": {}
@@ -389,7 +389,7 @@
     },
     "hone": {
       "accounting": {
-        "available_cells": 2,
+        "available_cells": 0,
         "expected_cells": 2,
         "observed_subtotals": {},
         "totals": {}
@@ -404,7 +404,7 @@
         "totals": {}
       },
       "timing": {
-        "available_cells": 2,
+        "available_cells": 0,
         "expected_cells": 2,
         "observed_subtotals": {},
         "totals": {}
@@ -412,7 +412,7 @@
     },
     "plain": {
       "accounting": {
-        "available_cells": 2,
+        "available_cells": 0,
         "expected_cells": 2,
         "observed_subtotals": {},
         "totals": {}
@@ -427,14 +427,14 @@
         "totals": {}
       },
       "timing": {
-        "available_cells": 2,
+        "available_cells": 0,
         "expected_cells": 2,
         "observed_subtotals": {},
         "totals": {}
       }
     }
   },
-  "reporter_sha256": "sha256:a6187d3a252dad0f4b6d7f930916cec788009711d66f4324ec056ef2abf684c3",
+  "reporter_sha256": "sha256:4ef0246909e8d3734d98d222625feebba8ac65af97e019155497e8d1e892b5c8",
   "schema": "pilot-results-v1",
   "seed": 0
 }

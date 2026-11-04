@@ -12,6 +12,8 @@ Call 2507 answered after one internal retry, so final-call receipts report no tr
 
 The [initial first-seed preflight](../evidence/pilot/seed0-preflight-9/README.md) stopped before any search at the frozen source because `pilot --seed 0` selected all three seeds and did not enforce dispatcher stop rules. That historical diagnostic remains bound to its original source head. The assistant then authorized the corrections and specified the interval method. [Predeclaration 9](../evidence/pilot/predeclaration-9.md), committed before search, fixes six seed-0 cells, the paired and hierarchical bootstrap, and the 2-point practical threshold. No final-test evaluation is authorized.
 
+Replay the historical `seed0-preflight-9/check.py` only at commit `fb813867adf95690bfd79954f7f573bcdf90dbed`, where that script and the original dispatcher coexist. Its expected 18 dispatches intentionally do not describe the corrected runner.
+
 The corrected runner then [stopped at real admission](../evidence/pilot/seed0-9/README.md), before any search: the freshly prepared HoVer index differs from the admitted receipt in four hashes. The pinned corpus, package versions and recipe match, but exact index equality does not. No gate was relaxed or rerun. All six cells remain unstarted with zero model spend; no optimizer comparison is available.
 
 The pilot decides whether Hone's proposed search policy warrants a larger comparison. It does not support a public optimizer-quality claim. It compares Hone, pinned official GEPA, and a plain agent loop with the same current subscription model and reported-plus-estimated charged budget.
@@ -174,7 +176,7 @@ Replay first verifies the bundle hashes and task-resource identities, then runs 
 
 ## Contract-9 verification and admission stop
 
-[Verification 9](../evidence/pilot/verification-9.json) records 260 passing Python tests with real Docker and official metrics, twelve passing native receipt tests, and the failing-before dispatcher regressions. It also records the real admission failure and zero-model stopped-run report replay. The [source transition](../evidence/pilot/source-transition-9.json) preserves the authenticated contract-8a execution baseline without changing archived control bundles.
+[Verification 9](../evidence/pilot/verification-9.json) records 261 passing Python tests with real Docker and official metrics, twelve passing native receipt tests, and failing-before dispatch and startup-pause regressions. It also records the real admission failure, a zero-model startup-failure smoke and byte-identical stopped-run report replay. The [source transition](../evidence/pilot/source-transition-9.json) preserves the authenticated contract-8a execution baseline without changing archived control bundles.
 
 ## Contract-8 verification and setup
 
