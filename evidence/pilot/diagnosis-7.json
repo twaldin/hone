@@ -1,0 +1,254 @@
+{
+  "additional_attempts_dispatched": 0,
+  "broker_correlation": {
+    "access": "SSH defaulttim denied; existingtwaldin identity succeeded. No secret files or configuration were read or changed.",
+    "controls_window": {
+      "snapshots_served_to_deckbox": 138,
+      "stream_closes": 314,
+      "stream_opens": 314,
+      "usage_fetch_429_warnings": 18,
+      "usage_responses_served_to_deckbox": 529
+    },
+    "controls_window_utc": [
+      "2026-11-04T06:51:22Z",
+      "2026-11-04T07:18:32Z"
+    ],
+    "inspector": "HomeBroker502Trace",
+    "nearby_successful_operations": [
+      {
+        "at": "2026-11-04T07:18:27.172Z",
+        "event": "snapshot served to deckbox",
+        "source_byte_offset": 77573115
+      },
+      {
+        "at": "2026-11-04T07:18:28.806Z",
+        "event": "snapshot served to deckbox",
+        "source_byte_offset": 77574032
+      },
+      {
+        "at": "2026-11-04T07:18:31.498Z",
+        "event": "usage served to deckbox",
+        "source_byte_offset": 77574942
+      },
+      {
+        "at": "2026-11-04T07:18:31.501Z",
+        "event": "stream opened for deckbox",
+        "source_byte_offset": 77575087
+      }
+    ],
+    "no_logged": [
+      "status502",
+      "refresh failure",
+      "lock fault",
+      "DNS fault",
+      "connection fault"
+    ],
+    "remote_home_gateway_logs": "No request-level November4 evidence; gateway.log last changed2026-11-02T23:34:17.725Z; no proxy-hop502 attribution supported.",
+    "retained_bytes_examined": 8388608,
+    "source": "ssh://twaldin@100.85.222.119/Users/twaldin/Library/Logs/omp-gateway/broker.log",
+    "warnings": "54 non-info records were Claude usage-fetch HTTP429, all outside the immediate07:18Z failure. Last group06:51:01.356Z-06:59:59.874Z. Usage-query throttling is not a generation502 or proof of exhausted generation quota.",
+    "window_utc": [
+      "2026-11-04T00:20:00Z",
+      "2026-11-04T08:02:00Z"
+    ]
+  },
+  "causal_chain": [
+    {
+      "component": "Anthropic provider response",
+      "lines": [
+        3080,
+        3098
+      ],
+      "observation": "Both native warnings contain the same terminal Refusal (general_harms): classification. Full explanation and raw logs stay private.",
+      "source": "packages/ai/src/providers/anthropic.ts"
+    },
+    {
+      "component": "Installed omp 18.16.0 provider adapter",
+      "observation": "Maps refusal stop reason to error and throws ProviderResponseError(kind=output), a non-HTTP provider failure.",
+      "sources": [
+        {
+          "lines": [
+            3208,
+            3212
+          ],
+          "path": "packages/ai/src/providers/anthropic.ts"
+        },
+        {
+          "lines": [
+            6884,
+            6885
+          ],
+          "path": "packages/ai/src/providers/anthropic.ts"
+        },
+        {
+          "lines": [
+            27,
+            40
+          ],
+          "path": "packages/ai/src/error/provider.ts"
+        }
+      ]
+    },
+    {
+      "component": "Local Bun stdio omp gateway, not the remote home gateway listener",
+      "observation": "Logs native provider error, classifies its message and constructs local Response status502; stdio serializes it.",
+      "sources": [
+        {
+          "lines": [
+            676,
+            695
+          ],
+          "path": "packages/ai/src/auth-gateway/server.ts"
+        },
+        {
+          "lines": [
+            23,
+            70
+          ],
+          "path": "packages/ai/src/error/gateway.ts"
+        }
+      ]
+    },
+    {
+      "component": "Hone pilot wrapper",
+      "observation": "Preserves synthesized502, masks non200 error body, and does not return usage on this path. ModelCalls retries the same request once then calibration aborts without score.",
+      "sources": [
+        {
+          "lines": [
+            65,
+            69
+          ],
+          "path": "pilot/gateway.mjs"
+        },
+        {
+          "lines": [
+            320,
+            340
+          ],
+          "path": "pilot/runtime.py"
+        },
+        {
+          "lines": [
+            173,
+            180
+          ],
+          "path": "pilot/__main__.py"
+        }
+      ]
+    }
+  ],
+  "classifier_smoke": {
+    "assertion_passed": true,
+    "command": "nice -n 10 taskset -c 6 bun -e <import installed classifyGatewayError and classify a fixture refusal>",
+    "fixture": "Refusal (general_harms): terminal provider refusal",
+    "model_requests": 0,
+    "observed_status": 502,
+    "observed_type": "upstream_error"
+  },
+  "disposition": {
+    "code_fix": "none: root mapping is installed omp code, and changing gateway or reinterpreting a terminal refusal as zero is outside the frozen contract and this approval.",
+    "measured_ifbench_calibration_available": false,
+    "needed": "Gate-owner decision on terminal-refusal scoring/handling and credential-opaque terminal-response usage. Retry-only infrastructure approval does not settle that boundary. Do not bypass safety, switch models, filter the row, retune the gate, or file an upstream issue.",
+    "new_attempt": "not started",
+    "predeclaration7_committed_before_calls": true,
+    "run_plan": "evidence/pilot/run-plan-6.json remains the unchanged latest measured/prospective plan; no new measured IFBench numbers exist.",
+    "selected_panel": null,
+    "two_task_fallback_selected": false
+  },
+  "dns_correlation": {
+    "limit": "Does not rule out intermittent DNS problems affecting other destinations or requests. No causal link between the named DNS episodes and these refusals was found.",
+    "observation": "Both terminal refusals occur after07:18Z and come from parsed provider stop details, not a logged transport error. No systemd-resolved events were retained07:15-07:20Z, including privileged read. Broker served deckbox operations during the earlier DNS windows.",
+    "user_reported_repair_utc": "04:3x",
+    "user_reported_windows_utc": [
+      "00:28-00:50",
+      "04:1x-04:2x"
+    ]
+  },
+  "failed_calls": [
+    {
+      "call": 127,
+      "error_prefix": "Refusal (general_harms):",
+      "format": "pi-native",
+      "gateway_request_id": "b3311dee-2c56-4b7b-ab35-3ec4988256ae",
+      "hidden_attempts": 0,
+      "known_classification_present": true,
+      "line": 129,
+      "message": "auth-gateway non-streaming failed",
+      "peer": "hone-development-pilot",
+      "pid": 3714390,
+      "provider_fetch_attempts": 1,
+      "reason": "error",
+      "record_sha256": "bd2915dc4ba6a83bffa009b96b3817769f1671510107971853d631cbb0ead2b0",
+      "request_hash": "sha256:e13f06de0a7ff0d02b4c72e104f6104b9e403c71b6eae6b2ba806bb36cd3d1d9",
+      "request_timestamp": "2026-11-04T07:18:25.123+00:00",
+      "source": "/home/tim/.omp/logs/omp.2026-11-04.3714390.log",
+      "status_in_stdio_frame": 502,
+      "timestamp": "2026-11-04T07:18:25.652+00:00",
+      "upstream_http_status_observed": null,
+      "usage_missing": true
+    },
+    {
+      "call": 128,
+      "error_prefix": "Refusal (general_harms):",
+      "format": "pi-native",
+      "gateway_request_id": "3863cc4e-cfc8-4a2d-baae-bd7dd9091a6e",
+      "hidden_attempts": 0,
+      "known_classification_present": true,
+      "line": 3,
+      "message": "auth-gateway non-streaming failed",
+      "peer": "hone-development-pilot",
+      "pid": 3886088,
+      "provider_fetch_attempts": 1,
+      "reason": "error",
+      "record_sha256": "bfe9e1370ffb4bd1486f834ea2bda515d1bb30c1b007d716ffe585772cee373e",
+      "request_hash": "sha256:e13f06de0a7ff0d02b4c72e104f6104b9e403c71b6eae6b2ba806bb36cd3d1d9",
+      "request_timestamp": "2026-11-04T07:18:29.192+00:00",
+      "source": "/home/tim/.omp/logs/omp.2026-11-04.3886088.log",
+      "status_in_stdio_frame": 502,
+      "timestamp": "2026-11-04T07:18:29.747+00:00",
+      "upstream_http_status_observed": null,
+      "usage_missing": true
+    }
+  ],
+  "frozen_runtime_files_verified": 13,
+  "installed_source": {
+    "license": "MIT",
+    "package": "@oh-my-pi/pi-ai",
+    "repository": "https://github.com/can1357/oh-my-pi",
+    "source_sha256": {
+      "src/auth-gateway/server.ts": "sha256:da2ee827d9854cc68da9df9de2539fa2eb7bd8519d6741828db2f3af843009ed",
+      "src/auth-gateway/stdio.ts": "sha256:ccbc25b1c3e6fc9abfd39f30edc85d9345e71b051b472418185afd845ec684b4",
+      "src/error/gateway.ts": "sha256:bb7b1b1e211ec6bba23a8b83bc0f239226f6a71bbf3e426d1c086b8ec9f31ec9",
+      "src/error/provider.ts": "sha256:629efe997aae1c4596ded06d1521da8179416a7ed121d97154513cae9eb8bce1",
+      "src/providers/anthropic-client.ts": "sha256:ba7bba8ed1fbd41d9265f6e071d571235ccec44e036cf855f1ecc5517e4f9d73",
+      "src/providers/anthropic.ts": "sha256:812f8336bece9809e4dd4106aaefe6bde9794db83725a18966ab22b0dcafbd19"
+    },
+    "version": "18.16.0"
+  },
+  "limits": [
+    "No provider rawHTTP response/requestID or complete failed-call usage was retained. Missing token volume remains unknown, not free.",
+    "Native refusal cause comes from parsed stop_details and matching logs; no private explanation, account email, credential or task payload is published.",
+    "No new pilot model calls, controls, smokes, matrices, broker/gateway/system changes, restarts or upstream issues."
+  ],
+  "matrix_searches_executed": 0,
+  "new_pilot_model_calls": 0,
+  "predeclaration_commit": "b711038",
+  "previous_evidence": {
+    "controls6_bundle_verified": true,
+    "new_interpretation": "That frozen terminal label records what Hone knew through its masked transport; it is not proof of an outage. No corrected score, contrast or noise result is manufactured.",
+    "original_status": "infrastructure-failure",
+    "raw_evidence_changed": false
+  },
+  "provider_response_inference": "The native client only returns an ok HTTP response to stream processing; parsed refusal details therefore indicate a successful upstream response, not a provider HTTP502. Exact provider status and request ID were not retained, so no observed HTTP200 claim is made.",
+  "provider_status_correlation": {
+    "incidents_examined": 50,
+    "latest_started_at": "2026-10-28T16:19:09.935Z",
+    "limit": "Absence from a public status feed does not prove no isolated failure. The native terminal-refusal logs provide the positive attribution.",
+    "page_updated_at": "2026-11-04T07:35:25.622Z",
+    "source": "https://status.claude.com/api/v2/incidents.json",
+    "target_date_or_open_incidents": []
+  },
+  "runtime_files_changed": [],
+  "schema": "pilot-502-diagnosis-v7",
+  "status": "STOP_TERMINAL_PROVIDER_REFUSAL_NOT_ESTABLISHED_INFRASTRUCTURE"
+}

@@ -1,6 +1,8 @@
 # Development optimizer pilot
 
-Contract 6 stopped with an infrastructure abort after 128 IFBench calls, including two HTTP 502 failures without usage. Only the naive control completed. There is no improved contrast, noise calibration, admitted panel or selected fallback. The one attempt is sealed in `controls-6`; do not restart it or run either matrix. [Predeclaration 6](../evidence/pilot/predeclaration-6.md) preserves MBPP and HoVer admissions and all earlier [invalid-cohort IFBench evidence](../evidence/pilot/invalid-ifbench-cohorts-6.json). Another attempt needs the gate owner's authorization.
+[Diagnosis 7](../evidence/pilot/diagnosis-7.json) identifies both contract-6 failures as terminal Anthropic `Refusal (general_harms)` responses. Installed omp's local stdio gateway synthesized status 502; the logs do not establish a DNS or broker outage. The frozen `controls-6` infrastructure-failure label and all raw evidence remain unchanged. Only the naive control completed, so there is no contrast, noise calibration, admitted complete panel or selected fallback.
+
+[Predeclaration 7](../evidence/pilot/predeclaration-7.md), committed before any new pilot calls, records the gate owner's approval of at most two additional identical-contract attempts after infrastructure aborts. It does not reclassify terminal refusals as outages or authorize scoring them zero. No new attempt has started. Terminal-refusal treatment requires a gate-owner decision before dispatch. No broker, gateway or system configuration changed, and no upstream issue was filed. [Predeclaration 6](../evidence/pilot/predeclaration-6.md) still defines the measurement rules and preserves MBPP and HoVer admissions and all earlier [invalid-cohort IFBench evidence](../evidence/pilot/invalid-ifbench-cohorts-6.json).
 
 The pilot decides whether Hone's proposed search policy warrants a larger comparison. It does not support a public optimizer-quality claim. It compares Hone, pinned official GEPA, and a plain agent loop with the same current subscription model and reported-usage budget.
 
@@ -30,6 +32,8 @@ Auth and usage child processes receive only an explicit allowlist of home, execu
 
 ## Admit the evaluator before search
 
+The following commands describe the completed contract-6 attempt. Its output directories already contain sealed evidence and must not be overwritten or restarted. Predeclaration 7 reserves new evidence directories but dispatch is blocked on the terminal-refusal decision.
+
 ```sh
 nice -n 10 taskset -c 6 env OPENBLAS_NUM_THREADS=1 OMP_NUM_THREADS=1 MKL_NUM_THREADS=1 JAX_PLATFORMS=cpu pilot/.venv/bin/python -m pilot adversarial --out evidence/pilot/adversarial-6
 nice -n 10 taskset -c 6 env OPENBLAS_NUM_THREADS=1 OMP_NUM_THREADS=1 MKL_NUM_THREADS=1 JAX_PLATFORMS=cpu pilot/.venv/bin/python -m pilot controls --adversarial evidence/pilot/adversarial-6 --out evidence/pilot/controls-6
@@ -43,7 +47,7 @@ IFBench takes `Random(1).sample(source_rows[300:600], 150)`, then freezes a 40-r
 
 Admission requires known-improved > naive > both broken and shortcut, with broken = 0 and MBPP shortcut = 0. P positives execute published optimized instructions, not trusted answers or a prompt authored here. Sixteen fresh paired unchanged-seed trials measure noise without response caching. Keep `noiseFloor = 3/sqrt(2)*s` and `noiseEnvelope = max(4.5/sqrt(2)*s, max_abs_delta)`. The envelope must be strictly below the positive-control contrast. Projection uses `sqrt(source_rows/n)`: 40 for P and 20 for MBPP. An IFBench checker, headroom, ranking or noise failure selects MBPP + HoVer, labelled a two-task development pilot, without retuning or substitution. Zero estimated noise is not proof of a noiseless evaluator.
 
-A failed control command preserves its evidence. The runner refuses to overwrite that output folder. A second folder would be a prohibited second attempt, not a fresh authorization, and would create another external call ledger. This epoch uses only `evidence/pilot/controls-6`. Only a recorded IFBench checker, headroom, ranking or noise failure authorizes the MBPP + HoVer fallback. Missing results and infrastructure failures never do.
+A failed control command preserves its evidence and refuses to overwrite that output folder. The current runner authorizes only `evidence/pilot/controls-6`; no new retry dispatch path has been implemented while the refusal boundary is unresolved. Predeclaration 7 reserves `controls-7a` and, only after another infrastructure abort, `controls-7b`. No allowance is consumed by the diagnosis. A completed IFBench checker, headroom, ranking or noise failure selects MBPP + HoVer. Missing or infrastructure-aborted measurements never select that fallback.
 
 ## Published P controls
 
