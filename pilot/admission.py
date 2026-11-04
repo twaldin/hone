@@ -87,6 +87,103 @@ def mbpp_source_contract(root: Path) -> dict:
             "specialization": "Only load_task, score_output, evaluate and search._contract specialize name/task.name to mbpp. All remaining module AST and literal files must match. No other expressions execute during comparison."}
 
 
+SOURCE_HEAD = "3f52884d86b2b562e3c15a875514ee0ac48d0215"
+
+
+def pinned_source(root: Path, path: str, expected: str | None = None) -> str:
+    import json
+    snapshot = json.loads((root / "evidence/pilot/source-snapshot-5.json").read_text())
+    if snapshot["source_head"] != SOURCE_HEAD:
+        raise ValueError("Retained source snapshot head changed")
+    if expected is not None and expected in snapshot.get("historical_files", {}):
+        return snapshot["historical_files"][expected]
+    return snapshot["files"][path]
+
+
+def measured_checker_failure(proof: dict, task_name: str) -> bool:
+    from .adversarial import TEXT_FIELDS
+    checks = proof["checks"]
+    if checks["positive_score"] != 1:
+        return True
+    if not checks["records"]:
+        return False
+    record = checks["records"][-1]
+    expected_frames = len(TEXT_FIELDS[task_name]) if record["mode"] == "protected-json" else 1
+    return (len(record["frames"]) == expected_frames
+            and (record["direct_score"] != 0 or record["scores"] != [0.0]))
+
+
+def task_source_ast(source: str, task_name: str) -> str:
+    class Specialize(_MBPP):
+        def visit_Name(self, node):
+            if node.id == "name" and isinstance(node.ctx, ast.Load):
+                return ast.copy_location(ast.Constant(task_name), node)
+            return node
+
+        def visit_Attribute(self, node):
+            if isinstance(node.value, ast.Name) and node.value.id == "task" and node.attr == "name":
+                return ast.copy_location(ast.Constant(task_name), node)
+            return self.generic_visit(node)
+
+    module = ast.parse(source)
+    for index, node in enumerate(module.body):
+        if isinstance(node, ast.FunctionDef) and node.name in {"partition", "load_task", "score_output", "evaluate"}:
+            module.body[index] = Specialize().visit(node)
+            for position, statement in enumerate(module.body[index].body):
+                if isinstance(statement, (ast.Return, ast.Raise)):
+                    module.body[index].body = module.body[index].body[:position + 1]
+                    break
+    return digest(ast.dump(module, include_attributes=False))
+
+
+def validate_source_equivalence(root: Path, original: dict, task_name: str) -> dict:
+    import hashlib
+    files = original["evaluator_files"]
+    expected_paths = {"pilot/tasks.py", "pilot/program.py", "pilot/verification.py", "pilot/adversarial.py",
+                      "pilot/controls.py", "pilot/runtime.py", "pilot/gateway.mjs", "pilot/__main__.py",
+                      "pilot/admission.py", "pilot/hover.py", "pilot/published.py",
+                      "pilot/published-controls.json", "pilot/panel.py"}
+    if task_name == "mbpp" and original.get("contract") == 4:
+        expected_paths.remove("pilot/panel.py")
+    if set(files) != expected_paths:
+        raise ValueError("Original admission source inventory changed")
+    scoped = {}
+    for path, expected in files.items():
+        old = pinned_source(root, path, expected)
+        if "sha256:" + hashlib.sha256(old.encode()).hexdigest() != expected:
+            raise ValueError("Pinned source does not authenticate original admission: " + path)
+        current = (root / path).read_text()
+        if path == "pilot/tasks.py":
+            before, after = task_source_ast(old, task_name), task_source_ast(current, task_name)
+        elif path == "pilot/controls.py":
+            current = current.replace("IFBENCH_CONTROL_SEED = 20261106\n", "")
+            current = current.replace('    if task.name == "ifbench":\n        seed = IFBENCH_CONTROL_SEED\n', "")
+            current = current.replace('IFBENCH_CONTROL_SEED if task.name == "ifbench" else CONTROL_SEED if task.name == "mbpp" else P_CONTROL_SEED',
+                                      'CONTROL_SEED if task.name == "mbpp" else P_CONTROL_SEED')
+            before = digest(ast.dump(ast.parse(old), include_attributes=False))
+            after = digest(ast.dump(ast.parse(current), include_attributes=False))
+        elif path == "pilot/admission.py":
+            names = {"_MBPP", "mbpp_ast", "mbpp_source_contract", "text_admission", "validate_text_admission"}
+            before = digest([ast.dump(node, include_attributes=False) for node in ast.parse(old).body
+                             if isinstance(node, (ast.ClassDef, ast.FunctionDef)) and node.name in names])
+            after = digest([ast.dump(node, include_attributes=False) for node in ast.parse(current).body
+                            if isinstance(node, (ast.ClassDef, ast.FunctionDef)) and node.name in names])
+        elif path == "pilot/__main__.py":
+            names = {"environment", "calls_for", "calibration_transport", "execution_limits"}
+            before = digest([ast.dump(node, include_attributes=False) for node in ast.parse(old).body
+                             if isinstance(node, ast.FunctionDef) and node.name in names])
+            after = digest([ast.dump(node, include_attributes=False) for node in ast.parse(current).body
+                            if isinstance(node, ast.FunctionDef) and node.name in names])
+        elif path == "pilot/panel.py":
+            continue
+        else:
+            before, after = digest(old), digest(current)
+        if before != after:
+            raise ValueError("Retained task execution source changed: " + path)
+        scoped[path] = after
+    return {"source_head": SOURCE_HEAD, "original_files": files, "task_execution_hashes": scoped}
+
+
 def text_admission(task, identity: dict, rows: list[dict]) -> dict:
     from .adversarial import text_checks
     checks = text_checks(task)

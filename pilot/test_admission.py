@@ -98,6 +98,10 @@ class AdmissionTests(unittest.TestCase):
         self.assertEqual(len(proof["checks"]["records"]), 1)
         self.assertEqual(proof["checks"]["records"][0]["direct_score"], 0)
         self.assertEqual(proof["checks"]["records"][0]["scores"], [1.0])
+        from pilot.admission import measured_checker_failure
+        completed = copy.deepcopy(proof)
+        completed["checks"]["records"][-1]["frames"] = ["protected frame"]
+        self.assertTrue(measured_checker_failure(completed, task.name))
         with self.assertRaises(ValueError):
             validate_text_admission(proof, task, {}, task.train)
 
@@ -108,8 +112,43 @@ class AdmissionTests(unittest.TestCase):
         self.assertFalse(proof["passed"])
         self.assertEqual(proof["checks"]["records"][0]["scores"], [0.0])
         self.assertEqual(proof["checks"]["records"][0]["frames"], [])
+        from pilot.admission import measured_checker_failure
+        self.assertFalse(measured_checker_failure(proof, task.name))
         with self.assertRaises(ValueError):
             validate_text_admission(proof, task, {}, task.train)
+
+
+class RetainedSourceTests(unittest.TestCase):
+    def test_authorized_partition_change_preserves_retained_task_execution(self):
+        from pilot.admission import task_source_ast
+        before = ('def partition(name, rows):\n'
+                  '    if name == "ifbench":\n        return rows[300:600], rows[:300]\n'
+                  '    if name == "aime":\n        return rows[:45], rows[45:]\n'
+                  '    raise ValueError("unknown")\n')
+        after = before.replace('rows[300:600], rows[:300]', 'random.Random(1).sample(rows[300:600], 150), rows[:300]')
+        for name in ("mbpp", "hover"):
+            self.assertEqual(task_source_ast(before, name), task_source_ast(after, name))
+        self.assertNotEqual(task_source_ast(before, "ifbench"), task_source_ast(after, "ifbench"))
+        changed = after.replace('raise ValueError("unknown")', 'return [], []')
+        self.assertNotEqual(task_source_ast(before, "mbpp"), task_source_ast(changed, "mbpp"))
+        helper = before + '\ndef score_helper(value):\n    return value\n'
+        for name in ("mbpp", "hover"):
+            for changed in (helper.replace("return value", "return 1"),
+                            helper + '\ndef injected():\n    observe()\n'):
+                self.assertNotEqual(task_source_ast(helper, name), task_source_ast(changed, name))
+
+    def test_pinned_original_sources_authenticate_both_retained_admissions(self):
+        import json
+        from pilot.admission import validate_source_equivalence
+        from pilot.runtime import ROOT
+        for name, source in (("mbpp", "mbpp-readmission-4a/mbpp"), ("hover", "controls-5/hover")):
+            identity = json.loads((ROOT / "evidence/pilot" / source / "controls.json").read_text())["identity"]
+            receipt = validate_source_equivalence(ROOT, identity, name)
+            self.assertIn("pilot/tasks.py", receipt["task_execution_hashes"])
+            forged = copy.deepcopy(identity)
+            forged["evaluator_files"]["pilot/tasks.py"] = "sha256:forged"
+            with self.assertRaisesRegex(ValueError, "authenticate"):
+                validate_source_equivalence(ROOT, forged, name)
 
 
 

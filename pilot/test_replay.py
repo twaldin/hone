@@ -53,6 +53,30 @@ class ReplayTests(unittest.TestCase):
                 save(out / "hover/evaluations.jsonl", record)
                 with self.assertRaisesRegex(ValueError, "disagrees"):
                     replay(args)
+    def test_invalid_ifbench_cohort_is_replay_only_and_requires_exact_archived_manifest(self):
+        from pilot import __main__ as cli
+        from pilot import tasks
+        original = {"task": "ifbench", "train_ids": ["ifbench:train:1", "ifbench:train:2"],
+                    "selection_ids": ["ifbench:train:0"], "adaptation": "archived 300-row cohort"}
+        current = dict(original, train_ids=["ifbench:train:2"], adaptation="official 150-row sample")
+        task = Task("ifbench", [], [], current, {"prompt": "unchanged"})
+        raw = [{"prompt": str(index), "instruction_id_list": [], "kwargs": []} for index in range(3)]
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            source = root / "evidence/pilot/controls-4a"
+            save(source / "ifbench/controls.json", {"identity": {"task": original}})
+            cli.seal(source)
+            metric = object()
+            with patch.object(cli, "ROOT", root), patch("pilot.tasks._data", return_value=(raw, {})), patch.dict(
+                tasks._METRICS, {id(current): metric}
+            ):
+                archived = cli.archived_ifbench(task, original, root / "cache")
+                self.assertEqual([row["id"] for row in archived.train], original["train_ids"])
+                self.assertIs(tasks._METRICS[id(archived.manifest)], metric)
+                forged = dict(original, train_ids=["ifbench:train:0"])
+                with self.assertRaisesRegex(ValueError, "Archived"):
+                    cli.archived_ifbench(task, forged, root / "cache")
+
 
     def test_interrupted_cell_preserves_usage_prefix_and_last_accepted_artifact(self):
         with tempfile.TemporaryDirectory() as directory:

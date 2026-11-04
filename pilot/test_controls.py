@@ -7,7 +7,7 @@ import unittest
 from unittest.mock import patch
 
 from pilot.admission import text_admission
-from pilot.controls import (CONTROL_SEED, P_CONTROL_ROWS, P_CONTROL_SEED, PREVIOUS_MBPP_ROWS,
+from pilot.controls import (CONTROL_SEED, P_CONTROL_ROWS, PREVIOUS_MBPP_ROWS,
                             ControlsFailed, measure, representative_rows)
 from pilot.tasks import Task
 from pilot import tasks
@@ -77,11 +77,14 @@ class ControlTests(unittest.TestCase):
             self.assertEqual(path.read_text(), "prior evidence")
 
     def test_fresh_p_draw_is_fixed_and_independent_of_source_order(self):
-        task = self.task()
-        expected = random.Random(P_CONTROL_SEED).sample(sorted(task.train, key=lambda row: row["id"]), 40)
-        self.assertEqual(representative_rows(task), expected)
-        task.train.reverse()
-        self.assertEqual(representative_rows(task), expected)
+        for name, seed in (("aime", 20261105), ("ifbench", 20261106), ("hover", 20261105)):
+            with self.subTest(task=name):
+                task = self.task()
+                task.name = name
+                expected = random.Random(seed).sample(sorted(task.train, key=lambda row: row["id"]), 40)
+                self.assertEqual(representative_rows(task), expected)
+                task.train.reverse()
+                self.assertEqual(representative_rows(task), expected)
 
     def test_fresh_mbpp_draw_excludes_prior_rows_without_mutating_partition(self):
         rows = [{"id": f"mbpp:train:{index}"} for index in range(601, 975)]

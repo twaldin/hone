@@ -9,7 +9,7 @@ from unittest.mock import patch
 from pilot import __main__ as cli
 from pilot.admission import text_admission
 from pilot.controls import artifacts, representative_rows
-from pilot.panel import WITH_HOVER, WITHOUT_HOVER, panel_tasks, reuse_control
+from pilot.panel import OFFICIAL_PANEL, FALLBACK_PANEL, panel_tasks, reuse_control, validate_measurement
 from pilot.tasks import Task
 
 
@@ -20,16 +20,16 @@ def fixture_score(task, row, output):
 
 
 class PanelTests(unittest.TestCase):
-    def test_only_measured_hover_outcomes_choose_a_panel(self):
-        self.assertEqual(panel_tasks("passed"), WITH_HOVER)
-        self.assertEqual(panel_tasks("failed-gate"), WITHOUT_HOVER)
+    def test_only_measured_ifbench_outcomes_choose_a_panel(self):
+        self.assertEqual(panel_tasks("passed"), OFFICIAL_PANEL)
+        self.assertEqual(panel_tasks("failed-gate"), FALLBACK_PANEL)
         for status in ("infrastructure_failure", "missing", "", "failed", None):
             with self.subTest(status=status), self.assertRaises(ValueError):
                 panel_tasks(status)
-        self.assertNotIn("aime", WITH_HOVER + WITHOUT_HOVER)
+        self.assertNotIn("aime", OFFICIAL_PANEL + FALLBACK_PANEL)
 
-    def test_only_mbpp_and_ifbench_can_be_reused(self):
-        for name in ("aime", "hover"):
+    def test_invalid_ifbench_and_withdrawn_tasks_cannot_be_reused(self):
+        for name in ("aime", "ifbench"):
             with self.subTest(name=name), self.assertRaises(ValueError):
                 reuse_control(Task(name, [], [], {}, {}))
 
@@ -71,7 +71,7 @@ class PanelTests(unittest.TestCase):
         self.control = {"task": "ifbench", "identity": self.original, "rows": self.ids,
                         "adversarial_hash": cli.digest(self.proof), "artifacts": artifacts(self.task),
                         "noise_design": {"paired_trials": 16, "rows_per_arm": 40, "model_calls_cached": False,
-                                         "draw_seed": 20261105, "excluded_prior_mbpp_rows": [],
+                                         "draw_seed": 20261106, "excluded_prior_mbpp_rows": [],
                                          "seed_artifact_hash": cli.digest(self.task.seed_candidate), "cohort_hash": cli.digest(self.ids)}}
         self.declaration = copy.deepcopy(self.control)
         self.evaluations = []
@@ -117,30 +117,17 @@ class PanelTests(unittest.TestCase):
         cli.seal(self.local)
         cli.seal(self.local.parent)
 
-    def test_unchanged_ifbench_keeps_measurements_and_records_both_identities(self):
-        control, receipt = reuse_control(self.task)
-        self.assertEqual(control, self.control)
-        self.assertEqual(control["identity"]["contract"], 4)
-        self.assertEqual(receipt["current_identity"]["contract"], 5)
-        self.assertEqual(receipt["original_evaluator_source_exceptions"], ["pilot/__main__.py"])
-        self.assertIs(receipt["controls_rerun"], False)
-        self.assertEqual(receipt["model_calls"], 0)
+    def test_current_ifbench_validates_raw_measurements(self):
+        self.assertEqual(validate_measurement(self.local, self.task, self.original, self.proof), "passed")
 
-    def test_changed_execution_dependencies_are_rejected(self):
-        for defect in ("scoring", "model", "cohort"):
-            with self.subTest(defect=defect):
-                current = copy.deepcopy(self.current)
-                if defect == "scoring":
-                    (self.root / "pilot/tasks.py").write_text("changed scoring")
-                elif defect == "model":
-                    self.current["route"] = {"model": "different"}
-                else:
-                    self.task.train[0]["id"] = "changed-row"
-                with self.assertRaises(ValueError):
-                    reuse_control(self.task)
-                (self.root / "pilot/tasks.py").write_text("original\n")
-                self.task.train[0]["id"] = "row:0"
-                self.current = current
+    def test_changed_current_identity_or_cohort_is_rejected(self):
+        changed = copy.deepcopy(self.original)
+        changed["route"] = "changed-model"
+        with self.assertRaises(ValueError):
+            validate_measurement(self.local, self.task, changed, self.proof)
+        self.task.train[0]["id"] = "changed-row"
+        with self.assertRaises(ValueError):
+            validate_measurement(self.local, self.task, self.original, self.proof)
 
     def test_sealed_forged_measurements_cannot_pass_by_flags(self):
         for defect in ("noise", "contrast", "score", "proof", "calibration"):
@@ -159,7 +146,7 @@ class PanelTests(unittest.TestCase):
                     self.control["calibration"]["noiseEnvelope"] = 0.1
                 self.seal_fixture()
                 with self.assertRaises(ValueError):
-                    reuse_control(self.task)
+                    validate_measurement(self.local, self.task, self.original, self.proof)
                 self.control, self.pairs, self.proof = before
                 self.seal_fixture()
 

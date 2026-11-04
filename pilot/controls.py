@@ -14,6 +14,7 @@ CONTROL_ROWS = 20
 CONTROL_SEED = 20261104
 P_CONTROL_ROWS = 40
 P_CONTROL_SEED = 20261105
+IFBENCH_CONTROL_SEED = 20261106
 PREVIOUS_MBPP_ROWS = frozenset(f"mbpp:train:{value}" for value in (
     601, 654, 707, 760, 814, 867, 920, 974,
     647, 676, 686, 702, 925, 923, 671, 629, 877, 734, 878, 956,
@@ -34,6 +35,8 @@ def representative_rows(task: Task) -> list[dict]:
     eligible = sorted((row for row in task.train if task.name != "mbpp" or row["id"] not in PREVIOUS_MBPP_ROWS),
                       key=lambda row: row["id"])
     count, seed = (CONTROL_ROWS, CONTROL_SEED) if task.name == "mbpp" else (P_CONTROL_ROWS, P_CONTROL_SEED)
+    if task.name == "ifbench":
+        seed = IFBENCH_CONTROL_SEED
     if len(eligible) < count:
         raise ValueError("Controls require the predeclared number of eligible training rows")
     return random.Random(seed).sample(eligible, count)
@@ -81,7 +84,7 @@ def measure(task: Task, call, out: Path, identity: dict, *, rows: list[dict], ad
               "adversarial_hash": digest(adversarial),
               "expected_rank": EXPECTED_RANK, "definitions": definitions, "artifacts": candidates,
               "noise_design": {"paired_trials": PAIRS, "rows_per_arm": len(rows), "model_calls_cached": False,
-                               "draw_seed": CONTROL_SEED if task.name == "mbpp" else P_CONTROL_SEED,
+                               "draw_seed": IFBENCH_CONTROL_SEED if task.name == "ifbench" else CONTROL_SEED if task.name == "mbpp" else P_CONTROL_SEED,
                                "excluded_prior_mbpp_rows": sorted(PREVIOUS_MBPP_ROWS) if task.name == "mbpp" else [],
                                "seed_artifact_hash": digest(task.seed_candidate), "cohort_hash": digest([row["id"] for row in rows])}}
     out.mkdir(parents=True, exist_ok=True)

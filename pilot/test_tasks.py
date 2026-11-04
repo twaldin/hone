@@ -2,6 +2,7 @@ import ast
 import json
 import os
 import tempfile
+import random
 from pathlib import Path
 from types import SimpleNamespace
 import unittest
@@ -40,7 +41,8 @@ class TaskTests(unittest.TestCase):
         rows = [{"id": str(i)} for i in range(1000)]
         train, selection = tasks.partition("ifbench", rows)
         self.assertEqual([row["id"] for row in selection], [str(i) for i in range(300)])
-        self.assertEqual([row["id"] for row in train], [str(i) for i in range(300, 600)])
+        self.assertEqual([row["id"] for row in train],
+                         [str(i) for i in random.Random(1).sample(list(range(300, 600)), 150)])
         self.assertFalse({row["id"] for row in train} & {row["id"] for row in selection})
         a, b = tasks.partition("aime", rows[:90])
         self.assertEqual((len(a), len(b)), (45, 45))

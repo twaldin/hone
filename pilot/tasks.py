@@ -85,7 +85,7 @@ def partition(name: str, rows: list[dict]) -> tuple[list[dict], list[dict]]:
     if name == "ifbench":
         if len(rows) < 600:
             raise ValueError("IFBench development source must contain at least 600 rows")
-        return rows[300:600], rows[:300]
+        return random.Random(1).sample(rows[300:600], 150), rows[:300]
     if name == "aime":
         if len(rows) != 90:
             raise ValueError("Historical AIME development source must contain exactly 90 rows")
@@ -145,7 +145,8 @@ def load_task(name: str, cache: Path) -> Task:
     manifest = {"task": name, "development_only": True, "sources": sources,
                 "train_ids": [row["id"] for row in train], "selection_ids": [row["id"] for row in selection],
                 "scored_final_tests_loaded": False, "metric_artifact_revision": ARTIFACT_REV,
-                "adaptation": "Reference AST function declarations only; no bodies, examples or test assertions. Bounded Python agent-program adaptation, not official optimizer artifact." if name == "mbpp" else "Official development transformations; AIME Random(0) 45/45, IFBench source rows 300:600 training and 0:300 selection.",
+                "adaptation": ("Official IFBench development transformation: Random(1).sample(source rows 300:600, 150) training; source rows 0:300 selection." if name == "ifbench" else
+                               "Reference AST function declarations only; no bodies, examples or test assertions. Bounded Python agent-program adaptation, not official optimizer artifact." if name == "mbpp" else "Official development transformations; AIME Random(0) 45/45, IFBench source rows 300:600 training and 0:300 selection."),
                 "license": "CC-BY-4.0" if name == "mbpp" else "See pinned source"}
     if name in {"aime", "ifbench"}:
         manifest["program_protocol"] = {

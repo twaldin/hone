@@ -79,7 +79,7 @@ Without either setting, Hone looks for capsules in `./capsules` under the direct
 
 ## Development optimizer pilot
 
-**Blocked — do not run the pilot or merge this branch.** Exact-head review found that IFBench omits the official seed-1 training cap from 300 rows to 150. Its frozen controls do not admit the official partition. [The verified stop](evidence/pilot/review-stop-5.json) preserves the evidence and requests a new predeclaration before further model calls.
+[Predeclaration 6](evidence/pilot/predeclaration-6.md) authorizes one IFBench re-admission after correcting the official seeded 150-row training sample. MBPP and HoVer admissions stand; prior IFBench measurements remain unchanged and labelled [invalid cohort](evidence/pilot/invalid-ifbench-cohorts-6.json). A measured IFBench gate failure narrows the panel to MBPP + HoVer without substitutions. Neither matrix nor merge is authorized.
 
 [`pilot/`](pilot/) compares Hone's paired, noise-calibrated policy, pinned official GEPA, and a plain agent loop on development-only IFBench, bounded MBPP agent programs, and HoVer if its one admission attempt passes. It uses one subscription route, an account allowlist, usage throttling, and matched reported-usage budgets. Final-test labels stay sealed.
 

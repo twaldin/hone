@@ -8,7 +8,7 @@ import tempfile
 import unittest
 from unittest.mock import Mock, patch
 
-from pilot.__main__ import TASKS, audit_mbpp_measurement, controls as run_controls, evaluator_identity, file_hash, load_panel, main, machine_proof, offline_adversarial, replay, reuse_mbpp, save, seal
+from pilot.__main__ import TASKS, audit_mbpp_measurement, controls as measured_controls, evaluator_identity, file_hash, load_panel, main, machine_proof, offline_adversarial, replay, reuse_mbpp, save, seal
 from pilot.controls import ControlsFailed, PAIRS, P_CONTROL_SEED, representative_rows
 from pilot.runtime import ROOT, CallFailed, TransportError, append_json, digest
 from pilot.tasks import Task
@@ -18,10 +18,22 @@ from pilot import tasks as task_module
 from pilot import hover
 
 
+def run_controls(args, *transport):
+    with patch("pilot.__main__.AUTHORIZED_CONTROL_OUTPUT", args.out):
+        return measured_controls(args, *transport)
+
+
 class PreflightTests(unittest.TestCase):
     def setUp(self):
         self.enterContext(patch("os.sched_getaffinity", return_value={6}))
         self.enterContext(patch("os.getpriority", return_value=10))
+
+    def test_replacement_control_directory_is_never_authorized(self):
+        with tempfile.TemporaryDirectory() as directory, patch("pilot.__main__.calls_for") as dispatch:
+            args = argparse.Namespace(task="all", out=Path(directory) / "replacement")
+            with self.assertRaisesRegex(ValueError, "no replacement"):
+                measured_controls(args)
+            dispatch.assert_not_called()
 
     def fixture(self, root):
         tasks = {task.name: task for task in fixture_tasks() if task.name != "aime"}
@@ -39,8 +51,9 @@ class PreflightTests(unittest.TestCase):
         self.metrics = {id(tasks["ifbench"].manifest): lambda row, pred: SimpleNamespace(
             score=float(pred.response == "heliotropeproofword"), feedback="checked")}
         self.enterContext(patch.dict(task_module._METRICS, self.metrics))
+        self.enterContext(patch("pilot.__main__.validate_measurement", return_value="passed"))
         self.carried = {}
-        for name in ("mbpp", "ifbench"):
+        for name in ("mbpp", "hover"):
             self.carried[name] = ({"ranking_passed": True, "noise_passed": True,
                                   "rows": [row["id"] for row in representative_rows(tasks[name])]},
                                  {"fixture": f"already admitted unchanged {name}"})
@@ -53,8 +66,10 @@ class PreflightTests(unittest.TestCase):
         seal(frozen)
         self.enterContext(patch("pilot.__main__.FROZEN_ADMISSION", frozen))
         controls = root / "controls"
-        declaration = {"version": 5, "seed": P_CONTROL_SEED,
-             "predeclaration_hash": file_hash(ROOT / "evidence/pilot/predeclaration-5.md"),
+        declaration = {"version": 6, "seed": P_CONTROL_SEED,
+             "draw_seeds": {"mbpp": 20261104, "hover": 20261105, "ifbench": 20261106},
+             "prior_ifbench_status": "invalid cohort",
+             "predeclaration_hash": file_hash(ROOT / "evidence/pilot/predeclaration-6.md"),
              "source_cohorts_hash": file_hash(frozen / "cohorts.json"), "retrieval_receipt": receipt,
              "carried_admission_hashes": {name: digest(value[1]) for name, value in self.carried.items()},
              "cohorts": {name: {"rows": [row["id"] for row in representative_rows(value)],
@@ -63,19 +78,21 @@ class PreflightTests(unittest.TestCase):
         for name, (control, admission) in self.carried.items():
             save(controls / name / "controls.json", control)
             save(controls / name / "admission.json", admission)
-        proof = text_admission(task, evaluator_identity(task), representative_rows(task))
-        declaration["hover_admission_hash"] = digest(proof)
-        save(controls / "hover/admission.json", proof)
-        save(controls / "hover/controls.json", {
-            "ranking_passed": True, "noise_passed": True, "identity": evaluator_identity(task),
-            "adversarial_hash": digest(proof), "rows": ids})
+        fresh = tasks["ifbench"]
+        fresh_ids = [row["id"] for row in representative_rows(fresh)]
+        proof = text_admission(fresh, evaluator_identity(fresh), representative_rows(fresh))
+        declaration["ifbench_admission_hash"] = digest(proof)
+        save(controls / "ifbench/admission.json", proof)
+        save(controls / "ifbench/controls.json", {
+            "ranking_passed": True, "noise_passed": True, "identity": evaluator_identity(fresh),
+            "adversarial_hash": digest(proof), "rows": fresh_ids})
         save(controls / "cohorts.json", declaration)
-        save(controls / "adversarial.json", {"version": "pilot-adversarial-v5", "passed": True,
-             "model_calls": 0, "hover_status": "passed", "carried_tasks": ["mbpp", "ifbench"],
+        save(controls / "adversarial.json", {"version": "pilot-adversarial-v6", "passed": True,
+             "model_calls": 0, "ifbench_status": "passed", "carried_tasks": ["mbpp", "hover"],
              "cohorts_hash": digest(declaration)})
-        save(controls / "panel.json", {"version": 5, "tasks": list(TASKS), "all_admitted": True,
+        save(controls / "panel.json", {"version": 6, "tasks": list(TASKS), "all_admitted": True,
              "predeclaration_hash": declaration["predeclaration_hash"], "cohorts_hash": digest(declaration),
-             "hover_status": "passed", "withdrawn": ["aime"], "claim_scope": "3-task development pilot"})
+             "ifbench_status": "passed", "withdrawn": ["aime"], "claim_scope": "3-task development pilot"})
         seal(controls)
         pool = root / "pool.json"
         save(pool, {"*": False, "anthropic": {"accounts": ["email:pilot@gmail.com"], "apiKeys": False}})
@@ -108,16 +125,16 @@ class PreflightTests(unittest.TestCase):
             pool.assert_not_called()
             transport.assert_not_called()
 
-    def test_failed_hover_protocol_is_retained_and_selects_only_two_tasks(self):
+    def test_failed_ifbench_protocol_is_retained_and_selects_only_two_tasks(self):
         with tempfile.TemporaryDirectory() as directory, self.offline_fixture(Path(directory)) as (_, out, cache):
             from pilot.tasks import score_output as real_score
             def unsafe(task, row, output):
-                return 1.0 if task.name == "hover" and "AlwaysEqual" in output else real_score(task, row, output)
+                return 1.0 if task.name == "ifbench" and "AlwaysEqual" in output else real_score(task, row, output)
             with patch("pilot.tasks.score_output", side_effect=unsafe), patch(
                 "pilot.adversarial.score_output", side_effect=unsafe
             ), redirect_stdout(StringIO()):
                 offline_adversarial(argparse.Namespace(task="all", out=out, cache=cache))
-                proof = json.loads((out / "hover/admission.json").read_text())
+                proof = json.loads((out / "ifbench/admission.json").read_text())
                 self.assertFalse(proof["passed"])
                 self.assertEqual(proof["checks"]["records"][0]["direct_score"], 1.0)
                 target = Path(directory) / "new-controls"
@@ -126,43 +143,9 @@ class PreflightTests(unittest.TestCase):
                     run_controls(args)
                     auth.assert_not_called()
                     transport.assert_not_called()
-            self.assertEqual(json.loads((target / "panel.json").read_text())["tasks"], ["mbpp", "ifbench"])
+            self.assertEqual(json.loads((target / "panel.json").read_text())["tasks"], ["mbpp", "hover"])
             self.assertFalse((target / "aime").exists())
 
-    def test_one_hover_measurement_chooses_three_tasks_or_the_declared_fallback(self):
-        for outcome in ("passed", "ranking", "noise"):
-            with self.subTest(outcome=outcome), tempfile.TemporaryDirectory() as directory, self.offline_fixture(
-                Path(directory)
-            ) as (tasks, admission, cache), redirect_stdout(StringIO()):
-                offline_adversarial(argparse.Namespace(task="all", out=admission, cache=cache))
-                out = Path(directory) / "measured-controls"
-                destinations = []
-                def transport(pool, env, destination, limits):
-                    frozen = json.loads((out / "cohorts.json").read_text())
-                    self.assertEqual(set(frozen["cohorts"]), {"mbpp", "ifbench", "hover"})
-                    destinations.append(destination.name)
-                    call = Mock(side_effect=AssertionError("Unit fixture cannot dispatch a model"))
-                    call.gateway = SimpleNamespace(route_identity={"fixture": True})
-                    return call, SimpleNamespace(limits=limits, summary=lambda throttle: {"calls": 0}), SimpleNamespace()
-                def measurement(task, call, destination, identity, **kwargs):
-                    result = {"ranking_passed": outcome != "ranking", "noise_passed": outcome == "passed",
-                              "identity": identity, "adversarial_hash": digest(kwargs["adversarial"]),
-                              "rows": [row["id"] for row in kwargs["rows"]]}
-                    save(destination / "controls.json", result)
-                    if outcome != "passed":
-                        raise ControlsFailed("measured gate failure")
-                    return result
-                args = argparse.Namespace(task="all", out=out, cache=cache, adversarial=admission)
-                with patch("pilot.__main__.calls_for", side_effect=transport), patch("pilot.controls.measure", side_effect=measurement):
-                    run_controls(args, json.loads((Path(directory) / "pool.json").read_text()), {})
-                    with self.assertRaisesRegex(ValueError, "cannot restart"):
-                        run_controls(args, {}, {})
-                self.assertEqual(destinations, ["hover"])
-                panel = json.loads((out / "panel.json").read_text())
-                self.assertEqual(panel["tasks"], list(TASKS) if outcome == "passed" else ["mbpp", "ifbench"])
-                self.assertEqual(panel["claim_scope"], "3-task development pilot" if outcome == "passed" else "2-task development pilot")
-                expected = list(TASKS) if outcome == "passed" else ["mbpp", "ifbench"]
-                self.assertEqual(list(load_panel(SimpleNamespace(controls=out, cache=cache, task="all"))), expected)
 
     def test_missing_calls_or_empty_outputs_cannot_fake_zero_mbpp_noise(self):
         for defect in ("missing-noise-calls", "empty-output"):
@@ -225,8 +208,8 @@ class PreflightTests(unittest.TestCase):
             with patch("pilot.__main__.calls_for", return_value=(call, ledger, SimpleNamespace())):
                 with self.assertRaisesRegex(TransportError, "no candidate score"):
                     run_controls(args, pool, {})
-            self.assertEqual(json.loads((out / "hover/failure.json").read_text())["status"], "infrastructure-failure")
-            self.assertFalse((out / "hover/controls.json").exists())
+            self.assertEqual(json.loads((out / "ifbench/failure.json").read_text())["status"], "infrastructure-failure")
+            self.assertFalse((out / "ifbench/controls.json").exists())
             self.assertFalse((out / "panel.json").exists())
 
     def test_other_task_admission_blocks_every_search_before_transport(self):
@@ -266,7 +249,7 @@ class PreflightTests(unittest.TestCase):
             with self.subTest(defect=defect), tempfile.TemporaryDirectory() as directory:
                 root = Path(directory)
                 tasks, controls, pool = self.fixture(root)
-                path = controls / "hover/admission.json"
+                path = controls / "ifbench/admission.json"
                 proof = json.loads(path.read_text())
                 if defect in {"missing", "unsealed"}:
                     path.unlink()
@@ -291,7 +274,7 @@ class PreflightTests(unittest.TestCase):
 
     def test_panel_cannot_restore_aime_or_claim_fallback_after_a_hover_pass(self):
         for field, value in (("tasks", ["mbpp", "ifbench", "aime"]),
-                             ("tasks", ["mbpp", "ifbench"]), ("hover_status", "failed-gate"), ("withdrawn", [])):
+                             ("tasks", ["mbpp", "hover"]), ("ifbench_status", "failed-gate"), ("withdrawn", [])):
             with self.subTest(field=field, value=value), tempfile.TemporaryDirectory() as directory:
                 root = Path(directory)
                 tasks, controls, pool = self.fixture(root)
