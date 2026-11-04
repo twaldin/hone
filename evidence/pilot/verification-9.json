@@ -17,7 +17,10 @@
     "seconds": 147.5,
     "status": "failed-before-search"
   },
-  "current_source_transition_hash": "sha256:5b475b503a0725f73e515b08a2b842eec07327a6f6d553829c8e68dc1499f4ec",
+  "source_transition_at_verification": {
+    "head": "16fa4914577f5fcd9ada96eb793e581c889fa81a",
+    "sha256": "sha256:5b475b503a0725f73e515b08a2b842eec07327a6f6d553829c8e68dc1499f4ec"
+  },
   "failing_before": {
     "command": "nice -n 10 taskset -c 6 python3 -m unittest pilot.test_dispatch -v",
     "exit_code": 1,

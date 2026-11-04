@@ -24,7 +24,7 @@ The actual `load_panel` entrypoint failed in `load_admission`, before account-po
 ValueError: Frozen development cohorts or retrieval changed
 ```
 
-The [preflight stop record](preflight-stop.json) preserves the command, source hashes, 147.50-second elapsed time and both retrieval receipts. A fresh HoVer index was built in this lane's ignored cache. It has the same pinned corpus archive and extracted corpus, dependency versions, document count, retrieval recipe and params file hash as the admitted index, but four exact index hashes differ:
+The [preflight stop record](preflight-stop.json) preserves an abbreviated command description, source hashes, 147.50-second elapsed time and both retrieval receipts. Its `failed_command` field is not executable and is not the original exact argv, which was not retained. A fresh HoVer index was built in this lane's ignored cache. It has the same pinned corpus archive and extracted corpus, dependency versions, document count, retrieval recipe and params file hash as the admitted index, but four exact index hashes differ:
 
 | Index file | Admitted SHA-256 | Prepared SHA-256 |
 | --- | --- | --- |
