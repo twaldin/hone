@@ -9,7 +9,7 @@ import statistics
 import subprocess
 from typing import Callable
 
-from pilot.runtime import BudgetExhausted, CallFailed, LIMITS, append_json
+from pilot.runtime import BudgetExhausted, CallFailed, ProviderRefusal, LIMITS, append_json
 from pilot.tasks import Task
 
 GEPA_COMMIT = "8c7b697a71977980afc7537dac0881e784eef99f"
@@ -164,6 +164,8 @@ def run_search(method: str, task: Task, call: Callable, evaluate: Callable,
             _gepa(task, call, evaluate, available, noise, seed, max_proposals, state, retain)
         else:
             _loop(method, task, call, evaluate, available, noise, seed, max_proposals, state, retain)
+    except ProviderRefusal:
+        state["stop_reason"] = "provider_refusal"
     except BudgetExhausted as error:
         state["stop_reason"] = "budget_exhausted"
         state["budget_exhaustion"] = str(error)
@@ -195,7 +197,7 @@ def _loop(method, task, call, evaluate, available, noise, seed, limit, state, re
         _mean(feedback, rows)
         message = {"contract": state["contract"], "current_artifact": parent,
                    "recent_selection_score": state["selection_score"],
-                   "training_feedback": feedback,
+                   "training_feedback": {key: feedback[key] for key in ("scores", "outputs", "trajectories")},
                    "instruction": "Read training failures and traces. Return one complete improved editable artifact JSON."}
         state["proposals"] += 1
         event = {"episode": episode, "training_gates": [], "parent_artifact": dict(parent),
@@ -212,6 +214,9 @@ def _loop(method, task, call, evaluate, available, noise, seed, limit, state, re
                 raw = call("repair", [{"role": "user", "content": _json(repair)}], 2048)
                 child, error = _decode(raw, keys)
                 event.update(repair=raw, repair_error=error)
+        except ProviderRefusal:
+            event["outcome"] = "refusal"
+            continue
         except CallFailed as failure:
             event["call_failure"] = str(failure)
             continue
@@ -362,6 +367,10 @@ def _gepa(task, call, evaluate, available, noise, seed, limit, state, retain):
         messages = [{"role": "user", "content": prompt}] if isinstance(prompt, str) else prompt
         try:
             return call("proposer", messages, 2048)
+        except ProviderRefusal as failure:
+            terminal_error = failure
+            state["trajectory"].append({"accepted": False, "outcome": "refusal"})
+            raise
         except CallFailed as failure:
             state["trajectory"].append({"accepted": False, "call_failure": str(failure)})
             raise
