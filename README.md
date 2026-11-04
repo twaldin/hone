@@ -79,7 +79,7 @@ Without either setting, Hone looks for capsules in `./capsules` under the direct
 
 ## Development optimizer pilot
 
-[Predeclaration 6](evidence/pilot/predeclaration-6.md) authorizes one IFBench re-admission after correcting the official seeded 150-row training sample. MBPP and HoVer admissions stand; prior IFBench measurements remain unchanged and labelled [invalid cohort](evidence/pilot/invalid-ifbench-cohorts-6.json). A measured IFBench gate failure narrows the panel to MBPP + HoVer without substitutions. Neither matrix nor merge is authorized.
+The one IFBench attempt under [predeclaration 6](evidence/pilot/predeclaration-6.md) infrastructure-aborted after two HTTP 502 responses without usage. It did not produce admission or activate the MBPP + HoVer fallback. MBPP and HoVer admissions stand, and prior IFBench measurements remain unchanged as [invalid-cohort evidence](evidence/pilot/invalid-ifbench-cohorts-6.json). [The prospective run plan](evidence/pilot/run-plan-6.json) reports the missing three-task prerequisite and the unselected two-task estimate. No restart, matrix or merge is authorized.
 
 [`pilot/`](pilot/) compares Hone's paired, noise-calibrated policy, pinned official GEPA, and a plain agent loop on development-only IFBench, bounded MBPP agent programs, and HoVer if its one admission attempt passes. It uses one subscription route, an account allowlist, usage throttling, and matched reported-usage budgets. Final-test labels stay sealed.
 

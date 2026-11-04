@@ -1,6 +1,6 @@
 # Development optimizer pilot
 
-[Predeclaration 6](../evidence/pilot/predeclaration-6.md), committed before new pilot calls, authorizes one IFBench re-admission after correcting the official inherited seed-1 sample of 150 training rows. Selection remains the official first 300 development rows. All prior IFBench measurements are [invalid-cohort evidence](../evidence/pilot/invalid-ifbench-cohorts-6.json), preserved unchanged. MBPP and HoVer admissions stand. No matrix or merge is authorized.
+Contract 6 stopped with an infrastructure abort after 128 IFBench calls, including two HTTP 502 failures without usage. Only the naive control completed. There is no improved contrast, noise calibration, admitted panel or selected fallback. The one attempt is sealed in `controls-6`; do not restart it or run either matrix. [Predeclaration 6](../evidence/pilot/predeclaration-6.md) preserves MBPP and HoVer admissions and all earlier [invalid-cohort IFBench evidence](../evidence/pilot/invalid-ifbench-cohorts-6.json). Another attempt needs the gate owner's authorization.
 
 The pilot decides whether Hone's proposed search policy warrants a larger comparison. It does not support a public optimizer-quality claim. It compares Hone, pinned official GEPA, and a plain agent loop with the same current subscription model and reported-usage budget.
 
@@ -151,6 +151,22 @@ nice -n 10 taskset -c 6 pilot/.venv/bin/python -m pilot replay --out evidence/pi
 Replay first verifies the bundle hashes and task-resource identities, then runs the protected metrics again. MBPP replay executes archived solution code in the same isolated worker boundary.
 
 `prepare`, `probe`, and `throttle-proof` regenerate the machine/task manifests, real route check, no-account/environment-fallback rejection check, and forced-high/outage pause proof. Current route evidence is `route-proof-v4`; earlier route, preparation and throttle directories carry explicit superseded status files. `aborted-controls-v1` remains inadmissible measurement evidence, not a passing control run.
+
+## Contract-6 terminal result and prospective plan
+
+IFBench's corrected official 150-row training partition and 300-row selection set passed zero-model protocol checks. The one 40-row control attempt then infrastructure-aborted during the improved control. The completed naive mean was 0.841667. Reported totals were 128 calls, 141,064 tokens, $1.160328-equivalent and 1,365.35 seconds of ledger wall time. Calls 127 and 128 returned HTTP 502 with no reported usage; their omitted token volume is unknown. They are not zero-cost successes. Observed hidden attempts were zero. A stale-account-usage pause lasted 254.49 seconds.
+
+The protected runner retained the abort rather than recording a candidate zero, choosing a smaller panel or restarting. MBPP and HoVer admissions stand, but this infrastructure result does not activate the measured-gate-failure fallback.
+
+[The replayable run-plan report](../evidence/pilot/run-plan-6.json) preserves actual calibration per task and per-method smoke phase spend. Regenerate it without model calls:
+
+```sh
+nice -n 10 taskset -c 6 pilot/.venv/bin/python -m pilot.run_plan --controls evidence/pilot/controls-6 --out evidence/pilot/run-plan-6.json
+```
+
+The prospective MBPP + HoVer 18-cell estimate is 27.53 million reported tokens and 63.77 serial wall-hours, including 0.49 hours of measured retained-admission setup. Its components are 33.76 active hours, 29.47 usage-polling hours, 0.048 hours of observed-rate pauses and the setup estimate. It is not selected, admitted as a complete panel or authorized. MBPP projections use each method's actual smoke; HoVer uses task-calibration ratios, not invented method-search results. Future proposer frequency and candidate deployment costs are uncertain.
+
+A three-task point forecast is unavailable because the corrected IFBench admission and calibration are incomplete. Its unchanged ceilings are $270-equivalent, 324 million reported tokens and 54 active hours across 27 cells. The prospective two-task ceilings are $180-equivalent, 216 million tokens and 36 active hours. Neither has a finite elapsed-wall upper bound: high usage, stale or missing readings, and broker outages pause dispatch. Corpus download/index preparation is separate. No matrix was run, and no next-lane run command is authorized.
 
 ## Measured contract-5 results
 

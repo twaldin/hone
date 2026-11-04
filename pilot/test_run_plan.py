@@ -1,7 +1,8 @@
 import unittest
 from unittest.mock import patch
 
-from pilot.run_plan import project
+from pilot.run_plan import build, project
+from pilot.runtime import ROOT
 
 
 class ProjectionTests(unittest.TestCase):
@@ -29,3 +30,16 @@ class ProjectionTests(unittest.TestCase):
             self.assertEqual(result["usd_equivalent"], 10)
             with self.assertRaises(ValueError):
                 project(dict(sample, usd_equivalent=0))
+
+    def test_infrastructure_abort_cannot_create_a_fallback_or_a_full_matrix_estimate(self):
+        result = build(ROOT / "evidence/pilot/controls-6")
+        self.assertEqual(result["admission_status"], "infrastructure-aborted-no-panel-no-fallback")
+        self.assertIsNone(result["selected_panel"])
+        self.assertFalse(result["incomplete_ifbench_calibration"]["usable_for_projection"])
+        self.assertIsNone(result["plans"]["three_task"]["projection"])
+        fallback = result["plans"]["two_task_fallback"]
+        self.assertTrue(fallback["projection_available"])
+        self.assertFalse(fallback["admitted"])
+        self.assertFalse(fallback["authorized"])
+        self.assertGreater(fallback["projection"]["total_wall_hours_including_measured_setup"],
+                           fallback["projection"]["wall_hours"])

@@ -33,9 +33,13 @@ def project(sample: dict) -> dict:
 def build(controls: Path) -> dict:
     from .__main__ import verify_bundle
     verify_bundle(controls)
-    panel = json.loads((controls / "panel.json").read_text())
-    if panel["version"] != 6 or panel["all_admitted"] is not True:
-        raise ValueError("A complete contract-6 panel is required")
+    panel_path = controls / "panel.json"
+    panel = json.loads(panel_path.read_text()) if panel_path.exists() else None
+    failure = json.loads((controls / "ifbench/failure.json").read_text()) if panel is None else None
+    if panel is None and failure.get("status") != "infrastructure-failure":
+        raise ValueError("Missing panel without a sealed infrastructure-abort receipt")
+    if panel is not None and (panel["version"] != 6 or panel["all_admitted"] is not True):
+        raise ValueError("A complete contract-6 panel or sealed infrastructure abort is required")
     inputs = {}
 
     def load(path):
@@ -46,15 +50,22 @@ def build(controls: Path) -> dict:
     inputs[str((controls / "bundle.json").relative_to(ROOT))] = "sha256:" + hashlib.sha256((controls / "bundle.json").read_bytes()).hexdigest()
     setup = load(ROOT / "evidence/pilot/setup-overhead-6.json")
     setup_hours = (setup["cold_mbpp_load_seconds"] + setup["revalidations_per_matrix"] * setup["warm_mbpp_revalidation_seconds"]) / 3600
+    incomplete = None
     calibration_paths = {"mbpp": ROOT / "evidence/pilot/mbpp-readmission-4a/mbpp",
                          "hover": ROOT / "evidence/pilot/controls-5/hover",
                          "ifbench": controls / "ifbench"}
     calibrations = {}
     for task, path in calibration_paths.items():
-        if not (path / "usage.json").exists():
+        if not (path / "controls.json").exists():
+            if task == "ifbench" and failure is not None:
+                incomplete = {"status": "infrastructure-failure-not-a-gate-failure",
+                              "failure": load(path / "failure.json"), "usage": load(path / "usage.json"),
+                              "complete_calibration": False, "usable_for_projection": False,
+                              "reason": "Only naive completed. There is no improved contrast or noise calibration; missing failed-call usage is unknown."}
+                continue
             if task == "ifbench" and panel["ifbench_status"] == "failed-gate":
                 continue
-            raise ValueError("Calibration usage missing: " + task)
+            raise ValueError("Calibration results missing: " + task)
         verify_bundle(path.parent)
         usage = load(path / "usage.json")
         control = load(path / "controls.json")
@@ -62,7 +73,7 @@ def build(controls: Path) -> dict:
                               "controls": {key: value["mean"] for key, value in control["controls"].items()},
                               "noise_calibration": control.get("calibration"),
                               "training_rows_per_arm": len(control["rows"]),
-                              "admitted": task in panel["tasks"],
+                              "admitted": task in ("mbpp", "hover") or panel is not None and task in panel["tasks"],
                               "projection": project(usage)}
     smokes = {}
     rows = []
@@ -93,7 +104,7 @@ def build(controls: Path) -> dict:
         count = len(tasks) * 9
         available = len(selected) == len(tasks) * 3
         plans[name] = {"tasks": tasks, "searches": count, "authorized": False,
-                       "admitted": set(tasks).issubset(panel["tasks"]),
+                       "admitted": panel is not None and set(tasks).issubset(panel["tasks"]),
                        "projection_available": available,
                        "ceilings": {"usd_equivalent": count * LIMITS["usd"],
                                     "reported_tokens": count * LIMITS["tokens"],
@@ -107,6 +118,8 @@ def build(controls: Path) -> dict:
     return {"schema": "pilot-measured-run-plan-v6", "status": "INFERENCE_NOT_EXECUTED",
             "selected_panel": panel, "calibrations": calibrations, "smokes": smokes,
             "cell_projections": rows, "plans": plans, "input_hashes": inputs,
+            "admission_status": "complete" if panel is not None else "infrastructure-aborted-no-panel-no-fallback",
+            "incomplete_ifbench_calibration": incomplete,
             "measured_setup": setup,
             "generator_sha256": hashlib.sha256(Path(__file__).read_bytes()).hexdigest(),
             "method": "Linearly scale observed task-specific usage and time to the first common dollar/token/call/active-time cap; sum three seeds per method. MBPP uses each actual smoke. P tasks use calibration ratios for every method, not invented method-search results.",
