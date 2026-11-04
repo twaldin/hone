@@ -1,0 +1,1 @@
+{"all_admitted":true,"claim_scope":"3-task development pilot","cohorts_hash":"sha256:32b82338b0aec93830623d174dae48620440c5f07c2fd21e41ff36446d8899db","hover_status":"passed","predeclaration_hash":"sha256:2e33fff4407601da83954868e349b86e9934ce8c66f0e178ed9482e26b2a7b5f","tasks":["mbpp","ifbench","hover"],"version":5,"withdrawn":["aime"]}
