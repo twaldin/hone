@@ -176,7 +176,7 @@ Replay first verifies the bundle hashes and task-resource identities, then runs 
 
 ## Contract-9 verification and admission stop
 
-[Verification 9](../evidence/pilot/verification-9.json) records 261 passing Python tests with real Docker and official metrics, twelve passing native receipt tests, and failing-before dispatch and startup-pause regressions. It also records the real admission failure, a zero-model startup-failure smoke and byte-identical stopped-run report replay. The [source transition](../evidence/pilot/source-transition-9.json) preserves the authenticated contract-8a execution baseline without changing archived control bundles.
+[Verification 9](../evidence/pilot/verification-9.json) records 263 passing Python tests with real Docker and official metrics, twelve passing native receipt tests, and failing-before dispatch, startup-pause and interrupted-pause regressions. It also records the real admission failure, zero-model startup and recovery smokes, and byte-identical stopped-run report replay. The [source transition](../evidence/pilot/source-transition-9.json) preserves the authenticated contract-8a execution baseline without changing archived control bundles.
 
 ## Contract-8 verification and setup
 

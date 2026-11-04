@@ -151,5 +151,65 @@ class StartupPauseTests(unittest.TestCase):
             self.assertEqual(report["dispatch_stop"]["pause_seconds"], 22500)
 
 
+    def test_interrupted_cell_replays_closed_and_open_pause_prefixes(self):
+        for closed in (False, True):
+            with self.subTest(closed=closed), tempfile.TemporaryDirectory() as directory, ExitStack() as stack:
+                out = Path(directory) / "runs"
+                finished = out / "mbpp/0/hone"
+                row = {"task": "mbpp", "seed": 0, "method": "hone", "status": "completed",
+                       "calls": 100, "hidden_attempts": 0, "usage_missing_calls": 0, "pause_seconds": 7200}
+                cli.save(finished / "result.json", row)
+                cli.seal(finished)
+                interrupted = out / "mbpp/0/gepa"
+                interrupted.mkdir(parents=True)
+                events = [{"event": "paused", "at": 0}, {"event": "paused", "at": 12600}]
+                if closed:
+                    events.append({"event": "resumed", "at": 12600, "seconds": 12600})
+                (interrupted / "pauses.jsonl").write_text("".join(json.dumps(event) + "\n" for event in events) + '{"event":')
+                real_search = cli.search_one
+                remaining = []
+
+                def search(args, pool, env, task, seed, method, smoke):
+                    if (out / task / str(seed) / method).exists():
+                        return real_search(args, pool, env, task, seed, method, smoke)
+                    remaining.append(args.remaining_pause_seconds)
+                    return {"task": task, "seed": seed, "method": method, "status": "completed",
+                            "calls": 0, "hidden_attempts": 0, "usage_missing_calls": 0, "pause_seconds": 0}
+
+                stack.enter_context(patch.object(sys, "argv", ["pilot", "pilot", "--seed", "0", "--out", str(out)]))
+                stack.enter_context(patch.object(cli, "execution_limits"))
+                stack.enter_context(patch.object(cli, "load_panel", return_value=("mbpp", "hover")))
+                stack.enter_context(patch.object(cli, "machine_proof"))
+                stack.enter_context(patch.object(cli, "environment", return_value=({}, {})))
+                stack.enter_context(patch.object(cli, "load_control", return_value={}))
+                stack.enter_context(patch.object(cli, "evaluator_identity", return_value={}))
+                stack.enter_context(patch("pilot.tasks.load_task", side_effect=lambda name, cache: Task(name, [], [], {}, {"prompt": "seed"})))
+                stack.enter_context(patch.object(cli, "search_one", side_effect=search))
+                stack.enter_context(patch("pilot.runtime.Gateway", side_effect=AssertionError("resumed prefix must not dispatch")))
+                cli.main()
+                report = json.loads((out / "comparison.json").read_text())
+                self.assertEqual(report["runs"][1]["pause_seconds"], 12600)
+                self.assertEqual(report["runs"][1]["pauses"], 1)
+                self.assertEqual(report["runs"][1]["pause_accounting_incomplete"], not closed)
+                self.assertEqual(remaining, [1800] * 4)
+
+
+    def test_interrupted_pause_limit_retains_terminal_reason_without_double_counting(self):
+        with tempfile.TemporaryDirectory() as directory:
+            out = Path(directory)
+            events = [{"event": "paused", "at": 0}, {"event": "paused", "at": 5},
+                      {"event": "resumed", "at": 10, "seconds": 10},
+                      {"event": "paused", "at": 20}, {"event": "paused", "at": 25},
+                      {"event": "pause-limit", "at": 30, "seconds": 10}]
+            (out / "pauses.jsonl").write_text("".join(json.dumps(event) + "\n" for event in events))
+            result = cli.resume_result(out, "mbpp", 0, "hone")
+            self.assertEqual(result["pause_seconds"], 20)
+            self.assertEqual(result["pauses"], 2)
+            self.assertFalse(result["pause_accounting_incomplete"])
+            self.assertEqual(result["status"], "pause_limit_exceeded")
+            self.assertEqual(result["stop_reason"], "PauseLimitExceeded")
+            self.assertEqual(cli.dispatch_stop([result])["reason"], "pause-limit")
+
+
 if __name__ == "__main__":
     unittest.main()

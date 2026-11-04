@@ -614,6 +614,25 @@ def resume_result(out: Path, task_name: str, seed: int, method: str, error_type:
         for line in (out / "incumbents.jsonl").read_text().splitlines(keepends=True):
             if line.endswith("\n"):
                 incumbent = json.loads(line)
+    paused_seconds, pauses = 0.0, 0
+    opened = last_paused = None
+    if (out / "pauses.jsonl").exists():
+        for line in (out / "pauses.jsonl").read_text().splitlines(keepends=True):
+            if not line.endswith("\n"):
+                break
+            event = json.loads(line)
+            if event["event"] == "paused":
+                if opened is None:
+                    opened = event["at"]
+                    pauses += 1
+                last_paused = event["at"]
+            elif event["event"] in {"resumed", "pause-limit"}:
+                paused_seconds += event["seconds"]
+                opened = last_paused = None
+                if event["event"] == "pause-limit" and error_type != "RefusalNondeterminism":
+                    error_type = "PauseLimitExceeded"
+    if opened is not None:
+        paused_seconds += max(0, last_paused - opened)
     hidden = sum(call.get("retry_observation", {}).get("hiddenAttempts", 0) for call in calls)
     result = {"task": task_name, "seed": seed, "method": method, "status": "infrastructure_failure",
               "selection_score": incumbent.get("selection_score"), "candidate_hash": digest(incumbent.get("candidate")),
@@ -625,9 +644,12 @@ def resume_result(out: Path, task_name: str, seed: int, method: str, error_type:
               "hidden_attempt_rate": hidden / len(calls) if calls else 0, "usage_missing_calls": sum(call.get("usage_missing", False) for call in calls),
               "failed_calls": sum(call.get("failed", call.get("status") != 200 or call.get("stop_reason") not in {"stop", "length"} or call.get("usage_missing", False)) for call in calls),
               "proposer_calls": sum(call.get("role") in {"proposer", "repair"} for call in calls),
+              "pause_seconds": paused_seconds, "pauses": pauses, "pause_accounting_incomplete": opened is not None,
               "stop_reason": error_type, "accounting_incomplete": True}
     if error_type == "RefusalNondeterminism":
         result["status"] = "refusal-nondeterminism"
+    elif error_type == "PauseLimitExceeded":
+        result["status"] = "pause_limit_exceeded"
     save(out / "failure.json", {"error_type": error_type, "rerun_policy": "Never rerun this cell; retain its durable usage prefix and last accepted incumbent."})
     save(out / "result.json", result)
     seal(out)
@@ -654,8 +676,10 @@ def search_one(args, pool, env, task_name: str, seed: int, method: str, smoke: b
         raise
     except Exception as error:
         result = resume_result(out, task_name, seed, method, type(error).__name__)
-        result.update(pause_seconds=throttle.paused_seconds, throttle_seconds=throttle.accounted_seconds,
-                      poll_seconds=max(0, throttle.accounted_seconds - throttle.paused_seconds), pauses=throttle.pauses)
+        paused = max(result["pause_seconds"], throttle.paused_seconds)
+        result.update(pause_seconds=paused, throttle_seconds=max(paused, throttle.accounted_seconds),
+                      poll_seconds=max(0, throttle.accounted_seconds - throttle.paused_seconds),
+                      pauses=max(result["pauses"], throttle.pauses))
         if isinstance(error, PauseLimitExceeded):
             result["status"] = "pause_limit_exceeded"
         save(out / "result.json", result)
