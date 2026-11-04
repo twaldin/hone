@@ -10,7 +10,7 @@
     "child_environment_setup": "environment uses configure_nlp for the existing lane cache path",
     "account_pool_order": "environment remains after load_panel; no account-pool setup moves before admission",
     "main_source_before_sha256": "b12ab03ab039e63340eeab2e71c029c4c33e836e6eca4936dd6fbc77c4c590d0",
-    "main_source_after_sha256": "a03815841cbbe5edcfbbc0aa26512b859bb56e9cf9766cf1b4bc3e31db7285bb",
+    "main_source_after_sha256": "b3f33177afe94f4c0f6155617fbc62f52d71d8ddb150865869bd0118fcb42290",
     "source_transition_change": "Only pilot/__main__.py's current-source hash advances in source-transition-9.json. The original baseline, prior transition and predeclaration hash are unchanged."
   },
   "regression": {
@@ -30,7 +30,7 @@
   "full_suite": {
     "command": "nice -n 10 taskset -c 6 env OPENBLAS_NUM_THREADS=1 OMP_NUM_THREADS=1 MKL_NUM_THREADS=1 JAX_PLATFORMS=cpu PILOT_DOCKER_TESTS=1 PILOT_OFFICIAL_METRIC_TESTS=1 NLTK_DATA=/home/tim/worktrees/hone/hone-hone-pilot-seed0-1/.pilot-cache/nltk pilot/.venv/bin/python -m unittest discover -s pilot -p 'test_*.py' -v",
     "tests": 265,
-    "seconds": 30.404,
+    "seconds": 33.398,
     "result": "OK"
   },
   "unchanged": {

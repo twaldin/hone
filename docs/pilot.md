@@ -24,6 +24,8 @@ The subsequent [actual six-cell unit failed before dispatch](../evidence/pilot/p
 
 The owner authorized a new attempt with `NLTK_DATA` set in the systemd unit before Python starts. The CLI now calls `configure_nlp` before admission, and the child environment uses that same setup function. Account-pool setup remains after admission. The [launch regression](../evidence/pilot/launch-environment-9.json) fails before this correction and passes with it. The resource path, measurement gates, predeclaration 9 and stop rules are unchanged. The earlier failed unit remains a separate historical stop, not a cell to retry.
 
+The [real CLI admission smoke](../evidence/pilot/launch-entrypoint-smoke-9.json) passed without an inherited `NLTK_DATA`, selecting MBPP + HoVer with zero model calls and no final-test labels loaded. Offline entrypoints also use `configure_nlp`, so no separate copy of the NLP path setter remains.
+
 The pilot decides whether Hone's proposed search policy warrants a larger comparison. It does not support a public optimizer-quality claim. It compares Hone, pinned official GEPA, and a plain agent loop with the same current subscription model and reported-plus-estimated charged budget.
 
 [Predeclaration 4](../evidence/pilot/predeclaration-4.md), committed as `030c792` before new model calls, replaces the authored P controls with published optimized instructions and a fresh 40-row draw. [Correction 4a](../evidence/pilot/predeclaration-4a.md) removes a CPU-0 gateway override and prevents provider failures from deciding calibration scores. The transport change requires MBPP re-admission; contract-3 measurements alone cannot authorize the corrected harness. [Handoff 3](../evidence/pilot/handoff-3.md) records the earlier IFBench ranking failure.

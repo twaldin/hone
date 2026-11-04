@@ -202,7 +202,7 @@ def readmit_mbpp(args) -> None:
     from .tasks import load_task
     if args.out.exists() and any(args.out.iterdir()):
         raise FileExistsError("MBPP re-admission output already contains evidence")
-    os.environ["NLTK_DATA"] = str((args.cache / "nltk").resolve())
+    configure_nlp(args.cache)
     os.environ["PILOT_PYTHON_IMAGE"] = IMAGE
     prepared = [load_task(name, args.cache) for name in ARCHIVED_TASKS]
     identities = {task.name: evaluator_identity(task) for task in prepared}
@@ -295,7 +295,7 @@ def offline_adversarial(args) -> None:
         raise ValueError("Offline admission freezes the complete contract-8 panel")
     if args.out.exists() and any(args.out.iterdir()):
         raise FileExistsError("Adversarial output already contains evidence")
-    os.environ["NLTK_DATA"] = str((args.cache / "nltk").resolve())
+    configure_nlp(args.cache)
     os.environ["PILOT_PYTHON_IMAGE"] = IMAGE
     prepared = {name: load_task(name, args.cache) for name in TASKS}
     carried = {name: reuse_control(prepared[name]) for name in ("mbpp", "hover")}
@@ -785,7 +785,7 @@ def archived_ifbench(task, manifest: dict, cache: Path):
 
 def replay(args) -> None:
     from .tasks import load_task, score_output
-    os.environ["NLTK_DATA"] = str((args.cache / "nltk").resolve())
+    configure_nlp(args.cache)
     evaluation_paths = sorted(args.out.rglob("evaluations.jsonl"))
     admission_manifest = args.out / "adversarial.json"
     if admission_manifest.exists() and json.loads(admission_manifest.read_text()).get("version") == "pilot-adversarial-v8":
