@@ -1,7 +1,7 @@
 {
   "files": {
     "pilot/__main__.py": {
-      "after": "sha256:482add3a3782d4a493ebe41b9fed5d915afeaf1b416d2b2aa7f64c5a2c96697a",
+      "after": "sha256:e4cc6e0a244f97d137598e3bba30daa8b613845459c4ae4d7d4a7ddd4fa763eb",
       "before": "sha256:6b1f54b998334ca2601382d1c4b8372cc1575ebab076c9637ac5877e89fb7bf7"
     },
     "pilot/admission.py": {
@@ -63,7 +63,7 @@
   },
   "history_hash": "sha256:99ad46f04f123066488f1c4f2a6d95abea33b68e50321308b5b678923bee703a",
   "model_calls": 0,
-  "predeclaration_hash": "sha256:d4747b113d16d878253052505bdc20c25848fa52e57040e17249115f66a80202",
+  "predeclaration_hash": "sha256:b0431b3b4dd0de1138ebd6ea16bd5024a64dd6f76aa08f6e8a7c30683b5a2494",
   "retained_calls": {
     "hover": {
       "calls": 5440,
@@ -76,7 +76,7 @@
       "sha256": "sha256:960792010b3da0674c0962aa1c68b82b769fbbf819844100f223cfeb04fda0a1"
     }
   },
-  "scope": "Exact reviewed source transition for uniform terminal refusal classification, zero score, no retry, conservative unknown-usage charging and contextual receipts. No archived retained call refused or lacked usage. Original task/program/grader/data/route/decoding/cohort identities and raw results remain authenticated and re-scored. Changes outside these exact source hashes invalidate carryover.",
+  "scope": "Exact reviewed source transition for uniform terminal refusal classification, zero score, no retry, conservative unknown-usage charging and contextual receipts. No archived retained call refused or lacked usage. Original task/program/grader/data/route/decoding/cohort identities and raw results remain authenticated and re-scored. Changes outside these exact source hashes invalidate carryover. The shared call factory also authenticates project-private history and publishes durable global stops for every model-capable command.",
   "source_head": "ed610b55c95beea8ee4810dc2a709786f790d04c",
   "source_snapshot_hash": "sha256:a191462c549135af7dbbd4ee8cc10b1a22660aada493ae6689a95c5d8d4ee533",
   "version": "pilot-refusal-transition-v8"

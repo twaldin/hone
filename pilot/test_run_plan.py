@@ -195,6 +195,39 @@ class ProjectionTests(unittest.TestCase):
                     self.assertFalse(result["plans"]["two_task_fallback"]["admitted"])
                     self.assertIn(failure, result["incomplete_ifbench_calibration"]["status"])
 
+    def test_terminal_stop_before_first_call_has_no_panel_or_full_projection(self):
+        from pilot.__main__ import seal
+        for failure, manifest in (("infrastructure-failure", True), ("refusal-nondeterminism", True),
+                                  ("infrastructure-failure", False)):
+            with self.subTest(failure=failure, manifest=manifest), tempfile.TemporaryDirectory(
+                    prefix=".pilot-plan-test-", dir=ROOT) as directory:
+                controls = self.current_controls(directory, failure=failure)
+                local = controls / "ifbench"
+                usage = {"calls": 0, "tokens": 0, "reported_tokens": 0, "estimated_tokens": 0,
+                         "usd_equivalent": 0, "reported_usd_equivalent": 0,
+                         "estimated_usd_equivalent": 0, "refusals": 0,
+                         "refusals_by_row": {}, "refusals_by_arm": {},
+                         "usage_missing_calls": 0, "active_seconds": 0,
+                         "wall_seconds": 0, "throttle_seconds": 0}
+                (local / "usage.json").write_text(json.dumps(usage))
+                for filename in ("calls.jsonl", "controls.json", "noise-pairs.json"):
+                    (local / filename).unlink()
+                if not manifest:
+                    (local / "manifest.json").unlink()
+                    (controls / "cohorts.json").write_text(json.dumps({
+                        "version": 8, "predeclaration_hash": "sha256:" + hashlib.sha256(
+                            (ROOT / "evidence/pilot/predeclaration-8.md").read_bytes()).hexdigest()}))
+                seal(controls)
+                result = build(controls)
+                self.assertIsNone(result["selected_panel"])
+                self.assertIsNone(result["plans"]["three_task"]["projection"])
+                self.assertFalse(result["plans"]["two_task_fallback"]["admitted"])
+                self.assertEqual(result["incomplete_ifbench_calibration"]["usage"]["calls"], 0)
+                self.assertFalse(result["incomplete_ifbench_calibration"]["usable_for_projection"])
+                self.assertIn("no-panel-no-fallback", result["admission_status"])
+                self.assertEqual(result["measured_setup"], json.loads(
+                    (ROOT / "evidence/pilot/setup-overhead-8.json").read_text()))
+
     def test_current_panel_requires_the_frozen_predeclaration(self):
         from pilot.__main__ import seal
         with tempfile.TemporaryDirectory(prefix=".pilot-plan-test-", dir=ROOT) as directory:

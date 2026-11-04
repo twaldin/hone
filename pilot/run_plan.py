@@ -102,7 +102,8 @@ def build(controls: Path) -> dict:
 
     def load_usage(path):
         usage = load(path / "usage.json")
-        calls = load(path / "calls.jsonl", jsonl=True)
+        journal = path / "calls.jsonl"
+        calls = [] if usage["calls"] == 0 and not journal.exists() else load(journal, jsonl=True)
         if len(calls) != usage["calls"] or any(type(call.get("usage_missing")) is not bool for call in calls):
             raise ValueError("Calibration call receipts and usage summary disagree")
         missing = sum(call["usage_missing"] for call in calls)
@@ -134,7 +135,12 @@ def build(controls: Path) -> dict:
             raise ValueError("Panel and sealed gate outcome disagree")
     manifest_path = controls / "ifbench/manifest.json"
     manifest = load(manifest_path) if manifest_path.exists() else {}
-    current_setup = panel is not None and panel.get("version") == 8 or manifest.get("identity", {}).get("contract") == 8
+    cohorts_path = controls / "cohorts.json"
+    cohorts = load(cohorts_path) if cohorts_path.exists() else {}
+    if cohorts.get("version") == 8 and cohorts.get("predeclaration_hash") != declaration_hash:
+        raise ValueError("Startup cohort does not match frozen contract 8")
+    current_setup = (panel is not None and panel.get("version") == 8
+                     or manifest.get("identity", {}).get("contract") == 8 or cohorts.get("version") == 8)
     setup = load(ROOT / f"evidence/pilot/setup-overhead-{8 if current_setup else 6}.json")
     setup_hours = (setup["cold_mbpp_load_seconds"] + setup["revalidations_per_matrix"] * setup["warm_mbpp_revalidation_seconds"]) / 3600
     incomplete = None

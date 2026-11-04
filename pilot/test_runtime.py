@@ -405,6 +405,35 @@ class RuntimeTests(unittest.TestCase):
                 with self.assertRaises(runtime.RefusalNondeterminism):
                     ledger.admit("task", [{"role": "user", "content": "unrelated"}], 32)
 
+    def test_private_nondeterminism_stop_blocks_a_probe_outside_the_run_root(self):
+        from pilot import __main__ as coordinator
+        class Endpoint:
+            def __init__(self):
+                self.requests = 0
+            def request(self, body):
+                self.requests += 1
+                return response()
+            def close(self):
+                pass
+        endpoint = Endpoint()
+        root = self.path / ".pilot-runs" / "pilot"
+        request = {"options": {"maxTokens": 32}}
+        with patch("pilot.runtime.ROOT", self.path), patch("pilot.__main__.ROOT", self.path), \
+                patch("pilot.__main__.open_gateway", return_value=endpoint), \
+                patch("pilot.runtime.Throttle.wait", return_value=None):
+            call, ledger, _ = coordinator.calls_for(POOL, {}, root / "first", history_roots=[root])
+            self.addCleanup(call.close)
+            ledger.settle("task", request, response(), 0)
+            with self.assertRaises(runtime.RefusalNondeterminism):
+                ledger.settle("task", request, refusal_frame(), 0)
+            probe = self.path / "unrelated" / "probe"
+            with self.assertRaises(runtime.RefusalNondeterminism):
+                coordinator.route_proof(POOL, {}, probe)
+            self.assertEqual(endpoint.requests, 0)
+            self.assertFalse((probe / "calls.jsonl").exists())
+            marker = self.path / "evidence" / "pilot" / "refusal-nondeterminism.json"
+            self.assertEqual(json.loads(marker.read_text())["request_hash"], runtime.digest(request))
+
     def test_root_marker_alone_stops_existing_and_reopened_cells(self):
         root = self.path / "runs"
         proof = {"request_hash": runtime.digest({"old": True}), "outcomes": [

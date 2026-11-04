@@ -466,11 +466,11 @@ class SearchTests(unittest.TestCase):
                         "trajectories": [{}] * len(rows)}
             with self.subTest(failure=type(failure).__name__), tempfile.TemporaryDirectory() as directory:
                 if isinstance(failure, BudgetExhausted):
-                    result = run_search("gepa", task(), call, evaluate, lambda: True, {}, 0, Path(directory), 1)
+                    result = run_search("gepa", task(), call, evaluate, lambda: True, {}, 0, Path(directory), 2)
                     self.assertEqual(result["candidate"], {"prompt": "seed"})
                     self.assertEqual(result["stop_reason"], "budget_exhausted")
                     self.assertEqual(result["valid_proposals"], 0)
                 else:
                     with self.assertRaisesRegex(ValueError, "fatal proposer failure"):
-                        run_search("gepa", task(), call, evaluate, lambda: True, {}, 0, Path(directory), 1)
+                        run_search("gepa", task(), call, evaluate, lambda: True, {}, 0, Path(directory), 2)
                 self.assertEqual(len(calls), 1)

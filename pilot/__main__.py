@@ -170,7 +170,8 @@ def route_proof(pool: dict, env: dict, out: Path) -> None:
 
 def calls_for(pool: dict, env: dict, out: Path, limits: dict | None = None, history_roots: list[Path] | None = None):
     throttle = Throttle(pool, env, out / "pauses.jsonl")
-    ledger = Ledger(out / "calls.jsonl", limits=dict(limits or LIMITS), history_roots=history_roots or [])
+    ledger = Ledger(out / "calls.jsonl", limits=dict(limits or LIMITS),
+                    history_roots=[ROOT / "evidence/pilot", ROOT / ".pilot-runs", *(history_roots or [])])
     return ModelCalls(open_gateway(throttle), ledger, throttle), ledger, throttle
 
 
@@ -868,7 +869,7 @@ def main():
     parser.add_argument("--cache", type=Path, default=ROOT / ".pilot-cache")
     parser.add_argument("--pool", type=Path, default=ROOT / ".pilot-state/account-pool.json")
     parser.add_argument("--controls", type=Path, default=ROOT / "evidence/pilot/controls-8")
-    parser.add_argument("--adversarial", type=Path, default=ROOT / "evidence/pilot/adversarial-8-final")
+    parser.add_argument("--adversarial", type=Path, default=ROOT / "evidence/pilot/adversarial-8-dispatch")
     parser.add_argument("--out", type=Path)
     parser.add_argument("--task", choices=(*TASKS, "all"), default="all")
     parser.add_argument("--seed", type=int, default=0)
@@ -876,7 +877,7 @@ def main():
     if args.out is None:
         args.out = ROOT / "evidence/pilot" / (
             "mbpp-readmission-4a" if args.command == "readmit-mbpp" else
-            "adversarial-8-final" if args.command == "adversarial" else "controls-8" if args.command == "controls" else "smoke-8")
+            "adversarial-8-dispatch" if args.command == "adversarial" else "controls-8" if args.command == "controls" else "smoke-8")
     if args.command != "verify":
         execution_limits()
     if args.command in {"verify", "replay"}:
