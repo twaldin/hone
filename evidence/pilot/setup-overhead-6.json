@@ -1,0 +1,12 @@
+{
+  "basis": "load_panel carries MBPP in load_admission then load_control; 9 MBPP search cells each revalidate once. Same two startup validations and nine MBPP cells in both27- and18-cell plans.",
+  "cold_mbpp_load_seconds": 107.4522633459419,
+  "model_calls": 0,
+  "reference_control_outputs_rescored": 720,
+  "revalidations_per_matrix": 11,
+  "runs": 1,
+  "schema": "retained-admission-overhead-v6",
+  "scope": "Observed one cold task load plus one warm retained-admission validation, not a latency distribution or hard upper bound.",
+  "scored_final_tests_loaded": false,
+  "warm_mbpp_revalidation_seconds": 149.53527551097795
+}
