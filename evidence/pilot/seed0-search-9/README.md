@@ -83,13 +83,13 @@ The dispatcher recorded `dispatch_stop: null`. All per-cell unknown-usage rates 
 
 ## Per-method equal-weight two-task results
 
-The point estimate is the equal-weight mean of the two task deltas. The interval uses 10,000 hierarchical bootstrap resamples over tasks, then instances within each sampled task. It is not a pooled-row or an independent-method superiority interval. All three point means meet the two-point threshold, but no method interval excludes zero or lies wholly above two points.
+The point estimate is the equal-weight mean of the two task deltas. The interval uses 10,000 hierarchical bootstrap resamples over tasks, then instances within each sampled task. It is not a pooled-row or an independent-method superiority interval. Hone's and GEPA's point means meet the two-point threshold. Plain's primary +2.22 meets it only with the second Plain/MBPP measurement; the first measurement of those same artifact bytes gives +1.11 [-1.11, 5.00], below the threshold. No method interval excludes zero or lies wholly above two points. The primary figures below stay unchanged; first-measurement figures are sensitivity diagnostics, not a replacement protocol.
 
 | Method | Equal-task seed % | Equal-task chosen % | Mean delta [95% interval], pp | Excludes zero? | Changed cells | Calls | Reported tokens | $-equivalent |
 | --- | --- | --- | --- | --- | --- | --- | --- | --- |
 | Hone | 52.78 | 55.00 | +2.22 [0.00, 7.22] | No | 1/2 | 6,741 | 3,530,951 | $16.971237 |
 | Official GEPA | 54.06 | 62.67 | +8.61 [-1.11, 17.67] | No | 2/2 | 5,712 | 4,374,174 | $18.473442 |
-| Plain | 54.00 | 56.22 | +2.22 [0.00, 6.67] | No | 1/2 | 5,797 | 3,270,262 | $15.088386 |
+| Plain (reported re-score) | 54.00 | 56.22 | +2.22 [0.00, 6.67] | No | 1/2 | 5,797 | 3,270,262 | $15.088386 |
 
 ### Per-method phase accounting
 

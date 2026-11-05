@@ -61,6 +61,55 @@
       "rng_seed": 20261109
     }
   },
+  "plain_method_first_measurement_sensitivity": {
+    "first_measurement_mean": {
+      "baseline_score": 0.54,
+      "chosen_score": 0.5511111111111111,
+      "ci95": [
+        -0.011111111111111112,
+        0.05
+      ],
+      "delta": 0.011111111111111112,
+      "delta_at_least_practical_threshold": false,
+      "interval_above_practical_threshold": false,
+      "interval_excludes_zero": false,
+      "label": "Development pilot, seed 0. Adaptive development selection; descriptive uncertainty only, no superiority claim. No Holm correction.",
+      "percentile_method": "type7_linear",
+      "practical_threshold": 0.02,
+      "resamples": 10000,
+      "rng_engine": "stdlib random.Random (MT19937)",
+      "rng_seed": 20261109,
+      "task_weighting": "equal",
+      "tasks": [
+        "mbpp",
+        "hover"
+      ]
+    },
+    "interpretation": "The primary +2.22-point method mean meets the 2-point threshold only with the second same-artifact MBPP measurement. The first measurement gives +1.11 points with interval [-1.11, 5.00], below the threshold. These are archived-score sensitivity diagnostics; primary rules and results are unchanged.",
+    "primary_reported_mean": {
+      "baseline_score": 0.54,
+      "chosen_score": 0.5622222222222222,
+      "ci95": [
+        0.0,
+        0.06666666666666667
+      ],
+      "delta": 0.022222222222222223,
+      "delta_at_least_practical_threshold": true,
+      "interval_above_practical_threshold": false,
+      "interval_excludes_zero": false,
+      "label": "Development pilot, seed 0. Adaptive development selection; descriptive uncertainty only, no superiority claim. No Holm correction.",
+      "percentile_method": "type7_linear",
+      "practical_threshold": 0.02,
+      "resamples": 10000,
+      "rng_engine": "stdlib random.Random (MT19937)",
+      "rng_seed": 20261109,
+      "task_weighting": "equal",
+      "tasks": [
+        "mbpp",
+        "hover"
+      ]
+    }
+  },
   "primary_report_unchanged": true,
   "repeat_groups": [
     {
