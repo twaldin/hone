@@ -150,7 +150,7 @@ Credential-opaque per-attempt admission and usage receipts, including failed-cal
 
 ### Fixed-budget feasibility
 
-Keep the $10 ceiling and complete selection sets. The earlier IFBench illustration, $3.49755 per selection pass and $10.49264 for three, came from the invalid contract-4a cohort and is not a corrected-partition price estimate. [Run plan 8](../evidence/pilot/run-plan-8.json) preserves the earlier infrastructure abort. [Run plan 8a](../evidence/pilot/run-plan-8a.json) uses the completed calibration and selects MBPP + HoVer. Its serial 18-search projection is 27.53 million tokens, $141.24-equivalent and 64.42 wall-hours including 1.13 inferred validation-setup hours. It separates 33.76 active hours, 29.47 usage-polling hours and 0.048 observed-duty pause hours. These are inferred search costs, not new runs or guaranteed elapsed time. Prior calibration costs are reported separately. The three-task projection is a counterfactual only: IFBench is not admitted. Neither matrix is authorized, and selection overhead remains charged.
+Keep the $10 ceiling and complete selection sets. The earlier IFBench illustration, $3.49755 per selection pass and $10.49264 for three, came from the invalid contract-4a cohort and is not a corrected-partition price estimate. [Run plan 8](../evidence/pilot/run-plan-8.json) preserves the earlier infrastructure abort. [Run plan 8a](../evidence/pilot/run-plan-8a.json) uses the completed calibration and selects MBPP + HoVer. Its serial 18-search projection is 27.53 million tokens, $141.24-equivalent and 64.42 wall-hours including 1.13 inferred validation-setup hours. It separates 33.76 active hours, 29.47 usage-polling hours and 0.048 observed-duty pause hours. These are inferred search costs, not new runs or guaranteed elapsed time. Prior calibration costs are reported separately. The three-task projection is a counterfactual only: IFBench is not admitted. At that planning stage, neither full matrix was authorized; the later authorization covered only the six seed-0 cells. Selection overhead remains charged.
 
 ## Run and replay
 
@@ -204,7 +204,7 @@ The corrected source passes 224 Python tests with real Docker and official metri
 
 [The setup measurement](../evidence/pilot/setup-overhead-8.json) records one cold MBPP load at 226.73 seconds and one warm 720-rollout retained-admission validation at 349.52 seconds, on CPU 6 at nice 10 without model calls. Eleven validations per matrix plus that load imply 1.13 setup hours. This is one observation, not a latency distribution or hard bound. Carrying it across later transport-only corrections is an explicit inference; corpus/index preparation is separate.
 
-Forecasts inspect every calibration call receipt. Estimated refusal charges cannot conceal missing transport usage. Unknown non-refusal volume is disclosed separately, and any affected projection is a conditional known-charge lower bound, not an exact total-dollar forecast. Both matrices remain unauthorized.
+Forecasts inspect every calibration call receipt. Estimated refusal charges cannot conceal missing transport usage. Unknown non-refusal volume is disclosed separately, and any affected projection is a conditional known-charge lower bound, not an exact total-dollar forecast. Both matrices remained unauthorized at that epoch.
 
 ## Historical contract-6 result and prospective plan
 
