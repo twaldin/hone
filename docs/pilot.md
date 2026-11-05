@@ -26,6 +26,10 @@ The owner authorized a new attempt with `NLTK_DATA` set in the systemd unit befo
 
 The [real CLI admission smoke](../evidence/pilot/launch-entrypoint-smoke-9.json) passed without an inherited `NLTK_DATA`, selecting MBPP + HoVer with zero model calls and no final-test labels loaded. Offline entrypoints also use `configure_nlp`, so no separate copy of the NLP path setter remains.
 
+The authorized [seed-0 run completed all six cells](../evidence/pilot/seed0-search-9/README.md): 18,250 model calls, 11,175,387 reported tokens and $50.533065-equivalent over 18h 47m of unit wall time. No abort condition fired. All refusals, hidden attempts and unknown-usage calls were zero.
+
+The equal-weight two-task deltas were Hone +2.22 points [0.00, 7.22], GEPA +8.61 [-1.11, 17.67] and plain +2.22 [0.00, 6.67]. No method's 95% hierarchical interval excludes zero. Plain/MBPP and GEPA/HoVer have positive task-level intervals; four cells retained changed artifacts. These are adaptive development-pilot results, not a superiority claim. The report retains incomplete evaluation-tail charges and Plain/HoVer's zero-valid-proposal limitation. Seeds 2–3 and final-test evaluation remain out of scope; the unit is stopped and PR #37 stays unmerged.
+
 The pilot decides whether Hone's proposed search policy warrants a larger comparison. It does not support a public optimizer-quality claim. It compares Hone, pinned official GEPA, and a plain agent loop with the same current subscription model and reported-plus-estimated charged budget.
 
 [Predeclaration 4](../evidence/pilot/predeclaration-4.md), committed as `030c792` before new model calls, replaces the authored P controls with published optimized instructions and a fresh 40-row draw. [Correction 4a](../evidence/pilot/predeclaration-4a.md) removes a CPU-0 gateway override and prevents provider failures from deciding calibration scores. The transport change requires MBPP re-admission; contract-3 measurements alone cannot authorize the corrected harness. [Handoff 3](../evidence/pilot/handoff-3.md) records the earlier IFBench ranking failure.
