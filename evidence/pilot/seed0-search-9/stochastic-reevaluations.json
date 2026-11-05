@@ -1,0 +1,166 @@
+{
+  "hone_hover_censored_promotion": {
+    "candidate_correct": 6,
+    "candidate_hash": "sha256:70a889a41a1a45187d03edf260ffcd5414bd8319cbcab954d52fd469a7c731c9",
+    "episode": 5,
+    "seed_correct": 1,
+    "selection_candidate_evaluated": false,
+    "selection_instances": 300,
+    "tail_artifact_hash": "sha256:062021cdd3ef74419b09fb1a3652af0891eb7018433a7dfde3b5d00c6ac0b10f",
+    "tail_calls": 1119,
+    "tail_row_coverage": 281,
+    "tail_usd_equivalent": 3.47427,
+    "training_delta": 0.625,
+    "training_gate_passed": true,
+    "training_n": 8
+  },
+  "new_model_calls": 0,
+  "plain_mbpp_retained_artifact": {
+    "artifact_hash": "sha256:51b0db0f9269a2e5a5ecf9873ec43512266698a3e1e383b38a939fbce25a5c7f",
+    "episode_48_parent_equals_proposal": true,
+    "first_line": 75,
+    "first_measurement": {
+      "baseline_score": 0.7666666666666667,
+      "chosen_score": 0.7888888888888889,
+      "ci95": [
+        -0.03333333333333333,
+        0.07777777777777778
+      ],
+      "delta": 0.022222222222222223,
+      "delta_at_least_practical_threshold": true,
+      "instances": 90,
+      "interval_above_practical_threshold": false,
+      "interval_excludes_zero": false,
+      "label": "Development pilot, seed 0. Adaptive development selection; descriptive uncertainty only, no superiority claim. No Holm correction.",
+      "percentile_method": "type7_linear",
+      "practical_threshold": 0.02,
+      "resamples": 10000,
+      "rng_engine": "stdlib random.Random (MT19937)",
+      "rng_seed": 20261109
+    },
+    "interpretation": "The excludes-zero interval appears only on re-evaluating identical artifact bytes, not on a new artifact revision.",
+    "partial_third_selection_rows": 81,
+    "reported_line": 87,
+    "reported_measurement": {
+      "baseline_score": 0.7666666666666667,
+      "chosen_score": 0.8111111111111111,
+      "ci95": [
+        0.011111111111111112,
+        0.08888888888888889
+      ],
+      "delta": 0.044444444444444446,
+      "delta_at_least_practical_threshold": true,
+      "instances": 90,
+      "interval_above_practical_threshold": false,
+      "interval_excludes_zero": true,
+      "label": "Development pilot, seed 0. Adaptive development selection; descriptive uncertainty only, no superiority claim. No Holm correction.",
+      "percentile_method": "type7_linear",
+      "practical_threshold": 0.02,
+      "resamples": 10000,
+      "rng_engine": "stdlib random.Random (MT19937)",
+      "rng_seed": 20261109
+    }
+  },
+  "primary_report_unchanged": true,
+  "repeat_groups": [
+    {
+      "artifact_hash": "sha256:55ce6835c4571021bf712efa6f3eb527c1dbd8c2ff7db0df15c8833dfd686e7b",
+      "is_seed": true,
+      "measurements": [
+        {
+          "evaluation_line": 1,
+          "score": 0.7555555555555555
+        },
+        {
+          "evaluation_line": 122,
+          "score": 0.7666666666666667
+        },
+        {
+          "evaluation_line": 145,
+          "score": 0.7666666666666667
+        },
+        {
+          "evaluation_line": 155,
+          "score": 0.7666666666666667
+        },
+        {
+          "evaluation_line": 240,
+          "score": 0.7555555555555555
+        }
+      ],
+      "method": "hone",
+      "scores_differ": true,
+      "task": "mbpp"
+    },
+    {
+      "artifact_hash": "sha256:0a23384361e488a3e2cda664c4ba7e840ab88f71a9f7bc3956f1eb95016d4298",
+      "is_seed": false,
+      "measurements": [
+        {
+          "evaluation_line": 241,
+          "score": 0.8
+        },
+        {
+          "evaluation_line": 280,
+          "score": 0.8
+        }
+      ],
+      "method": "hone",
+      "scores_differ": false,
+      "task": "mbpp"
+    },
+    {
+      "artifact_hash": "sha256:85841b30a8ea4d636ce2f0c31e2483d63d6ecc0cdddbd9eb1e90360f7e3a7f71",
+      "is_seed": false,
+      "measurements": [
+        {
+          "evaluation_line": 37,
+          "score": 0.7555555555555555
+        },
+        {
+          "evaluation_line": 44,
+          "score": 0.7777777777777778
+        }
+      ],
+      "method": "plain",
+      "scores_differ": true,
+      "task": "mbpp"
+    },
+    {
+      "artifact_hash": "sha256:1df44314a6ade9572b00810cb56523f98d738c2174b151f1591b6e3f736fd99c",
+      "is_seed": false,
+      "measurements": [
+        {
+          "evaluation_line": 52,
+          "score": 0.7777777777777778
+        },
+        {
+          "evaluation_line": 65,
+          "score": 0.7777777777777778
+        }
+      ],
+      "method": "plain",
+      "scores_differ": false,
+      "task": "mbpp"
+    },
+    {
+      "artifact_hash": "sha256:51b0db0f9269a2e5a5ecf9873ec43512266698a3e1e383b38a939fbce25a5c7f",
+      "is_seed": false,
+      "measurements": [
+        {
+          "evaluation_line": 75,
+          "score": 0.7888888888888889
+        },
+        {
+          "evaluation_line": 87,
+          "score": 0.8111111111111111
+        }
+      ],
+      "method": "plain",
+      "scores_differ": true,
+      "task": "mbpp"
+    }
+  ],
+  "rule": "Primary report remains first complete seed vector versus last complete chosen vector matching retained score. Diagnostics disclose archived repeats only, without pooling or changing the rule.",
+  "schema": "pilot-stochastic-reevaluation-disclosure-v9"
+}

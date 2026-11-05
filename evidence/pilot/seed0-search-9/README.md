@@ -2,7 +2,7 @@
 
 The first full seed is complete. The goal was to see whether any of Hone, official GEPA or the plain agent loop improves its unchanged starting artifact before committing to seeds 2–3. All six declared cells completed; no abort or handback condition fired. Final-test labels remain sealed, and PR #37 remains unmerged.
 
-**No method's equal-weight two-task 95% hierarchical interval excludes zero.** Plain on MBPP and GEPA on HoVer have positive task-level intervals. Four of six cells retained changed artifacts: all three MBPP cells and GEPA on HoVer. This is adaptive development selection, not a superiority claim.
+**No method's equal-weight two-task 95% hierarchical interval excludes zero.** Under the predeclared measurement rule, Plain/MBPP and GEPA/HoVer have positive task-level intervals. Plain/MBPP's positive bound appears only after re-scoring the identical chosen artifact; its first measurement's interval includes zero. Four of six cells retained changed artifacts: all three MBPP cells and GEPA on HoVer. This is adaptive development selection, not a superiority claim.
 
 Total subject-model usage was **18,250 calls, 11,175,387 reported tokens and $50.533065-equivalent**. All estimated usage and charges, refusals, hidden attempts, missing retry observations, transport failures and unknown-usage calls are zero. Dollar-equivalent is the frozen experimental accounting measure, not a subscription invoice or a new account spending cap.
 
@@ -10,7 +10,7 @@ Total subject-model usage was **18,250 calls, 11,175,387 reported tokens and $50
 
 Predeclaration 9 was committed as `a5ebc90` before any search. Its SHA-256 remains `2ea1f4e7b68e8ddd0d9fe04326a69abdfd624c9650e4eaa1c8aaf4e5b5f0b940`. The exact serial matrix was MBPP then HoVer, each Hone, GEPA, plain, all seed 0. Every manifest agrees on engine hashes, route hash, budget, approved account-pool hash, declaration and transition. The same seed artifact is used by all methods within each task. The retained receipts and the [machine report](../results-9-seed0.json) bind the measurements to their inputs.
 
-The authorized unit was `hone-seed0-9-resume-20261104T235448.service`, launched on approved head `f9ac143553998b994525a023ebb562b21e08d5ff`. Its historical main PID was 4164997; watcher PID was 4164995. The unit had `Restart=no`, verified `NRestarts=0`, CPU affinity `[6]`, nice 10 and the declared one-thread settings. `NLTK_DATA=/home/tim/worktrees/hone/hone-hone-pilot-seed0-1/.pilot-cache/nltk` was explicitly verified in the unit before Python startup. The CLI also sets it before admission through the single `configure_nlp` definition. No account-pool setup moved before admission.
+The authorized unit was `hone-seed0-9-resume-20261104T235448.service`, launched on approved head `f9ac143553998b994525a023ebb562b21e08d5ff`. Its historical main PID was 4164997. The unit had `Restart=no`, verified `NRestarts=0`, CPU affinity `[6]`, nice 10 and the declared one-thread settings. `NLTK_DATA=/home/tim/worktrees/hone/hone-hone-pilot-seed0-1/.pilot-cache/nltk` was explicitly verified in the unit before Python startup. The CLI also sets it before admission through the single `configure_nlp` definition. No account-pool setup moved before admission.
 
 [Launch-head CI](https://github.com/twaldin/hone/actions/runs/41936743094) passed and [exact-head cross-family READY](https://github.com/twaldin/hone/pull/37#issuecomment-6645527443) was recorded before launch. The unit completed with exit 0 after **67,641.978 seconds (18h 47m 21.978s)**. It is now released (`LoadState=not-found`, inactive/dead, MainPID 0); no pilot process remains live. The earlier failed unit was not restarted. [Controller](controller.json) records the full launch argv, pool/domain proof and terminal lifecycle; [journal](unit-journal.log) retains the owned run's output.
 
@@ -26,7 +26,7 @@ Scores are percentages. Deltas and intervals are absolute percentage points. MBP
 | --- | --- | --- | --- | --- | --- | --- | --- |
 | MBPP | Hone | 90 | 75.56 | 80.00 | +4.44 [0.00, 10.00] | No | Yes |
 | MBPP | Official GEPA | 90 | 77.78 | 80.00 | +2.22 [-4.44, 8.89] | No | Yes |
-| MBPP | Plain | 90 | 76.67 | 81.11 | +4.44 [1.11, 8.89] | Yes | Yes |
+| MBPP | Plain | 90 | 76.67 | 81.11 | +4.44 [1.11, 8.89] | Yes, after re-score | Yes |
 | HoVer | Hone | 300 | 30.00 | 30.00 | +0.00 [0.00, 0.00] | No | No |
 | HoVer | Official GEPA | 300 | 30.33 | 45.33 | +15.00 [9.67, 20.67] | Yes | Yes |
 | HoVer | Plain | 300 | 31.33 | 31.33 | +0.00 [0.00, 0.00] | No | No |
@@ -34,6 +34,18 @@ Scores are percentages. Deltas and intervals are absolute percentage points. MBP
 The predeclared method is 10,000 paired bootstrap resamples over unique instances, with 95% type-7 percentile intervals. A changed winner uses the last complete matching retained selection vector; no pooling across adaptive evaluations. An unchanged winner reuses its initial seed vector, so its artifact contrast is exactly zero. A `[0, 0]` contrast does not claim zero uncertainty about the seed's absolute accuracy. There is no Holm correction and no superiority claim.
 
 The practical effect threshold is 2 absolute points. The three MBPP point deltas and GEPA/HoVer's point delta meet it. Only GEPA/HoVer's cell interval lies wholly above it; Plain/MBPP's positive interval still includes effects below 2 points.
+
+### Same-artifact stochastic re-evaluations
+
+Plain/MBPP's chosen artifact `51b0db0f` first scored **78.89%** at evaluation line 75, giving **+2.22 points [-3.33, 7.78]** against the initial seed, which includes zero. The identical artifact scored **81.11%** at line 87, giving the primary **+4.44 [1.11, 8.89]**. Episode 48's parent and proposed artifact have identical hashes, yet the second score was accepted as a strict improvement. Its positive bound therefore is not independent evidence from a new artifact revision. The predeclared last-matching-vector rule, primary report and all numbers remain unchanged; this diagnostic uses only archived scores, not another model call.
+
+All differing complete same-artifact selection re-evaluations in the six logs are listed below. Line numbers refer to the cell's `evaluations.jsonl`. The [diagnostic record](stochastic-reevaluations.json) also retains identical-score repeats and the paired calculation above. Repeats are never pooled as independent instances.
+
+| Cell | Artifact hash prefix | Selection evaluation lines and scores |
+| --- | --- | --- |
+| MBPP/Hone | `55ce6835` (seed) | 1: 75.56%; 122: 76.67%; 145: 76.67%; 155: 76.67%; 240: 75.56% |
+| MBPP/Plain | `85841b30` | 37: 75.56%; 44: 77.78% |
+| MBPP/Plain | `51b0db0f` (chosen) | 75: 78.89%; 87: 81.11% |
 
 ## Per-cell spend
 
@@ -49,6 +61,8 @@ Each phase entry is **model calls / reported tokens / dollar-equivalent**. Estim
 | HoVer | Plain | 16 / 1,169,448 / $3.625452 | 541 / 362,627 / $1.630461 | 1,190 / 808,919 / $3.671601 | 0 / 0 / $0.000000 | $8.927514 |
 
 Unassigned tails are **known, metered usage without a completed evaluation span**, not unknown usage. MBPP/Plain has 81 such calls, 15,651 tokens and $0.111225. HoVer/Hone has 1,119 calls, 765,146 tokens and $3.474270. Those 1,200 calls and $3.585495 remain in totals. They are not silently moved into training or selection, and do not trigger the unknown-usage abort rule. The ordered call receipts and completed spans remain available in each `spend.json`.
+
+The diagnostic call contexts identify both tails as selection re-scores of their incumbent artifacts. The primary completed-span phase buckets stay unchanged and retain them as unassigned; no cost, measurement vector or rule is rewritten. The two `spend.json` reports therefore remain explicitly `incomplete` for phase attribution even though every call's usage is metered. `controller.json` qualifies its provenance flags accordingly.
 
 ## Per-cell runtime and safety
 
@@ -100,8 +114,8 @@ Method wall is the sum of its two cell ledgers, not a separate concurrent wall o
 ## Limits that matter for the next decision
 
 - Plain/HoVer produced 16 proposer responses and zero valid updates. All 16 failed JSON parsing at the first character; the first response begins with explanatory prose before its JSON. The seventeenth episode ended on the dollar reservation. The unchanged seed was retained. This measures the frozen plain loop's artifact-generation compliance as well as search quality, not evidence that no useful HoVer prompt exists. No repair or retry was added after observing it.
-- Hone/HoVer retained the unchanged seed after only three valid proposals and an incomplete evaluation tail. Its zero artifact delta does not show that longer or differently allocated search could not improve it. The tail's charges remain included above.
-- MBPP/Plain also ended with an incomplete evaluation tail. No free completion, confirmation or selective rerun was performed.
+- Hone/HoVer's episode-5 candidate `70a889a4` passed the paired training gate at 6/8 versus the seed's 1/8, delta +0.625. The budget then ran out during a selection re-score of the incumbent seed: calls 1590–2708, 1,119 calls / $3.474270, touched 281 of 300 selection instances. The gate-passing candidate received no selection evaluation. The retained seed's zero artifact contrast is a censored promotion result, not evidence that this candidate would or would not improve selection.
+- Plain/MBPP's positive interval depends on the second evaluation of identical artifact `51b0db0f`; its first interval includes zero, as disclosed above. Its 81-call tail is a third selection attempt of that same artifact, touching 81 of 90 rows. Nothing was completed or re-run after the frozen cell ended.
 - Selection is adaptive, and this is one optimizer seed and two tasks. The broad task-hierarchical intervals are the requested uncertainty description, not a ranking or public optimizer-quality result.
 - Only the declared default lane cache is used. Pre-existing child handling of a custom `--cache` is outside this run and unchanged.
 - Future admitted reruns must reuse the admitted index artifact. Fresh byte-identical rebuilding is not guaranteed by the pinned recipe.
@@ -121,6 +135,6 @@ nice -n 10 taskset -c 6 python3 -m pilot.results --runs evidence/pilot/seed0-sea
 cmp evidence/pilot/results-9-seed0.json .pilot-state/results-9-seed0-replay.json
 ```
 
-The source, statistical rule, cap settings and all six model-output receipts are retained. `harness-bundle.json` preserves the original harness-produced inventory and hash from before this README, controller and journal were added. `controller.json` records that original hash; the outer bundle is resealed for these additions. Leaf cell bundles are unchanged.
+The source, statistical rule, cap settings and all six model-output receipts are retained. `harness-bundle.json` preserves the original harness-produced inventory and hash from before this README, controller, journal and stochastic diagnostics were added. `controller.json` records that original hash; the outer bundle is resealed for these additions. Leaf cell bundles are unchanged.
 
 **Seeds 2–3 and any final-test evaluation remain out of scope. No merge is authorized.**

@@ -90,10 +90,10 @@
   "provenance_checks": {
     "account_pool_matches_approved_hash": true,
     "all_engine_hashes_identical": true,
-    "all_reports_no_issues": true,
     "all_spend_bucket_totals_reconcile": true,
     "budget_identical": true,
     "predeclaration_9_unchanged": true,
+    "results_json_cell_issues_empty": true,
     "route_hash_identical": true,
     "same_seed_artifact_and_task_hash_within_each_task": true,
     "six_seed_zero_cells_exact_order": true
@@ -117,6 +117,23 @@
   "search_output": ".pilot-runs/pilot-seed0-9",
   "search_seed": 0,
   "serial": true,
+  "spend_phase_attribution": {
+    "complete": false,
+    "note": "Results JSON input-file issues are empty; two spend reports explicitly remain incomplete because of budget-exhausted evaluation tails. All tail usage is metered and charged.",
+    "status_by_cell": {
+      "hover/gepa": "complete",
+      "hover/hone": "incomplete",
+      "hover/plain": "complete",
+      "mbpp/gepa": "complete",
+      "mbpp/hone": "complete",
+      "mbpp/plain": "incomplete"
+    },
+    "unassigned_calls_by_cell": {
+      "hover/hone": 1119,
+      "mbpp/plain": 81
+    },
+    "usage_metering_missing_calls": 0
+  },
   "started_main_pid": 4164997,
   "status": "completed",
   "terminal_observed_at": "2026-11-05T18:52:46.387148+00:00",
