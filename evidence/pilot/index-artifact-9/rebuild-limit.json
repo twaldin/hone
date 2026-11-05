@@ -1,0 +1,97 @@
+{
+  "different_toy_stem_ids": true,
+  "full_index_cause": "INFERENCE: process-dependent set ordering changes stemmed vocabulary IDs and associated CSC serialization. The toy reproduces ID drift, not the full-index mismatch or semantic retrieval equivalence.",
+  "full_index_rebuilt": false,
+  "known_limit": "Future admitted runs must reuse the exact admitted index artifact, not rebuild it from the same corpus/versions/recipe. Do not modify bm25s or re-admit without a ruling.",
+  "model_calls": 0,
+  "observed_code": [
+    "vocab = set(tokens_stemmed)",
+    "vocab_dict = {token: i for i, token in enumerate(vocab)}"
+  ],
+  "pinned_version": "bm25s==0.2.12",
+  "same_toy_stem_set": true,
+  "schema": "pilot-bm25-rebuild-limit-v9",
+  "source_file": "bm25s/tokenization.py",
+  "source_file_sha256": "e317ac93cea814c9c6ab2bbe76e561153b700b34c92fc885510b349822f5c834",
+  "source_lines": [
+    675,
+    676
+  ],
+  "toy_command_argv_by_pythonhashseed": {
+    "1": [
+      "nice",
+      "-n",
+      "10",
+      "taskset",
+      "-c",
+      "6",
+      "env",
+      "PYTHONHASHSEED=1",
+      "OPENBLAS_NUM_THREADS=1",
+      "OMP_NUM_THREADS=1",
+      "MKL_NUM_THREADS=1",
+      "pilot/.venv/bin/python",
+      "-c",
+      "import bm25s, Stemmer, json; result=bm25s.tokenize([\"alpha beta gamma delta epsilon zeta eta theta\",\"iota kappa lambda mu nu xi omicron pi\"],stemmer=Stemmer.Stemmer(\"english\"),show_progress=False); print(json.dumps(result.vocab,sort_keys=True))"
+    ],
+    "2": [
+      "nice",
+      "-n",
+      "10",
+      "taskset",
+      "-c",
+      "6",
+      "env",
+      "PYTHONHASHSEED=2",
+      "OPENBLAS_NUM_THREADS=1",
+      "OMP_NUM_THREADS=1",
+      "MKL_NUM_THREADS=1",
+      "pilot/.venv/bin/python",
+      "-c",
+      "import bm25s, Stemmer, json; result=bm25s.tokenize([\"alpha beta gamma delta epsilon zeta eta theta\",\"iota kappa lambda mu nu xi omicron pi\"],stemmer=Stemmer.Stemmer(\"english\"),show_progress=False); print(json.dumps(result.vocab,sort_keys=True))"
+    ]
+  },
+  "toy_input_texts": [
+    "alpha beta gamma delta epsilon zeta eta theta",
+    "iota kappa lambda mu nu xi omicron pi"
+  ],
+  "toy_tokenization_only": true,
+  "toy_vocab_by_pythonhashseed": {
+    "1": {
+      "alpha": 0,
+      "beta": 6,
+      "delta": 11,
+      "epsilon": 3,
+      "eta": 8,
+      "gamma": 13,
+      "iota": 14,
+      "kappa": 9,
+      "lambda": 10,
+      "mu": 4,
+      "nu": 5,
+      "omicron": 15,
+      "pi": 2,
+      "theta": 1,
+      "xi": 12,
+      "zeta": 7
+    },
+    "2": {
+      "alpha": 4,
+      "beta": 9,
+      "delta": 13,
+      "epsilon": 5,
+      "eta": 11,
+      "gamma": 2,
+      "iota": 0,
+      "kappa": 6,
+      "lambda": 7,
+      "mu": 10,
+      "nu": 8,
+      "omicron": 12,
+      "pi": 1,
+      "theta": 15,
+      "xi": 3,
+      "zeta": 14
+    }
+  }
+}

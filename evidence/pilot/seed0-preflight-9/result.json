@@ -1,0 +1,305 @@
+{
+  "final_test_labels_read": false,
+  "model_calls": 0,
+  "observed_dispatches_after_two_synthetic_failures": [
+    {
+      "method": "hone",
+      "seed": 0,
+      "smoke": false,
+      "synthetic_infrastructure_failure": true,
+      "task": "mbpp"
+    },
+    {
+      "method": "gepa",
+      "seed": 0,
+      "smoke": false,
+      "synthetic_infrastructure_failure": true,
+      "task": "mbpp"
+    },
+    {
+      "method": "plain",
+      "seed": 0,
+      "smoke": false,
+      "synthetic_infrastructure_failure": false,
+      "task": "mbpp"
+    },
+    {
+      "method": "hone",
+      "seed": 1,
+      "smoke": false,
+      "synthetic_infrastructure_failure": false,
+      "task": "mbpp"
+    },
+    {
+      "method": "gepa",
+      "seed": 1,
+      "smoke": false,
+      "synthetic_infrastructure_failure": false,
+      "task": "mbpp"
+    },
+    {
+      "method": "plain",
+      "seed": 1,
+      "smoke": false,
+      "synthetic_infrastructure_failure": false,
+      "task": "mbpp"
+    },
+    {
+      "method": "hone",
+      "seed": 2,
+      "smoke": false,
+      "synthetic_infrastructure_failure": false,
+      "task": "mbpp"
+    },
+    {
+      "method": "gepa",
+      "seed": 2,
+      "smoke": false,
+      "synthetic_infrastructure_failure": false,
+      "task": "mbpp"
+    },
+    {
+      "method": "plain",
+      "seed": 2,
+      "smoke": false,
+      "synthetic_infrastructure_failure": false,
+      "task": "mbpp"
+    },
+    {
+      "method": "hone",
+      "seed": 0,
+      "smoke": false,
+      "synthetic_infrastructure_failure": false,
+      "task": "hover"
+    },
+    {
+      "method": "gepa",
+      "seed": 0,
+      "smoke": false,
+      "synthetic_infrastructure_failure": false,
+      "task": "hover"
+    },
+    {
+      "method": "plain",
+      "seed": 0,
+      "smoke": false,
+      "synthetic_infrastructure_failure": false,
+      "task": "hover"
+    },
+    {
+      "method": "hone",
+      "seed": 1,
+      "smoke": false,
+      "synthetic_infrastructure_failure": false,
+      "task": "hover"
+    },
+    {
+      "method": "gepa",
+      "seed": 1,
+      "smoke": false,
+      "synthetic_infrastructure_failure": false,
+      "task": "hover"
+    },
+    {
+      "method": "plain",
+      "seed": 1,
+      "smoke": false,
+      "synthetic_infrastructure_failure": false,
+      "task": "hover"
+    },
+    {
+      "method": "hone",
+      "seed": 2,
+      "smoke": false,
+      "synthetic_infrastructure_failure": false,
+      "task": "hover"
+    },
+    {
+      "method": "gepa",
+      "seed": 2,
+      "smoke": false,
+      "synthetic_infrastructure_failure": false,
+      "task": "hover"
+    },
+    {
+      "method": "plain",
+      "seed": 2,
+      "smoke": false,
+      "synthetic_infrastructure_failure": false,
+      "task": "hover"
+    }
+  ],
+  "observed_dispatches_with_seed_zero": [
+    {
+      "method": "hone",
+      "seed": 0,
+      "smoke": false,
+      "synthetic_infrastructure_failure": false,
+      "task": "mbpp"
+    },
+    {
+      "method": "gepa",
+      "seed": 0,
+      "smoke": false,
+      "synthetic_infrastructure_failure": false,
+      "task": "mbpp"
+    },
+    {
+      "method": "plain",
+      "seed": 0,
+      "smoke": false,
+      "synthetic_infrastructure_failure": false,
+      "task": "mbpp"
+    },
+    {
+      "method": "hone",
+      "seed": 1,
+      "smoke": false,
+      "synthetic_infrastructure_failure": false,
+      "task": "mbpp"
+    },
+    {
+      "method": "gepa",
+      "seed": 1,
+      "smoke": false,
+      "synthetic_infrastructure_failure": false,
+      "task": "mbpp"
+    },
+    {
+      "method": "plain",
+      "seed": 1,
+      "smoke": false,
+      "synthetic_infrastructure_failure": false,
+      "task": "mbpp"
+    },
+    {
+      "method": "hone",
+      "seed": 2,
+      "smoke": false,
+      "synthetic_infrastructure_failure": false,
+      "task": "mbpp"
+    },
+    {
+      "method": "gepa",
+      "seed": 2,
+      "smoke": false,
+      "synthetic_infrastructure_failure": false,
+      "task": "mbpp"
+    },
+    {
+      "method": "plain",
+      "seed": 2,
+      "smoke": false,
+      "synthetic_infrastructure_failure": false,
+      "task": "mbpp"
+    },
+    {
+      "method": "hone",
+      "seed": 0,
+      "smoke": false,
+      "synthetic_infrastructure_failure": false,
+      "task": "hover"
+    },
+    {
+      "method": "gepa",
+      "seed": 0,
+      "smoke": false,
+      "synthetic_infrastructure_failure": false,
+      "task": "hover"
+    },
+    {
+      "method": "plain",
+      "seed": 0,
+      "smoke": false,
+      "synthetic_infrastructure_failure": false,
+      "task": "hover"
+    },
+    {
+      "method": "hone",
+      "seed": 1,
+      "smoke": false,
+      "synthetic_infrastructure_failure": false,
+      "task": "hover"
+    },
+    {
+      "method": "gepa",
+      "seed": 1,
+      "smoke": false,
+      "synthetic_infrastructure_failure": false,
+      "task": "hover"
+    },
+    {
+      "method": "plain",
+      "seed": 1,
+      "smoke": false,
+      "synthetic_infrastructure_failure": false,
+      "task": "hover"
+    },
+    {
+      "method": "hone",
+      "seed": 2,
+      "smoke": false,
+      "synthetic_infrastructure_failure": false,
+      "task": "hover"
+    },
+    {
+      "method": "gepa",
+      "seed": 2,
+      "smoke": false,
+      "synthetic_infrastructure_failure": false,
+      "task": "hover"
+    },
+    {
+      "method": "plain",
+      "seed": 2,
+      "smoke": false,
+      "synthetic_infrastructure_failure": false,
+      "task": "hover"
+    }
+  ],
+  "requested_cells": [
+    {
+      "method": "hone",
+      "seed": 0,
+      "task": "mbpp"
+    },
+    {
+      "method": "gepa",
+      "seed": 0,
+      "task": "mbpp"
+    },
+    {
+      "method": "plain",
+      "seed": 0,
+      "task": "mbpp"
+    },
+    {
+      "method": "hone",
+      "seed": 0,
+      "task": "hover"
+    },
+    {
+      "method": "gepa",
+      "seed": 0,
+      "task": "hover"
+    },
+    {
+      "method": "plain",
+      "seed": 0,
+      "task": "hover"
+    }
+  ],
+  "schema": "pilot-first-seed-preflight-stop-v1",
+  "scope": "Real CLI parser and dispatch loop with panel, environment, search, accounting and writes replaced by offline fixtures. No admission, optimizer, task, provider or throttle execution.",
+  "source_sha256": {
+    "evidence/pilot/run-plan-8a.json": "3f64937e0f6254659b048a22eda42c736b652b0fec1f10535308a7e3b9c6268b",
+    "pilot/__main__.py": "34b410e85e7341df95bdd710d49d5e258ffb9d2a5b2b61dd6770f0d25914bd75",
+    "pilot/runtime.py": "64290440a241a9e730e608e3ebd6f16567304903538f77188096250ed95e2e68"
+  },
+  "status": "STOP_BEFORE_FIRST_SEARCH",
+  "synthetic_failure_receipt": {
+    "calls": 1,
+    "hidden_attempts": 1,
+    "usage_missing_calls": 1
+  }
+}

@@ -1,0 +1,59 @@
+2026-11-04T23:00:02+00:00 deckbox systemd[1315]: Starting hone-seed0-9-20261104T225929.service - /usr/bin/nice -n 10 /usr/bin/taskset -c 6 /usr/bin/env OPENBLAS_NUM_THREADS=1 OMP_NUM_THREADS=1 MKL_NUM_THREADS=1 JAX_PLATFORMS=cpu PYTHONUNBUFFERED=1 /home/tim/worktrees/hone/hone-hone-pilot-seed0-1/pilot/.venv/bin/python -m pilot pilot --controls evidence/pilot/controls-7b --seed 0 --out .pilot-runs/pilot-seed0-9...
+2026-11-04T23:00:02+00:00 deckbox systemd[1315]: Started hone-seed0-9-20261104T225929.service - /usr/bin/nice -n 10 /usr/bin/taskset -c 6 /usr/bin/env OPENBLAS_NUM_THREADS=1 OMP_NUM_THREADS=1 MKL_NUM_THREADS=1 JAX_PLATFORMS=cpu PYTHONUNBUFFERED=1 /home/tim/worktrees/hone/hone-hone-pilot-seed0-1/pilot/.venv/bin/python -m pilot pilot --controls evidence/pilot/controls-7b --seed 0 --out .pilot-runs/pilot-seed0-9.
+2026-11-04T23:00:02+00:00 deckbox nice[3839792]: <unknown>:3: SyntaxWarning: invalid escape sequence '\B'
+2026-11-04T23:00:02+00:00 deckbox nice[3839792]: <unknown>:2: SyntaxWarning: invalid escape sequence '\.'
+2026-11-04T23:00:02+00:00 deckbox nice[3839792]: <unknown>:3: SyntaxWarning: invalid escape sequence '\W'
+2026-11-04T23:00:02+00:00 deckbox nice[3839792]: <unknown>:3: SyntaxWarning: invalid escape sequence '\W'
+2026-11-04T23:00:02+00:00 deckbox nice[3839792]: <unknown>:2: SyntaxWarning: invalid escape sequence '\.'
+2026-11-04T23:00:02+00:00 deckbox nice[3839792]: <unknown>:15: SyntaxWarning: invalid escape sequence '\s'
+2026-11-04T23:00:02+00:00 deckbox nice[3839792]: <unknown>:4: SyntaxWarning: invalid escape sequence '\A'
+2026-11-04T23:00:02+00:00 deckbox nice[3839792]: <unknown>:3: SyntaxWarning: invalid escape sequence '\d'
+2026-11-04T23:00:02+00:00 deckbox nice[3839792]: <unknown>:4: SyntaxWarning: invalid escape sequence '\w'
+2026-11-04T23:00:02+00:00 deckbox nice[3839792]: <unknown>:3: SyntaxWarning: invalid escape sequence '\d'
+2026-11-04T23:00:02+00:00 deckbox nice[3839792]: <unknown>:3: SyntaxWarning: invalid escape sequence '\.'
+2026-11-04T23:01:43+00:00 deckbox nice[3839792]: /home/tim/worktrees/hone/hone-hone-pilot-seed0-1/pilot/.venv/lib/python3.12/site-packages/syllapy/data_loader.py:3: UserWarning: pkg_resources is deprecated as an API. See https://setuptools.pypa.io/en/latest/pkg_resources.html. The pkg_resources package is slated for removal as early as 2025-11-30. Refrain from using this package or pin to Setuptools<81.
+2026-11-04T23:01:43+00:00 deckbox nice[3839792]:   import pkg_resources
+2026-11-04T23:01:43+00:00 deckbox nice[3839792]: Traceback (most recent call last):
+2026-11-04T23:01:43+00:00 deckbox nice[3839792]:   File "<frozen runpy>", line 198, in _run_module_as_main
+2026-11-04T23:01:43+00:00 deckbox nice[3839792]:   File "<frozen runpy>", line 88, in _run_code
+2026-11-04T23:01:43+00:00 deckbox nice[3839792]:   File "/home/tim/worktrees/hone/hone-hone-pilot-seed0-1/pilot/__main__.py", line 1007, in <module>
+2026-11-04T23:01:43+00:00 deckbox nice[3839792]:     main()
+2026-11-04T23:01:43+00:00 deckbox nice[3839792]:   File "/home/tim/worktrees/hone/hone-hone-pilot-seed0-1/pilot/__main__.py", line 976, in main
+2026-11-04T23:01:43+00:00 deckbox nice[3839792]:     selected = load_panel(args)
+2026-11-04T23:01:43+00:00 deckbox nice[3839792]:                ^^^^^^^^^^^^^^^^
+2026-11-04T23:01:43+00:00 deckbox nice[3839792]:   File "/home/tim/worktrees/hone/hone-hone-pilot-seed0-1/pilot/__main__.py", line 547, in load_panel
+2026-11-04T23:01:43+00:00 deckbox nice[3839792]:     prepared, declaration, proof = load_admission(args.controls, args.cache)
+2026-11-04T23:01:43+00:00 deckbox nice[3839792]:                                    ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+2026-11-04T23:01:43+00:00 deckbox nice[3839792]:   File "/home/tim/worktrees/hone/hone-hone-pilot-seed0-1/pilot/__main__.py", line 421, in load_admission
+2026-11-04T23:01:43+00:00 deckbox nice[3839792]:     prepared = {name: load_task(name, cache) for name in TASKS}
+2026-11-04T23:01:43+00:00 deckbox nice[3839792]:                       ^^^^^^^^^^^^^^^^^^^^^^
+2026-11-04T23:01:43+00:00 deckbox nice[3839792]:   File "/home/tim/worktrees/hone/hone-hone-pilot-seed0-1/pilot/tasks.py", line 183, in load_task
+2026-11-04T23:01:43+00:00 deckbox nice[3839792]:     manifest["nlp_assets"] = _nlp_assets()
+2026-11-04T23:01:43+00:00 deckbox nice[3839792]:                              ^^^^^^^^^^^^^
+2026-11-04T23:01:43+00:00 deckbox nice[3839792]:   File "/home/tim/worktrees/hone/hone-hone-pilot-seed0-1/pilot/tasks.py", line 243, in _nlp_assets
+2026-11-04T23:01:43+00:00 deckbox nice[3839792]:     pointer = nltk.data.find(name)
+2026-11-04T23:01:43+00:00 deckbox nice[3839792]:               ^^^^^^^^^^^^^^^^^^^^
+2026-11-04T23:01:43+00:00 deckbox nice[3839792]:   File "/home/tim/worktrees/hone/hone-hone-pilot-seed0-1/pilot/.venv/lib/python3.12/site-packages/nltk/data.py", line 579, in find
+2026-11-04T23:01:43+00:00 deckbox nice[3839792]:     raise LookupError(resource_not_found)
+2026-11-04T23:01:43+00:00 deckbox nice[3839792]: LookupError:
+2026-11-04T23:01:43+00:00 deckbox nice[3839792]: **********************************************************************
+2026-11-04T23:01:43+00:00 deckbox nice[3839792]:   Resource punkt not found.
+2026-11-04T23:01:43+00:00 deckbox nice[3839792]:   Please use the NLTK Downloader to obtain the resource:
+2026-11-04T23:01:43+00:00 deckbox nice[3839792]:   >>> import nltk
+2026-11-04T23:01:43+00:00 deckbox nice[3839792]:   >>> nltk.download('punkt')
+2026-11-04T23:01:43+00:00 deckbox nice[3839792]:   
+2026-11-04T23:01:43+00:00 deckbox nice[3839792]:   For more information see: https://www.nltk.org/data.html
+2026-11-04T23:01:43+00:00 deckbox nice[3839792]:   Attempted to load tokenizers/punkt
+2026-11-04T23:01:43+00:00 deckbox nice[3839792]:   Searched in:
+2026-11-04T23:01:43+00:00 deckbox nice[3839792]:     - '/home/tim/nltk_data'
+2026-11-04T23:01:43+00:00 deckbox nice[3839792]:     - '/home/tim/worktrees/hone/hone-hone-pilot-seed0-1/pilot/.venv/nltk_data'
+2026-11-04T23:01:43+00:00 deckbox nice[3839792]:     - '/home/tim/worktrees/hone/hone-hone-pilot-seed0-1/pilot/.venv/share/nltk_data'
+2026-11-04T23:01:43+00:00 deckbox nice[3839792]:     - '/home/tim/worktrees/hone/hone-hone-pilot-seed0-1/pilot/.venv/lib/nltk_data'
+2026-11-04T23:01:43+00:00 deckbox nice[3839792]:     - '/usr/share/nltk_data'
+2026-11-04T23:01:43+00:00 deckbox nice[3839792]:     - '/usr/local/share/nltk_data'
+2026-11-04T23:01:43+00:00 deckbox nice[3839792]:     - '/usr/lib/nltk_data'
+2026-11-04T23:01:43+00:00 deckbox nice[3839792]:     - '/usr/local/lib/nltk_data'
+2026-11-04T23:01:43+00:00 deckbox nice[3839792]: **********************************************************************
+2026-11-04T23:01:44+00:00 deckbox systemd[1315]: hone-seed0-9-20261104T225929.service: Main process exited, code=exited, status=1/FAILURE
+2026-11-04T23:01:44+00:00 deckbox systemd[1315]: hone-seed0-9-20261104T225929.service: Failed with result 'exit-code'.
+2026-11-04T23:01:44+00:00 deckbox systemd[1315]: hone-seed0-9-20261104T225929.service: Consumed 9.256s CPU time, 41.7M memory peak, 0B memory swap peak.

@@ -9,10 +9,11 @@ import subprocess
 import tempfile
 import time
 from collections import Counter
+from itertools import product
 from pathlib import Path
 
 from .runtime import (ROOT, MODEL, IMAGE, LIMITS, PRICES, PRICE_SOURCE, Gateway, Ledger,
-                      ModelCalls, Throttle, TransportError, CallFailed, ProviderRefusal, RefusalNondeterminism, append_json, canonical,
+                      ModelCalls, Throttle, TransportError, CallFailed, ProviderRefusal, RefusalNondeterminism, PauseLimitExceeded, append_json, canonical,
                       create_pool, digest, open_gateway, pool_domains, retry_comparison)
 
 from .panel import OFFICIAL_PANEL, panel_tasks, reuse_control, validate_measurement
@@ -34,11 +35,12 @@ def file_hash(path: Path) -> str:
 
 
 def evaluator_identity(task) -> dict:
+    from .admission import identity_source_hash
     paths = ("pilot/tasks.py", "pilot/program.py", "pilot/verification.py", "pilot/adversarial.py",
              "pilot/controls.py", "pilot/runtime.py", "pilot/gateway.mjs", "pilot/__main__.py",
              "pilot/admission.py", "pilot/hover.py", "pilot/published.py", "pilot/published-controls.json",
              "pilot/panel.py", "pilot/gateway-receipts.mjs")
-    return {"contract": 8, "task": task.manifest, "evaluator_files": {path: file_hash(ROOT / path) for path in paths},
+    return {"contract": 8, "task": task.manifest, "evaluator_files": {path: identity_source_hash(ROOT, path) for path in paths},
             "predeclaration_hash": file_hash(ROOT / "evidence/pilot/predeclaration-8.md"),
             "prior_predeclaration_hash": file_hash(ROOT / "evidence/pilot/predeclaration-6.md"),
             "source_transition_hash": file_hash(ROOT / "evidence/pilot/source-transition-8a.json"),
@@ -47,6 +49,12 @@ def evaluator_identity(task) -> dict:
             "transport_correction_hash": file_hash(ROOT / "evidence/pilot/predeclaration-4a.md"),
             "route": MODEL, "decoding": {"temperature": 0, "forceReasoningOff": True, "max_output_tokens": 4096, "cacheRetention": "none"},
             "image": IMAGE}
+
+
+def configure_nlp(cache: Path) -> str:
+    path = str((cache / "nltk").resolve())
+    os.environ["NLTK_DATA"] = path
+    return path
 
 
 def environment(pool_path: Path) -> tuple[dict, dict]:
@@ -63,9 +71,8 @@ def environment(pool_path: Path) -> tuple[dict, dict]:
         "PI_CODING_AGENT_DIR", "OMP_AGENT_DIR",
     ) if key in os.environ}
     env["OMP_AUTH_BROKER_ACCOUNT_POOL_FILE"] = str(pool_path.resolve())
-    env["NLTK_DATA"] = str((ROOT / ".pilot-cache/nltk").resolve())
+    env["NLTK_DATA"] = configure_nlp(ROOT / ".pilot-cache")
     env["PILOT_PYTHON_IMAGE"] = IMAGE
-    os.environ["NLTK_DATA"] = env["NLTK_DATA"]
     os.environ["PILOT_PYTHON_IMAGE"] = IMAGE
     return pool, env
 
@@ -169,8 +176,9 @@ def route_proof(pool: dict, env: dict, out: Path) -> None:
             gateway.close()
 
 
-def calls_for(pool: dict, env: dict, out: Path, limits: dict | None = None, history_roots: list[Path] | None = None):
-    throttle = Throttle(pool, env, out / "pauses.jsonl")
+def calls_for(pool: dict, env: dict, out: Path, limits: dict | None = None,
+              history_roots: list[Path] | None = None, throttle: Throttle | None = None):
+    throttle = throttle if throttle is not None else Throttle(pool, env, out / "pauses.jsonl")
     ledger = Ledger(out / "calls.jsonl", limits=dict(limits or LIMITS),
                     history_roots=[ROOT / "evidence/pilot", ROOT / ".pilot-runs", *(history_roots or [])])
     return ModelCalls(open_gateway(throttle), ledger, throttle), ledger, throttle
@@ -194,7 +202,7 @@ def readmit_mbpp(args) -> None:
     from .tasks import load_task
     if args.out.exists() and any(args.out.iterdir()):
         raise FileExistsError("MBPP re-admission output already contains evidence")
-    os.environ["NLTK_DATA"] = str((args.cache / "nltk").resolve())
+    configure_nlp(args.cache)
     os.environ["PILOT_PYTHON_IMAGE"] = IMAGE
     prepared = [load_task(name, args.cache) for name in ARCHIVED_TASKS]
     identities = {task.name: evaluator_identity(task) for task in prepared}
@@ -287,7 +295,7 @@ def offline_adversarial(args) -> None:
         raise ValueError("Offline admission freezes the complete contract-8 panel")
     if args.out.exists() and any(args.out.iterdir()):
         raise FileExistsError("Adversarial output already contains evidence")
-    os.environ["NLTK_DATA"] = str((args.cache / "nltk").resolve())
+    configure_nlp(args.cache)
     os.environ["PILOT_PYTHON_IMAGE"] = IMAGE
     prepared = {name: load_task(name, args.cache) for name in TASKS}
     carried = {name: reuse_control(prepared[name]) for name in ("mbpp", "hover")}
@@ -611,6 +619,25 @@ def resume_result(out: Path, task_name: str, seed: int, method: str, error_type:
         for line in (out / "incumbents.jsonl").read_text().splitlines(keepends=True):
             if line.endswith("\n"):
                 incumbent = json.loads(line)
+    paused_seconds, pauses = 0.0, 0
+    opened = last_paused = None
+    if (out / "pauses.jsonl").exists():
+        for line in (out / "pauses.jsonl").read_text().splitlines(keepends=True):
+            if not line.endswith("\n"):
+                break
+            event = json.loads(line)
+            if event["event"] == "paused":
+                if opened is None:
+                    opened = event["at"]
+                    pauses += 1
+                last_paused = event["at"]
+            elif event["event"] in {"resumed", "pause-limit"}:
+                paused_seconds += event["seconds"]
+                opened = last_paused = None
+                if event["event"] == "pause-limit" and error_type != "RefusalNondeterminism":
+                    error_type = "PauseLimitExceeded"
+    if opened is not None:
+        paused_seconds += max(0, last_paused - opened)
     hidden = sum(call.get("retry_observation", {}).get("hiddenAttempts", 0) for call in calls)
     result = {"task": task_name, "seed": seed, "method": method, "status": "infrastructure_failure",
               "selection_score": incumbent.get("selection_score"), "candidate_hash": digest(incumbent.get("candidate")),
@@ -622,9 +649,12 @@ def resume_result(out: Path, task_name: str, seed: int, method: str, error_type:
               "hidden_attempt_rate": hidden / len(calls) if calls else 0, "usage_missing_calls": sum(call.get("usage_missing", False) for call in calls),
               "failed_calls": sum(call.get("failed", call.get("status") != 200 or call.get("stop_reason") not in {"stop", "length"} or call.get("usage_missing", False)) for call in calls),
               "proposer_calls": sum(call.get("role") in {"proposer", "repair"} for call in calls),
+              "pause_seconds": paused_seconds, "pauses": pauses, "pause_accounting_incomplete": opened is not None,
               "stop_reason": error_type, "accounting_incomplete": True}
     if error_type == "RefusalNondeterminism":
         result["status"] = "refusal-nondeterminism"
+    elif error_type == "PauseLimitExceeded":
+        result["status"] = "pause_limit_exceeded"
     save(out / "failure.json", {"error_type": error_type, "rerun_policy": "Never rerun this cell; retain its durable usage prefix and last accepted incumbent."})
     save(out / "result.json", result)
     seal(out)
@@ -641,14 +671,25 @@ def search_one(args, pool, env, task_name: str, seed: int, method: str, smoke: b
     if out.exists():
         return resume_result(out, task_name, seed, method)
     out.mkdir(parents=True)
+    throttle = Throttle(pool, env, out / "pauses.jsonl",
+                        pause_limit_seconds=getattr(args, "remaining_pause_seconds", None))
     try:
-        call, ledger, throttle = calls_for(pool, env, out, history_roots=[args.out])
+        call, ledger, throttle = calls_for(pool, env, out, history_roots=[args.out], throttle=throttle)
     except RefusalNondeterminism as error:
         save(out / "failure.json", {"status": "refusal-nondeterminism", "evidence": error.evidence})
         seal(out)
         raise
     except Exception as error:
-        return resume_result(out, task_name, seed, method, type(error).__name__)
+        result = resume_result(out, task_name, seed, method, type(error).__name__)
+        paused = max(result["pause_seconds"], throttle.paused_seconds)
+        result.update(pause_seconds=paused, throttle_seconds=max(paused, throttle.accounted_seconds),
+                      poll_seconds=max(0, throttle.accounted_seconds - throttle.paused_seconds),
+                      pauses=max(result["pauses"], throttle.pauses))
+        if isinstance(error, PauseLimitExceeded):
+            result["status"] = "pause_limit_exceeded"
+        save(out / "result.json", result)
+        seal(out)
+        return result
     rollouts = 0
     def protected_evaluate(candidate, rows, capture_traces=False):
         nonlocal rollouts
@@ -684,8 +725,12 @@ def search_one(args, pool, env, task_name: str, seed: int, method: str, smoke: b
                 "control_hash": digest(control), "budget": LIMITS, "budget_hash": digest(LIMITS), "price_per_million": PRICES, "price_source": PRICE_SOURCE,
                 "account_pool_hash": digest(pool), "account_domains": pool_domains(pool), "api_keys_allowed": False,
                 "retrieval_receipt": json.loads((args.controls / "cohorts.json").read_text()).get("retrieval_receipt") if task_name == "hover" else None,
+                "dispatch_transition_hash": file_hash(ROOT / "evidence/pilot/source-transition-9.json")
+                    if (ROOT / "evidence/pilot/source-transition-9.json").exists() else None,
+                "dispatch_predeclaration_hash": file_hash(ROOT / "evidence/pilot/predeclaration-9.md")
+                    if (ROOT / "evidence/pilot/predeclaration-9.md").exists() else None,
                 "engine_files": {path: file_hash(ROOT / path) for path in (
-                    "pilot/__main__.py", "pilot/search.py", "pilot/spend.py", "optimizer/src/pilot-policy.ts", "optimizer/assets/policy.ts",
+                    "pilot/__main__.py", "pilot/runtime.py", "pilot/admission.py", "pilot/search.py", "pilot/spend.py", "optimizer/src/pilot-policy.ts", "optimizer/assets/policy.ts",
                     "optimizer/src/loop.ts", "schema/src/promotion.ts", "package.json", "pnpm-lock.yaml",
                     "optimizer/worker/Dockerfile.mutation")},
                 "limits": retry_comparison({method: summary})["limit"], "current_subscription_panel": True,
@@ -710,6 +755,8 @@ def search_one(args, pool, env, task_name: str, seed: int, method: str, smoke: b
         timing = ledger.summary(throttle)
         result.update({key: timing[key] for key in (
             "wall_seconds", "active_seconds", "pauses", "pause_seconds", "throttle_seconds", "poll_seconds")})
+        if isinstance(error, PauseLimitExceeded):
+            result["status"] = "pause_limit_exceeded"
         save(out / "result.json", result)
         seal(out)
         return result
@@ -738,7 +785,7 @@ def archived_ifbench(task, manifest: dict, cache: Path):
 
 def replay(args) -> None:
     from .tasks import load_task, score_output
-    os.environ["NLTK_DATA"] = str((args.cache / "nltk").resolve())
+    configure_nlp(args.cache)
     evaluation_paths = sorted(args.out.rglob("evaluations.jsonl"))
     admission_manifest = args.out / "adversarial.json"
     if admission_manifest.exists() and json.loads(admission_manifest.read_text()).get("version") == "pilot-adversarial-v8":
@@ -864,6 +911,25 @@ def replay(args) -> None:
     print(canonical({"replayed_rollouts": checked, "model_calls": 0, "scored_final_tests_loaded": False}))
 
 
+def dispatch_stop(rows: list[dict]) -> dict | None:
+    calls = sum(row["calls"] for row in rows)
+    hidden = sum(row["hidden_attempts"] for row in rows)
+    if hidden * 100 > calls:
+        return {"reason": "hidden-attempt-rate", "hidden_attempts": hidden, "calls": calls}
+    for row in rows:
+        missing = row.get("usage_missing_calls", 0)
+        if missing * 100 > row["calls"]:
+            return {"reason": "unknown-usage-rate", "unknown_usage_calls": missing, "calls": row["calls"],
+                    "cell": {key: row[key] for key in ("task", "seed", "method")}}
+    if len(rows) >= 2 and all(row.get("status") == "infrastructure_failure" for row in rows[-2:]):
+        return {"reason": "consecutive-infrastructure-failures",
+                "cells": [{key: row[key] for key in ("task", "seed", "method")} for row in rows[-2:]]}
+    paused = sum(row.get("pause_seconds", 0) for row in rows)
+    if paused > 6 * 3600 or any(row.get("stop_reason") == "PauseLimitExceeded" for row in rows):
+        return {"reason": "pause-limit", "pause_seconds": paused, "limit_seconds": 6 * 3600}
+    return None
+
+
 def main():
     parser = argparse.ArgumentParser(description="Frozen development-only Hone optimizer pilot")
     parser.add_argument("command", choices=("prepare", "probe", "throttle-proof", "readmit-mbpp", "adversarial", "controls", "smoke", "pilot", "verify", "replay"))
@@ -875,6 +941,7 @@ def main():
     parser.add_argument("--task", choices=(*TASKS, "all"), default="all")
     parser.add_argument("--seed", type=int, default=0)
     args = parser.parse_args()
+    configure_nlp(args.cache)
     if args.out is None:
         args.out = ROOT / "evidence/pilot" / (
             "mbpp-readmission-4a" if args.command == "readmit-mbpp" else
@@ -894,7 +961,6 @@ def main():
         offline_adversarial(args)
         return
     if args.command == "controls":
-        os.environ["NLTK_DATA"] = str((args.cache / "nltk").resolve())
         controls(args)
         return
     if args.command in {"prepare", "probe", "throttle-proof"}:
@@ -920,18 +986,23 @@ def main():
         pool, env = environment(args.pool)
         rows = []
         tasks = ("mbpp",) if args.command == "smoke" and args.task == "all" else selected if args.task == "all" else (args.task,)
-        seeds = (args.seed,) if args.command == "smoke" else (0, 1, 2)
-        for task in tasks:
-            for seed in seeds:
-                for method in METHODS:
-                    result = search_one(args, pool, env, task, seed, method, args.command == "smoke")
-                    out = args.out / task / str(seed) / method
-                    spend = report_spend(out)
-                    save(out / "spend.json", spend)
-                    seal(out)
-                    rows.append(dict(result, spend=spend))
+        for task, seed, method in product(tasks, (args.seed,), METHODS):
+            if dispatch_stop(rows) is not None:
+                break
+            args.remaining_pause_seconds = max(0, 6 * 3600 - sum(row.get("pause_seconds", 0) for row in rows))
+            result = search_one(args, pool, env, task, seed, method, args.command == "smoke")
+            out = args.out / task / str(seed) / method
+            spend = report_spend(out)
+            save(out / "spend.json", spend)
+            seal(out)
+            rows.append(dict(result, spend=spend))
         totals = {method: {"hidden_attempt_rate": sum(row["hidden_attempts"] for row in rows if row["method"] == method) / max(1, sum(row["calls"] for row in rows if row["method"] == method))} for method in METHODS}
-        save(args.out / "comparison.json", {"runs": rows, "retry_comparison": retry_comparison(totals)})
+        stopped = dispatch_stop(rows)
+        if stopped is not None:
+            save(args.out / "stop.json", stopped)
+            print(canonical({"dispatch_stop": stopped}), flush=True)
+        save(args.out / "comparison.json", {"runs": rows, "seeds": [args.seed],
+             "dispatch_stop": stopped, "retry_comparison": retry_comparison(totals)})
         seal(args.out)
         if args.command == "smoke" and any(row.get("status") != "completed" for row in rows):
             raise RuntimeError("Smoke failed; retained failure evidence cannot be selectively rerun")

@@ -1,0 +1,42 @@
+{
+  "at": "2026-11-04T22:20:29.013971+00:00",
+  "cache": ".pilot-cache",
+  "command": "nice -n 10 taskset -c 6 env OPENBLAS_NUM_THREADS=1 OMP_NUM_THREADS=1 MKL_NUM_THREADS=1 JAX_PLATFORMS=cpu NLTK_DATA=/home/tim/worktrees/hone/hone-hone-pilot-seed0-1/.pilot-cache/nltk pilot/.venv/bin/python -c 'import json,time; from pathlib import Path; from types import SimpleNamespace; from pilot.__main__ import load_panel,execution_limits; started=time.monotonic(); args=SimpleNamespace(controls=Path(\"evidence/pilot/controls-7b\"),cache=Path(\".pilot-cache\"),task=\"all\"); print(json.dumps({\"selected_panel\":load_panel(args),\"execution_limits\":execution_limits(),\"model_calls\":0,\"scored_final_tests_loaded\":False,\"elapsed_seconds\":time.monotonic()-started}),flush=True)'",
+  "command_argv": [
+    "nice",
+    "-n",
+    "10",
+    "taskset",
+    "-c",
+    "6",
+    "env",
+    "OPENBLAS_NUM_THREADS=1",
+    "OMP_NUM_THREADS=1",
+    "MKL_NUM_THREADS=1",
+    "JAX_PLATFORMS=cpu",
+    "NLTK_DATA=/home/tim/worktrees/hone/hone-hone-pilot-seed0-1/.pilot-cache/nltk",
+    "pilot/.venv/bin/python",
+    "-c",
+    "import json,time; from pathlib import Path; from types import SimpleNamespace; from pilot.__main__ import load_panel,execution_limits; started=time.monotonic(); args=SimpleNamespace(controls=Path(\"evidence/pilot/controls-7b\"),cache=Path(\".pilot-cache\"),task=\"all\"); print(json.dumps({\"selected_panel\":load_panel(args),\"execution_limits\":execution_limits(),\"model_calls\":0,\"scored_final_tests_loaded\":False,\"elapsed_seconds\":time.monotonic()-started}),flush=True)"
+  ],
+  "controls": "evidence/pilot/controls-7b",
+  "elapsed_seconds": 471.88155545305926,
+  "execution_limits": [
+    [
+      6
+    ],
+    10
+  ],
+  "exit_code": 0,
+  "fresh_admission_controls_run": false,
+  "gates_relaxed": false,
+  "model_calls": 0,
+  "original_failed_attempt_preserved": true,
+  "schema": "pilot-copied-artifact-admission-v9",
+  "scored_final_tests_loaded": false,
+  "selected_panel": [
+    "mbpp",
+    "hover"
+  ],
+  "source_tree_commit": "16fa4914577f5fcd9ada96eb793e581c889fa81a"
+}

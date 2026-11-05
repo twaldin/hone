@@ -45,6 +45,14 @@ class RefusalNondeterminism(RuntimeError):
         super().__init__("Identical request was both refused and answered; dispatch stopped")
         self.evidence = evidence
 
+class PauseLimitExceeded(RuntimeError):
+    def __init__(self, paused_seconds: float, accounted_seconds: float, pauses: int):
+        super().__init__("Run-wide subscription pauses exceeded six hours")
+        self.paused_seconds = paused_seconds
+        self.accounted_seconds = accounted_seconds
+        self.pauses = pauses
+
+
 
 _CALL_SCOPE: ContextVar[dict] = ContextVar("pilot_call_scope", default={})
 
@@ -149,6 +157,7 @@ class Throttle:
     reader: Callable[[], dict] | None = None
     sleep: Callable[[float], None] = time.sleep
     clock: Callable[[], float] = time.time
+    pause_limit_seconds: float | None = None
 
     def read(self) -> dict:
         if self.reader is not None:
@@ -166,6 +175,13 @@ class Throttle:
                 reason = capacity_reason(self.read(), self.pool, self.clock())
             except (OSError, ValueError, TransportError, subprocess.TimeoutExpired):
                 reason = "broker-or-usage-unavailable"
+            elapsed = max(0, self.clock() - started) if started is not None else 0
+            if self.pause_limit_seconds is not None and self.paused_seconds + elapsed > self.pause_limit_seconds:
+                self.paused_seconds += elapsed
+                self.accounted_seconds += max(0, self.clock() - entered)
+                append_json(self.journal, {"event": "pause-limit", "at": self.clock(), "seconds": elapsed,
+                                          "total_pause_seconds": self.paused_seconds})
+                raise PauseLimitExceeded(self.paused_seconds, self.accounted_seconds, self.pauses)
             if reason is None:
                 if started is not None:
                     elapsed = max(0, self.clock() - started)

@@ -1,0 +1,39 @@
+{
+  "boundary": "Original load_panel completes, then a controlled AdmissionComplete boundary stops before gateway or search dispatch. All admission checks run unchanged.",
+  "command_argv": [
+    "nice",
+    "-n",
+    "10",
+    "taskset",
+    "-c",
+    "6",
+    "env",
+    "OPENBLAS_NUM_THREADS=1",
+    "OMP_NUM_THREADS=1",
+    "MKL_NUM_THREADS=1",
+    "JAX_PLATFORMS=cpu",
+    "pilot/.venv/bin/python",
+    "-c",
+    "import json, os, sys, time\nfrom unittest.mock import patch\nos.environ.pop(\"NLTK_DATA\", None)\nfrom pilot import __main__ as cli\nstarted = time.monotonic()\noriginal = cli.load_panel\nclass AdmissionComplete(Exception): pass\ndef admission(args):\n    selected = original(args)\n    print(json.dumps({\"selected_panel\": selected, \"entrypoint\": \"pilot.main\", \"launch_NLTK_DATA_supplied\": False, \"execution_limits\": cli.execution_limits(), \"model_calls\": 0, \"final_test_labels_read\": False, \"elapsed_seconds\": time.monotonic() - started}), flush=True)\n    raise AdmissionComplete\nsys.argv = [\"pilot\", \"pilot\", \"--controls\", \"evidence/pilot/controls-7b\", \"--seed\", \"0\", \"--out\", \".pilot-runs/pilot-seed0-9\"]\nwith patch.object(cli, \"load_panel\", side_effect=admission):\n    try: cli.main()\n    except AdmissionComplete: pass\n    else: raise AssertionError(\"Admission completion boundary not reached\")\n"
+  ],
+  "elapsed_seconds": 403.15845990600064,
+  "entrypoint": "pilot.main",
+  "execution_limits": [
+    [
+      6
+    ],
+    10
+  ],
+  "exit_status": 0,
+  "final_test_labels_read": false,
+  "launch_NLTK_DATA_supplied": false,
+  "matching_committed_head": "f3b13c0dd6be3d1fc0a95e9f7cc3bd74a1dfb9bc",
+  "model_calls": 0,
+  "observed_at": "2026-11-04T23:40:46.250074+00:00",
+  "schema": "pilot-real-cli-launch-preflight-v9",
+  "selected_panel": [
+    "mbpp",
+    "hover"
+  ],
+  "source_sha256": "a03815841cbbe5edcfbbc0aa26512b859bb56e9cf9766cf1b4bc3e31db7285bb"
+}

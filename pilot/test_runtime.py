@@ -475,6 +475,24 @@ class RuntimeTests(unittest.TestCase):
         self.assertEqual(ledger.summary(throttle)["poll_seconds"], 2)
         self.assertEqual(throttle.pauses, 0)
 
+    def test_pause_limit_counts_multiple_episodes_and_preserves_stopped_time(self):
+        now = [1000.0]
+        readings = iter([usage(.99), usage(.1), usage(.99), usage(.99), usage(.1)])
+        throttle = Throttle(POOL, {}, self.path / "limited-pauses", interval=5,
+                            reader=lambda: next(readings), clock=lambda: now[0],
+                            sleep=lambda seconds: now.__setitem__(0, now[0] + seconds),
+                            pause_limit_seconds=10)
+        throttle.wait()
+        self.assertEqual(throttle.paused_seconds, 5)
+        with self.assertRaises(runtime.PauseLimitExceeded) as stopped:
+            throttle.wait()
+        self.assertEqual(stopped.exception.paused_seconds, 15)
+        self.assertEqual(throttle.accounted_seconds, 15)
+        self.assertEqual(throttle.pauses, 2)
+        events = [json.loads(line) for line in throttle.journal.read_text().splitlines()]
+        self.assertEqual(events[-1]["event"], "pause-limit")
+        self.assertEqual(events[-1]["total_pause_seconds"], 15)
+
     def test_startup_broker_outage_waits_before_reconnect(self):
         throttle = Throttle(POOL, {}, self.path / "pauses", reader=lambda: usage(), clock=lambda: 1000)
         endpoint = object()
