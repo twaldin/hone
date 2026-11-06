@@ -200,6 +200,23 @@ class ReportTests(unittest.TestCase):
         expected.pop("reporter_sha256")
         self.assertEqual(actual, expected)
 
+    def test_real_seed0_diagnostics_remain_beside_stopped_seed_matrix(self):
+        root = Path(__file__).resolve().parents[1]
+        report = report_seeds12(self.root, self.root, seed0_runs=root / "evidence/pilot/seed0-search-9")
+        historical = {(cell["task"], cell["method"]): cell["diagnostics"]
+                      for cell in report["seed0_historical"]["cells"]}
+        self.assertEqual({key: value["selection_evaluations_of_already_scored_artifacts"]
+                          for key, value in historical.items()},
+                         {("mbpp", "hone"): 5, ("mbpp", "gepa"): 0, ("mbpp", "plain"): 4,
+                          ("hover", "hone"): 1, ("hover", "gepa"): 0, ("hover", "plain"): 0})
+        self.assertTrue(all(value["duplicate_count_status"] == "exact_archived_count"
+                            for value in historical.values()))
+        missing = historical["hover", "hone"]["gate_passing_missing_selection_evidence"]
+        self.assertEqual([entry["artifact_hash"] for entry in missing],
+                         ["sha256:70a889a41a1a45187d03edf260ffcd5414bd8319cbcab954d52fd469a7c731c9"])
+        self.assertEqual(missing[0]["binding_cap"], "usd_reservation")
+        self.assertTrue(all(method["inference"] is None for method in report["methods"].values()))
+
     def test_partial_matrix_preserves_spend_without_missing_cell_zeros(self):
         root = self.write_cell()
         report = report_results(self.root)

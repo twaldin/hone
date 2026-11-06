@@ -1,0 +1,72 @@
+{
+  "schema": "pilot-seeds12-terminal-controller-v10",
+  "unit": "hone-seeds12-10-20261106T021648.service",
+  "launch_head": "32a6f2adc757cbd5b2000e9cac7535cfd7245012",
+  "initial_main_pid": 3385415,
+  "main_pid": 0,
+  "status": "stopped-by-declared-rule",
+  "dispatch_stop": {
+    "cells": [
+      {
+        "method": "plain",
+        "seed": 1,
+        "task": "mbpp"
+      },
+      {
+        "method": "hone",
+        "seed": 1,
+        "task": "hover"
+      }
+    ],
+    "reason": "consecutive-infrastructure-failures"
+  },
+  "attempted_cells": 4,
+  "completed_cells": 2,
+  "infrastructure_failed_cells": 2,
+  "unstarted_cells": 8,
+  "expected_cells": 12,
+  "unit_result": "success",
+  "unit_exit_status": 0,
+  "unit_runtime_seconds": 24549.478,
+  "unit_cpu_seconds": 7407.892,
+  "unit_memory_peak_as_reported": "2.9G",
+  "unit_memory_swap_peak_as_reported": "0B",
+  "terminal_unit": {
+    "Restart": "no",
+    "MainPID": "0",
+    "Result": "success",
+    "NRestarts": "0",
+    "ExecMainCode": "0",
+    "ExecMainStatus": "0",
+    "LoadState": "not-found",
+    "ActiveState": "inactive",
+    "SubState": "dead"
+  },
+  "observed_model_calls": 6138,
+  "observed_reported_tokens": 3471500,
+  "observed_usd_equivalent": 15.744984000000024,
+  "observed_estimated_tokens": 0,
+  "reported_refusals": 0,
+  "reported_hidden_attempts": 0,
+  "reported_usage_missing_calls": 0,
+  "throttle_pause_seconds": 0,
+  "completed_cell_provenance": {
+    "route_hash": "sha256:97208618086a8e7170f8dd26bd24518180e523fddfc4af6ce810cc3e46f21173",
+    "account_pool_hash": "sha256:c95157948a5b83be8e349005855a8d58dacb7f2fbe5eb9eab0260139ff02d97b",
+    "budget_hash": "sha256:c494dae887d36efbe4197c03859cf170f08c8755b242990e1d20e217e62fbe16",
+    "selection_predeclaration_hash": "sha256:de3f06214307d03a41b686029af770782db2f74f5eebf61d1f4b65172199e0b0",
+    "selection_transition_hash": "sha256:246f206edfdd9b0bb9b602108b6bb86a40f3fa0f589c65f5efa1fe9a58c0ad08",
+    "task_hash": "sha256:ee9cd903c9795919ba66ced588af12a4516cce4653a43bf304fe553f74b59f29"
+  },
+  "completed_cell_engine_hashes_identical": true,
+  "final_test_labels_read": false,
+  "reruns": 0,
+  "private_unit_journal": {
+    "path": "/home/tim/agents/assistant/state/lanes/hone-hone-pilot-seeds12-1/unit-journal.log",
+    "sha256": "sha256:70943dcc060b1a076676c41d847e46740f2e629f39f0aa8cc87182f864166bfc",
+    "bytes": 374569
+  },
+  "post_stop_cli_observation": "omp/18.17.0",
+  "failure_attribution": "[INFERENCE] Version drift is consistent with startup failure; the retained error_type alone does not prove each underlying exception.",
+  "recorded_at": "2026-11-06T09:23:26.430Z"
+}

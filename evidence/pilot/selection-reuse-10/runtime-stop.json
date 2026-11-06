@@ -1,0 +1,27 @@
+{
+  "schema": "pilot-post-stop-cli-version-observation-v10",
+  "observed_cli_version": "omp/18.17.0",
+  "command": "omp --version",
+  "required_by_frozen_runtime": "18.16.0",
+  "guard": "pilot/runtime.py:433-435 rejects any different ready-frame version before ModelCalls begins",
+  "observed_failures": [
+    {
+      "task": "mbpp",
+      "seed": 1,
+      "method": "plain",
+      "error_type": "TransportError",
+      "recorded_calls": 0
+    },
+    {
+      "task": "hover",
+      "seed": 1,
+      "method": "hone",
+      "error_type": "TransportError",
+      "recorded_calls": 0
+    }
+  ],
+  "attribution": "[INFERENCE] Installed CLI version drift is consistent with the two startup TransportErrors. Failure receipts retain only the error type, and Gateway stderr is discarded, so the exact per-failure cause is not proven.",
+  "broker_or_omp_changed_by_this_lane": false,
+  "reruns_or_provider_probes_after_stop": 0,
+  "observed_at": "2026-11-06T09:17:12.686Z"
+}

@@ -1,0 +1,28 @@
+{
+  "schema": "pilot-seeds12-authorized-launch-gate-v10",
+  "head": "32a6f2adc757cbd5b2000e9cac7535cfd7245012",
+  "pr": "https://github.com/twaldin/hone/pull/38",
+  "ci": {
+    "conclusion": "success",
+    "run_id": 42147754618,
+    "url": "https://github.com/twaldin/hone/actions/runs/42147754618"
+  },
+  "cross_family_ready": {
+    "head": "32a6f2adc757cbd5b2000e9cac7535cfd7245012",
+    "reviewer_model": "anthropic/claude-opus-5-5",
+    "author_model": "openai-codex/gpt-6.1-sol",
+    "verdict": "READY",
+    "url": "https://github.com/twaldin/hone/pull/38#issuecomment-6675044735"
+  },
+  "declaration_sha256": "sha256:de3f06214307d03a41b686029af770782db2f74f5eebf61d1f4b65172199e0b0",
+  "transition_sha256": "sha256:246f206edfdd9b0bb9b602108b6bb86a40f3fa0f589c65f5efa1fe9a58c0ad08",
+  "admission_source_hashes": {
+    "pilot/__main__.py": "sha256:2003ee4a51f4aa52cf7678486227452c5406c7eebd80963f0071b20ed09bcc97",
+    "pilot/admission.py": "sha256:94018cdfc5f5965fdfdb637fe003f10578a8f81b3fd6fc68349ac1b7b6ed5168",
+    "pilot/search.py": "sha256:8bf99067e6d87a12e124b849285e623e4e631f6707e2708822b8330d3f3ef3cb"
+  },
+  "raw_seed0_replayed_rollouts": 12764,
+  "unit": "hone-seeds12-10-20261106T021648.service",
+  "search_calls_before_gate": 0,
+  "created_at": "2026-11-06T02:16:48.929Z"
+}
