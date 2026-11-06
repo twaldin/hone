@@ -145,6 +145,41 @@ def task_source_ast(source: str, task_name: str) -> str:
 
 TRANSITION_8A_HASH = "sha256:8d6f3298f0e5c0c26b30a32bce491f563e4e424cc4168150b2757b5e6ad3e36a"
 TRANSITION_9_HEAD = "cdb1e75fc76c2c3e44f313208e8f86d92ee50291"
+TRANSITION_9_HASH = "sha256:2e2b7d25ab9e487b82c05a98915295a477b7a220d42aad0a632757ab840d5d76"
+TRANSITION_10_HEAD = "6017e35e0b2f2f8dd72c0cdd8e2bbf94edeaf107"
+
+
+def transition10_baseline(root: Path) -> dict:
+    import hashlib
+    import json
+    declaration = root / "evidence/pilot/source-transition-10.json"
+    if not declaration.exists():
+        return {}
+    sha = lambda data: "sha256:" + hashlib.sha256(data).hexdigest()
+    receipt = json.loads(declaration.read_text())
+    prior_path = root / "evidence/pilot/source-transition-9.json"
+    prior = json.loads(prior_path.read_text())
+    snapshot_path = root / "evidence/pilot/source-snapshot-10.json"
+    snapshot = json.loads(snapshot_path.read_text())
+    if (sha(prior_path.read_bytes()) != TRANSITION_9_HASH
+            or receipt.get("version") != "pilot-selection-transition-v10"
+            or receipt.get("source_head") != TRANSITION_10_HEAD
+            or snapshot.get("source_head") != TRANSITION_10_HEAD
+            or receipt.get("prior_source_transition_hash") != TRANSITION_9_HASH
+            or receipt.get("source_snapshot_hash") != sha(snapshot_path.read_bytes())
+            or receipt.get("predeclaration_hash") != sha((root / "evidence/pilot/predeclaration-10.md").read_bytes())
+            or set(receipt.get("files", {})) != set(prior["files"])):
+        raise ValueError("Selection source transition does not authenticate its baseline")
+    changed = {name for name, hashes in receipt["files"].items() if hashes["before"] != hashes["after"]}
+    if not changed or set(snapshot.get("files", {})) != changed:
+        raise ValueError("Selection source transition snapshot inventory changed")
+    for filename, hashes in receipt["files"].items():
+        baseline = snapshot["files"][filename].encode() if filename in changed else (root / filename).read_bytes()
+        if (hashes["before"] != prior["files"][filename]["after"]
+                or hashes["before"] != sha(baseline)
+                or hashes["after"] != sha((root / filename).read_bytes())):
+            raise ValueError("Selection source transition changed: " + filename)
+    return snapshot["files"]
 
 
 def transition9_baseline(root: Path, prior: dict) -> tuple[dict, dict]:
@@ -153,6 +188,7 @@ def transition9_baseline(root: Path, prior: dict) -> tuple[dict, dict]:
     declaration = root / "evidence/pilot/source-transition-9.json"
     if not declaration.exists():
         return {}, {}
+    selection_baseline = transition10_baseline(root)
     sha = lambda data: "sha256:" + hashlib.sha256(data).hexdigest()
     receipt = json.loads(declaration.read_text())
     snapshot_path = root / "evidence/pilot/source-snapshot-9.json"
@@ -171,12 +207,13 @@ def transition9_baseline(root: Path, prior: dict) -> tuple[dict, dict]:
     if not changed or set(snapshot.get("files", {})) != changed:
         raise ValueError("Dispatch source transition snapshot inventory changed")
     for filename, hashes in receipt["files"].items():
-        baseline = snapshot["files"][filename].encode() if filename in changed else (root / filename).read_bytes()
+        current = selection_baseline[filename].encode() if filename in selection_baseline else (root / filename).read_bytes()
+        baseline = snapshot["files"][filename].encode() if filename in changed else current
         if (hashes["before"] != prior["files"][filename]["after"]
                 or hashes["before"] != sha(baseline)
-                or hashes["after"] != sha((root / filename).read_bytes())):
+                or hashes["after"] != sha(current)):
             raise ValueError("Dispatch source transition changed: " + filename)
-    return snapshot["files"], {
+    return {**selection_baseline, **snapshot["files"]}, {
         "source_transition_hash": sha(declaration.read_bytes()),
         "source_snapshot_hash": receipt["source_snapshot_hash"],
         "predeclaration_hash": receipt["predeclaration_hash"],

@@ -4,7 +4,7 @@ from pathlib import Path
 import tempfile
 import unittest
 
-from pilot.results import align_scores, extract_pair, hierarchical_bootstrap, main, paired_bootstrap, report_results
+from pilot.results import align_scores, extract_pair, hierarchical_bootstrap, main, paired_bootstrap, report_results, report_seeds12, seeds_bootstrap
 
 
 def digest(value):
@@ -78,6 +78,26 @@ class BootstrapTests(unittest.TestCase):
             with self.subTest(args=args), self.assertRaises(ValueError):
                 align_scores(*args)
 
+    def test_seed_bootstrap_resamples_seed_identity_before_paired_instances(self):
+        small = ({"a": 0}, {"a": 1})
+        large = ({str(i): 0 for i in range(9)}, {str(i): 0 for i in range(9)})
+        report = seeds_bootstrap({1: small, 2: large})
+        self.assertEqual(report["delta"], .5)
+        self.assertEqual(report["baseline_score"], 0)
+        self.assertEqual(report["chosen_score"], .5)
+        self.assertEqual(report["ci95"], [0, 1])
+        self.assertEqual(report["seed_weighting"], "equal")
+        self.assertEqual(report["resamples"], 10000)
+        self.assertEqual(report["rng_seed"], 20261109)
+        self.assertEqual(report["percentile_method"], "type7_linear")
+        self.assertEqual(report, seeds_bootstrap({2: large, 1: small}))
+        with self.assertRaises(ValueError):
+            seeds_bootstrap({1: small})
+        with self.assertRaises(ValueError):
+            seeds_bootstrap({0: small, 1: small, 2: large})
+        with self.assertRaises(ValueError):
+            seeds_bootstrap({1: ({"a": 0}, {"b": 1}), 2: large})
+
 
 class ExtractionTests(unittest.TestCase):
     def test_first_seed_last_matching_changed_vector_not_pooling(self):
@@ -149,10 +169,18 @@ class ReportTests(unittest.TestCase):
         self.root = Path(self.tmp.name) / "runs"
         self.root.mkdir()
 
-    def write_cell(self, task="mbpp", method="hone"):
+    def write_cell(self, task="mbpp", method="hone", *, seed=0, runs=None, baseline=None, chosen=None):
         manifest, search, result, evaluations = fixture(task, method)
+        search.update(seed=seed, trajectory=[])
+        result["seed"] = seed
+        if baseline is not None:
+            ids = list(baseline)
+            manifest["identity"]["task"]["selection_ids"] = ids
+            evaluations = [evaluation(search["contract"]["editable_artifact"], list(baseline.values()), ids),
+                           evaluation(search["candidate"], [chosen[row] for row in ids], ids)]
+            search["selection_score"] = result["selection_score"] = sum(chosen.values()) / len(chosen)
         result.update(wall_seconds=12, pauses=1, pause_seconds=2, hidden_attempts=3)
-        root = self.root / task / "0" / method
+        root = (runs or self.root) / task / str(seed) / method
         root.mkdir(parents=True)
         spend = {"schema": "pilot-spend-v1", "status": "complete", "total": {"calls": 4, "tokens": 20, "usd_equivalent": .3},
                  "buckets": {"proposal": {"calls": 1, "tokens": 10, "usd_equivalent": .1},
@@ -278,6 +306,171 @@ class ReportTests(unittest.TestCase):
         self.assertEqual(method["accounting"]["totals"]["hidden_attempts"], 6)
         self.assertEqual(method["inference"]["delta"], .5)
         self.assertEqual(method["inference"]["task_weighting"], "equal")
+
+    def seed_roots(self):
+        roots = [self.root.parent / f"seed{seed}" for seed in (1, 2)]
+        for root in roots:
+            root.mkdir()
+        return roots
+
+    def test_seeds12_equal_weight_and_historical_seed0_never_pooled(self):
+        roots = self.seed_roots()
+        for seed, root in zip((1, 2), roots):
+            for task in ("mbpp", "hover"):
+                ids = ["a"] if task == "mbpp" else [str(i) for i in range(9)]
+                gain = 1 if seed == 1 and task == "mbpp" else 0
+                self.write_cell(task, seed=seed, runs=root, baseline=dict.fromkeys(ids, 0), chosen=dict.fromkeys(ids, gain))
+        self.write_cell()
+        self.write_cell(task="hover")
+        historical = report_results(self.root)
+        report = report_seeds12(*roots, seed0_runs=self.root)
+        hone = report["methods"]["hone"]
+        self.assertEqual(hone["inference"]["delta"], .25)
+        self.assertEqual(hone["inference"]["ci95"], [0, .75])
+        self.assertEqual(hone["inference"]["baseline_score"], 0)
+        self.assertEqual(hone["inference"]["chosen_score"], .25)
+        self.assertEqual(hone["inference"]["seed_weighting"], "equal")
+        self.assertEqual(hone["inference"]["task_weighting"], "equal")
+        self.assertEqual(hone["tasks"]["mbpp"]["inference"]["delta"], .5)
+        self.assertEqual(hone["tasks"]["hover"]["inference"]["delta"], 0)
+        self.assertEqual(hone["spend"]["totals"]["calls"], 16)
+        self.assertEqual(report["per_seed"]["1"]["methods"]["hone"]["inference"]["delta"], .5)
+        self.assertEqual(report["per_seed"]["2"]["methods"]["hone"]["inference"]["delta"], 0)
+        self.assertEqual(report["seed0_historical"]["methods"], historical["methods"])
+        self.assertEqual(report["seed0_historical"]["seed"], 0)
+        self.assertIn("seed 0", report["seed0_historical"]["label"])
+        self.assertIn("unchanged official GEPA", report["seed0_historical"]["historical_context"])
+        self.assertEqual(len(report["cells"]), 12)
+        self.assertEqual(report["matrix_status"], "partial_or_stopped")
+        self.assertIsNone(report["methods"]["gepa"]["inference"])
+
+    def test_stopped_seed_matrix_never_reweights_missing_seed_or_task(self):
+        roots = self.seed_roots()
+        self.write_cell(seed=1, runs=roots[0])
+        self.write_cell(task="hover", seed=1, runs=roots[0])
+        tail_root = self.write_cell(seed=2, runs=roots[1])
+        (tail_root / "search.json").unlink()
+        report = report_seeds12(*roots)
+        self.assertIsNotNone(report["per_seed"]["1"]["methods"]["hone"]["inference"])
+        self.assertIsNone(report["methods"]["hone"]["inference"])
+        self.assertIsNone(report["methods"]["hone"]["tasks"]["mbpp"]["inference"])
+        self.assertIsNone(report["methods"]["hone"]["spend"]["totals"]["calls"])
+        self.assertEqual(report["methods"]["hone"]["spend"]["observed_subtotals"]["calls"], 12)
+        stopped = next(cell for cell in report["cells"] if cell["seed"] == 2 and cell["task"] == "mbpp" and cell["method"] == "hone")
+        self.assertIsNone(stopped["diagnostics"]["gate_passing_candidates_without_complete_selection"])
+
+    def test_duplicate_evaluations_and_started_tail_count_for_unchanged_gepa(self):
+        roots = self.seed_roots()
+        root = self.write_cell(method="gepa", seed=1, runs=roots[0])
+        rows = [json.loads(line) for line in (root / "evaluations.jsonl").read_text().splitlines()]
+        rows.append(rows[1].copy())
+        for row in rows:
+            row["deployment_calls"] = 2
+        calls = [{"call": n, "role": "task", "context": {"arm": "selection:" + rows[(n - 1) // 2]["artifact_hash"]}} for n in range(1, 7)]
+        calls.extend({"call": n, "role": "task", "context": {"arm": "selection:" + rows[1]["artifact_hash"]}} for n in (7, 8))
+        (root / "evaluations.jsonl").write_text("".join(json.dumps(row) + "\n" for row in rows))
+        (root / "calls.jsonl").write_text("".join(json.dumps(call) + "\n" for call in calls))
+        cell = report_seeds12(*roots)["cells"][1]
+        diagnostics = cell["diagnostics"]
+        self.assertEqual(diagnostics["selection_evaluations_of_already_scored_artifacts"], 2)
+        self.assertEqual(diagnostics["observed_already_scored_selection_evaluations"], 2)
+        self.assertEqual(diagnostics["already_scored_evidence"][0]["evaluation_line"], 3)
+        self.assertEqual(diagnostics["already_scored_evidence"][1]["call_lines"], [7, 8])
+        self.assertEqual(diagnostics["gate_count_status"], "not_applicable")
+        self.assertIsNone(diagnostics["gate_passing_candidates_without_complete_selection"])
+
+    def test_gate_passing_candidate_without_complete_selection_explains_budget_tail(self):
+        roots = self.seed_roots()
+        root = self.write_cell(seed=1, runs=roots[0])
+        search = json.loads((root / "search.json").read_text())
+        child = {"prompt": "unselected"}
+        search.update(stop_reason="budget_exhausted", binding_cap="usd", budget_exhaustion="USD cap exhausted",
+                      trajectory=[{"proposal": json.dumps(child), "training_gates": [{"passed": True}]},
+                                  {"proposal": json.dumps(child), "training_gates": [{"passed": True}]}])
+        (root / "search.json").write_text(json.dumps(search))
+        rows = [json.loads(line) for line in (root / "evaluations.jsonl").read_text().splitlines()]
+        rows.append(evaluation(child, [1], ["a"]))
+        for row in rows:
+            row["deployment_calls"] = len(row["scores"])
+        calls = []
+        for row in rows:
+            for _ in row["scores"]:
+                calls.append({"call": len(calls) + 1, "role": "task", "context": {"arm": "selection:" + row["artifact_hash"]}})
+        calls.append({"call": 6, "role": "task", "context": {"arm": "selection:" + digest(child)}})
+        (root / "evaluations.jsonl").write_text("".join(json.dumps(row) + "\n" for row in rows))
+        (root / "calls.jsonl").write_text("".join(json.dumps(call) + "\n" for call in calls))
+        diagnostics = report_seeds12(*roots)["cells"][0]["diagnostics"]
+        self.assertEqual(diagnostics["selection_evaluations_of_already_scored_artifacts"], 0)
+        self.assertEqual(diagnostics["gate_passing_candidates_without_complete_selection"], 1)
+        evidence = diagnostics["gate_passing_missing_selection_evidence"][0]
+        self.assertEqual(evidence["artifact_hash"], digest(child))
+        self.assertEqual(evidence["trajectory_lines"], [1, 2])
+        self.assertEqual(evidence["incomplete_evaluation_lines"], [3])
+        self.assertEqual(evidence["started_tail_call_lines"], [6])
+        self.assertEqual(evidence["binding_cap"], "usd")
+        self.assertEqual(evidence["budget_exhaustion"], "USD cap exhausted")
+
+    def test_missing_call_context_and_truncated_evidence_do_not_claim_zero_duplicates(self):
+        roots = self.seed_roots()
+        root = self.write_cell(seed=1, runs=roots[0])
+        (root / "calls.jsonl").write_text(json.dumps({"call": 1, "role": "task"}) + "\n" + '{"call":')
+        diagnostics = report_seeds12(*roots)["cells"][0]["diagnostics"]
+        self.assertIsNone(diagnostics["selection_evaluations_of_already_scored_artifacts"])
+        self.assertEqual(diagnostics["duplicate_count_status"], "observed_lower_bound")
+        self.assertEqual(diagnostics["observed_already_scored_selection_evaluations"], 0)
+
+    def test_cross_seed_identity_mismatch_and_seed0_inputs_are_rejected(self):
+        roots = self.seed_roots()
+        self.write_cell(seed=1, runs=roots[0])
+        root = self.write_cell(seed=2, runs=roots[1])
+        manifest = json.loads((root / "manifest.json").read_text())
+        manifest["identity"]["route"] = "different"
+        (root / "manifest.json").write_text(json.dumps(manifest))
+        with self.assertRaises(ValueError):
+            report_seeds12(*roots)
+        self.write_cell()
+        with self.assertRaises(ValueError):
+            report_seeds12(self.root, roots[1])
+
+    def test_seeds12_cli_protects_all_raw_roots(self):
+        roots = self.seed_roots()
+        self.write_cell(seed=1, runs=roots[0])
+        out = self.root.parent / "seeds12-report.json"
+        main(["--runs-seed1", str(roots[0]), "--runs-seed2", str(roots[1]), "--out", str(out)])
+        self.assertEqual(json.loads(out.read_text())["seeds"], [1, 2])
+        for root in roots:
+            with self.assertRaises(ValueError):
+                main(["--runs-seed1", str(roots[0]), "--runs-seed2", str(roots[1]), "--out", str(root / "report.json")])
+
+    def test_complete_matrix_can_share_one_dispatch_root(self):
+        for seed in (1, 2):
+            for task in ("mbpp", "hover"):
+                for method in ("hone", "gepa", "plain"):
+                    self.write_cell(task, method, seed=seed)
+        report = report_seeds12(self.root, self.root)
+        self.assertEqual(report["matrix_status"], "complete")
+        self.assertEqual({cell["seed"] for cell in report["cells"]}, {1, 2})
+        self.assertEqual(report["methods"]["plain"]["inference"]["delta"], .5)
+
+    def test_new_matrix_keeps_strict_vectors_even_without_result(self):
+        roots = self.seed_roots()
+        root = self.write_cell(seed=1, runs=roots[0])
+        (root / "result.json").unlink()
+        evaluations = [json.loads(line) for line in (root / "evaluations.jsonl").read_text().splitlines()]
+        evaluations[0]["row_ids"] = ["a", "a"]
+        (root / "evaluations.jsonl").write_text("".join(json.dumps(row) + "\n" for row in evaluations))
+        with self.assertRaises(ValueError):
+            report_seeds12(*roots)
+
+    def test_complete_selection_cache_reuse_is_not_a_missing_gate_candidate(self):
+        roots = self.seed_roots()
+        root = self.write_cell(seed=1, runs=roots[0])
+        search = json.loads((root / "search.json").read_text())
+        search["trajectory"] = [{"proposal": json.dumps(search["candidate"]), "training_gates": [{"passed": True}]}]
+        (root / "search.json").write_text(json.dumps(search))
+        diagnostics = report_seeds12(*roots)["cells"][0]["diagnostics"]
+        self.assertEqual(diagnostics["gate_passing_candidates_without_complete_selection"], 0)
+        self.assertEqual(diagnostics["selection_evaluations_of_already_scored_artifacts"], 0)
 
 
 if __name__ == "__main__":

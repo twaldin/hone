@@ -729,6 +729,10 @@ def search_one(args, pool, env, task_name: str, seed: int, method: str, smoke: b
                     if (ROOT / "evidence/pilot/source-transition-9.json").exists() else None,
                 "dispatch_predeclaration_hash": file_hash(ROOT / "evidence/pilot/predeclaration-9.md")
                     if (ROOT / "evidence/pilot/predeclaration-9.md").exists() else None,
+                "selection_transition_hash": file_hash(ROOT / "evidence/pilot/source-transition-10.json")
+                    if (ROOT / "evidence/pilot/source-transition-10.json").exists() else None,
+                "selection_predeclaration_hash": file_hash(ROOT / "evidence/pilot/predeclaration-10.md")
+                    if (ROOT / "evidence/pilot/predeclaration-10.md").exists() else None,
                 "engine_files": {path: file_hash(ROOT / path) for path in (
                     "pilot/__main__.py", "pilot/runtime.py", "pilot/admission.py", "pilot/search.py", "pilot/spend.py", "optimizer/src/pilot-policy.ts", "optimizer/assets/policy.ts",
                     "optimizer/src/loop.ts", "schema/src/promotion.ts", "package.json", "pnpm-lock.yaml",
@@ -939,7 +943,7 @@ def main():
     parser.add_argument("--adversarial", type=Path, default=ROOT / "evidence/pilot/adversarial-8a")
     parser.add_argument("--out", type=Path)
     parser.add_argument("--task", choices=(*TASKS, "all"), default="all")
-    parser.add_argument("--seed", type=int, default=0)
+    parser.add_argument("--seed", type=int, nargs="+", default=[0])
     args = parser.parse_args()
     configure_nlp(args.cache)
     if args.out is None:
@@ -986,7 +990,7 @@ def main():
         pool, env = environment(args.pool)
         rows = []
         tasks = ("mbpp",) if args.command == "smoke" and args.task == "all" else selected if args.task == "all" else (args.task,)
-        for task, seed, method in product(tasks, (args.seed,), METHODS):
+        for seed, task, method in product(args.seed, tasks, METHODS):
             if dispatch_stop(rows) is not None:
                 break
             args.remaining_pause_seconds = max(0, 6 * 3600 - sum(row.get("pause_seconds", 0) for row in rows))
@@ -1001,7 +1005,7 @@ def main():
         if stopped is not None:
             save(args.out / "stop.json", stopped)
             print(canonical({"dispatch_stop": stopped}), flush=True)
-        save(args.out / "comparison.json", {"runs": rows, "seeds": [args.seed],
+        save(args.out / "comparison.json", {"runs": rows, "seeds": args.seed,
              "dispatch_stop": stopped, "retry_comparison": retry_comparison(totals)})
         seal(args.out)
         if args.command == "smoke" and any(row.get("status") != "completed" for row in rows):

@@ -5,7 +5,7 @@ import tempfile
 import unittest
 from unittest.mock import patch
 
-from pilot.admission import TRANSITION_9_HEAD, identity_source_hash, retained_transport_proof, transition9_baseline, transition_source
+from pilot.admission import TRANSITION_9_HEAD, TRANSITION_10_HEAD, identity_source_hash, retained_transport_proof, transition9_baseline, transition_source
 
 
 def sha(data):
@@ -210,6 +210,50 @@ class TransitionTests(unittest.TestCase):
         self.install_transition9()
         for path in (self.source, self.snapshot9, self.evidence / "predeclaration-9.md",
                      self.evidence / "source-transition-8a.json", self.snapshot):
+            with self.subTest(path=path.name):
+                original = path.read_bytes()
+                path.write_bytes(original + b" ")
+                with self.assertRaises(ValueError):
+                    identity_source_hash(self.root, "pilot/runtime.py")
+                path.write_bytes(original)
+
+    def install_transition10(self):
+        search = self.root / "pilot/search.py"
+        search.write_text("selection = 'fresh'\n")
+        self.receipt["files"]["pilot/search.py"] = {"before": None, "after": sha(search.read_bytes())}
+        self.save()
+        self.install_transition9()
+        prior = self.evidence / "source-transition-9.json"
+        pin = patch("pilot.admission.TRANSITION_9_HASH", sha(prior.read_bytes()))
+        pin.start()
+        self.addCleanup(pin.stop)
+        snapshot = {"source_head": TRANSITION_10_HEAD,
+                    "files": {name: (self.root / name).read_text() for name in self.receipt9["files"]}}
+        self.snapshot10 = self.evidence / "source-snapshot-10.json"
+        self.snapshot10.write_text(json.dumps(snapshot))
+        (self.evidence / "predeclaration-10.md").write_text("reuse selection vectors\n")
+        self.source.write_text("new = 'selection-policy-provenance'\n")
+        search.write_text("selection = 'reused'\n")
+        self.receipt10 = {
+            "version": "pilot-selection-transition-v10", "source_head": TRANSITION_10_HEAD,
+            "prior_source_transition_hash": sha(prior.read_bytes()),
+            "source_snapshot_hash": sha(self.snapshot10.read_bytes()),
+            "predeclaration_hash": sha((self.evidence / "predeclaration-10.md").read_bytes()),
+            "files": {name: {"before": hashes["after"], "after": sha((self.root / name).read_bytes())}
+                      for name, hashes in self.receipt9["files"].items()},
+        }
+        (self.evidence / "source-transition-10.json").write_text(json.dumps(self.receipt10))
+
+    def test_selection_transition_preserves_authenticated_admission_identity(self):
+        self.install_transition10()
+        self.assertEqual(transition_source(self.root, "pilot/runtime.py"), "old = 'answered'\n")
+        self.assertEqual(identity_source_hash(self.root, "pilot/runtime.py"), sha(b"new = 'refusal-aware'\n"))
+        self.assertEqual(identity_source_hash(self.root, "pilot/search.py"), sha(b"selection = 'fresh'\n"))
+
+    def test_selection_transition_rejects_changed_sources_and_declarations(self):
+        self.install_transition10()
+        for path in (self.source, self.root / "pilot/search.py", self.snapshot10,
+                     self.evidence / "predeclaration-10.md", self.evidence / "source-transition-9.json"):
             with self.subTest(path=path.name):
                 original = path.read_bytes()
                 path.write_bytes(original + b" ")

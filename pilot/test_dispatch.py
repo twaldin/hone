@@ -28,7 +28,8 @@ class DispatchTests(unittest.TestCase):
             return row
 
         with ExitStack() as stack:
-            stack.enter_context(patch.object(sys, "argv", ["pilot", "pilot", "--seed", str(seed), "--out", str(out)]))
+            seeds = seed if isinstance(seed, tuple) else (seed,)
+            stack.enter_context(patch.object(sys, "argv", ["pilot", "pilot", "--seed", *map(str, seeds), "--out", str(out)]))
             stack.enter_context(patch.object(cli, "execution_limits"))
             stack.enter_context(patch.object(cli, "load_panel", return_value=("mbpp", "hover")))
             stack.enter_context(patch.object(cli, "machine_proof"))
@@ -44,6 +45,27 @@ class DispatchTests(unittest.TestCase):
                 visited, report, _ = self.dispatch(seed=seed)
                 self.assertEqual(visited, [(task, seed, method) for task in ("mbpp", "hover") for method in cli.METHODS])
                 self.assertIsNone(report["dispatch_stop"])
+
+    def test_seed_pair_runs_serially_in_seed_major_order(self):
+        visited, report, _ = self.dispatch(seed=(1, 2))
+        self.assertEqual(visited, [(task, seed, method) for seed in (1, 2)
+                                   for task in ("mbpp", "hover") for method in cli.METHODS])
+        self.assertEqual(report["seeds"], [1, 2])
+        self.assertIsNone(report["dispatch_stop"])
+
+    def test_pause_allowance_is_not_reset_between_seeds(self):
+        changes = [{"pause_seconds": 20000}] + [{}] * 5 + [{"pause_seconds": 1601}]
+        visited, report, _ = self.dispatch(changes, seed=(1, 2))
+        self.assertEqual(visited[-1], ("mbpp", 2, "hone"))
+        self.assertEqual(report["dispatch_stop"]["reason"], "pause-limit")
+        self.assertEqual(report["dispatch_stop"]["pause_seconds"], 21601)
+        self.assertEqual(len(visited), 7)
+
+    def test_infrastructure_failure_streak_crosses_seed_boundary(self):
+        changes = [{}] * 5 + [{"status": "infrastructure_failure"}] * 2
+        visited, report, _ = self.dispatch(changes, seed=(1, 2))
+        self.assertEqual(len(visited), 7)
+        self.assertEqual(report["dispatch_stop"]["reason"], "consecutive-infrastructure-failures")
 
     def test_hidden_attempt_rate_stops_before_next_cell(self):
         visited, report, out = self.dispatch([{"hidden_attempts": 2}])
