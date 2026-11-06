@@ -81,8 +81,8 @@ The active cap remains 7,200 seconds. Hone's terminal overrun is reported, not r
 | --- | --- | --- | --- | --- | --- | --- | --- | --- |
 | 1 | MBPP | Hone | 12,463.716 | 7,202.193 | 5,261.523 | 0.000 / 0 | 0 / 0 / 0 | active_seconds |
 | 1 | MBPP | Official GEPA | 10,410.028 | 5,607.472 | 4,802.556 | 0.000 / 0 | 0 / 0 / 0 | usd_reservation |
-| 1 | MBPP | Plain | N/A | N/A | 2.061 | 0.000 / 0 | 0 / 0 / 0 | TransportError |
-| 1 | HoVer | Hone | N/A | N/A | 3.034 | 0.000 / 0 | 0 / 0 / 0 | TransportError |
+| 1 | MBPP | Plain | N/A | N/A | 2.061 | 0.000 / 0 | 0 / 0 / 0 | N/A (stop: TransportError) |
+| 1 | HoVer | Hone | N/A | N/A | 3.034 | 0.000 / 0 | 0 / 0 / 0 | N/A (stop: TransportError) |
 | 1 | HoVer | Official GEPA | N/A | N/A | N/A | N/A / N/A | N/A / N/A / N/A | N/A |
 | 1 | HoVer | Plain | N/A | N/A | N/A | N/A / N/A | N/A / N/A / N/A | N/A |
 | 2 | MBPP | Hone | N/A | N/A | N/A | N/A / N/A | N/A / N/A / N/A | N/A |

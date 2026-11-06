@@ -68,5 +68,17 @@
   },
   "post_stop_cli_observation": "omp/18.17.0",
   "failure_attribution": "[INFERENCE] Version drift is consistent with startup failure; the retained error_type alone does not prove each underlying exception.",
+  "startup_priority_correction": {
+    "owned_main_pid": 3385415,
+    "sequence": [
+      "SIGSTOP owned main PID before any cell directory existed",
+      "Unprivileged renice failed with Permission denied",
+      "sudo -n renice -n 10 -p 3385415 succeeded",
+      "SIGCONT same owned main PID; observed main nice 10 before first cell"
+    ],
+    "observed_main_nice_after_correction": 10,
+    "per_thread_priorities_observed": false,
+    "unit_restarted": false
+  },
   "recorded_at": "2026-11-06T09:23:26.430Z"
 }

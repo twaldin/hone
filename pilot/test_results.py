@@ -200,6 +200,22 @@ class ReportTests(unittest.TestCase):
         expected.pop("reporter_sha256")
         self.assertEqual(actual, expected)
 
+    def test_stopped_seeds12_archive_replays_measurements_and_missing_aggregates(self):
+        root = Path(__file__).resolve().parents[1]
+        runs = root / "evidence/pilot/seeds12-search-10"
+        actual = report_seeds12(runs, runs, seed0_runs=root / "evidence/pilot/seed0-search-9")
+        expected = json.loads((root / "evidence/pilot/results-10-seeds12.json").read_text())
+
+        def measurements(value):
+            if isinstance(value, dict):
+                return {key: measurements(item) for key, item in value.items()
+                        if key != "reporter_sha256"}
+            if isinstance(value, list):
+                return [measurements(item) for item in value]
+            return value
+
+        self.assertEqual(measurements(json.loads(json.dumps(actual))), measurements(expected))
+
     def test_real_seed0_diagnostics_remain_beside_stopped_seed_matrix(self):
         root = Path(__file__).resolve().parents[1]
         report = report_seeds12(self.root, self.root, seed0_runs=root / "evidence/pilot/seed0-search-9")
