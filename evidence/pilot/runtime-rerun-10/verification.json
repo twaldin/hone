@@ -5,6 +5,18 @@
   "complete_dependency_lock_matches_admission": true,
   "zero_call_admission": "admission.json",
   "admission_wall_seconds": 507.4,
+  "pinned_throttle_cli": {
+    "broker_status_and_usage_passed": true,
+    "capacity_reason_at_check": null,
+    "model_calls": 0
+  },
+  "unreached_prior_failure_regression": {
+    "failed_before_fix": 1,
+    "passed_after_fix": 1,
+    "current_attempt_remains_unstarted": true,
+    "report_status_is_missing": true,
+    "original_failure_retained_only_in_history_and_provenance": true
+  },
   "dispatcher_smoke": {
     "kind": "actual dispatcher with search boundary simulated as infrastructure failure",
     "first_new_failure_stops_at_three": true,

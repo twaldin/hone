@@ -9,6 +9,7 @@ from unittest.mock import patch
 
 from pilot import __main__ as cli
 from pilot.runtime import digest
+from pilot.results import report_seeds12
 
 
 class InfrastructureRerunTests(unittest.TestCase):
@@ -57,6 +58,14 @@ class InfrastructureRerunTests(unittest.TestCase):
             self.assertEqual(sum(row["pause_seconds"] for row in attempts), sum(row["pause_seconds"] for row in initial))
             sources = json.loads((out / "cell-sources.json").read_text())
             self.assertEqual(sources["mbpp/1/plain"]["attempt"], 1)
-            self.assertEqual(sources["hover/1/hone"]["attempt"], 0)
+            self.assertIsNone(sources["hover/1/hone"]["attempt"])
+            self.assertEqual(sources["hover/1/hone"]["prior_failure_path"], str(prior / "hover/1/hone"))
+            report = report_seeds12(out, out)
+            hover = next(cell for cell in report["cells"]
+                         if (cell["seed"], cell["task"], cell["method"]) == (1, "hover", "hone"))
+            self.assertEqual(hover["status"], "missing")
+            comparison = json.loads((out / "comparison.json").read_text())
+            self.assertNotIn((1, "hover", "hone"),
+                             [(row["seed"], row["task"], row["method"]) for row in comparison["runs"]])
             self.assertEqual(sources["mbpp/2/hone"]["status"], "unstarted")
             cli.verify_bundle(out)

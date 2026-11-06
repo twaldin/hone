@@ -61,12 +61,15 @@ def main():
              "runner_file_hash": cli.file_hash(Path(__file__)), "admission": proof,
              "retained_completed_cells": matrix[:2], "remaining_cells": matrix[2:],
              "initial_consecutive_infrastructure_failures": 2})
-    latest = {(row["seed"], row["task"], row["method"]): row for row in history}
+    latest = {(row["seed"], row["task"], row["method"]): row for row in history[:2]}
     sources = {f"{task}/{seed}/{method}":
                {"attempt": 0, "path": str(prior_root / task / str(seed) / method),
                 "status": latest[seed, task, method]["status"]}
                if (seed, task, method) in latest else {"attempt": None, "path": None, "status": "unstarted"}
                for seed, task, method in matrix}
+    for row in history[2:]:
+        sources[f"{row['task']}/{row['seed']}/{row['method']}"]["prior_failure_path"] = str(
+            prior_root / row["task"] / str(row["seed"]) / row["method"])
     cli.save(args.out / "cell-sources.json", sources)
     stopped = None
     cli.save(args.out / "attempts.json", history)
@@ -100,11 +103,6 @@ def main():
             cli.save(args.out / "stop.json", stopped)
             print(cli.canonical({"dispatch_stop": stopped}), flush=True)
             break
-    for row in history[:4]:
-        destination = args.out / row["task"] / str(row["seed"]) / row["method"]
-        if not destination.exists():
-            shutil.copytree(prior_root / row["task"] / str(row["seed"]) / row["method"], destination)
-            cli.verify_bundle(destination)
     totals = {method: {"hidden_attempt_rate": sum(row["hidden_attempts"] for row in history if row["method"] == method)
                       / max(1, sum(row["calls"] for row in history if row["method"] == method))} for method in cli.METHODS}
     cli.save(args.out / "comparison.json", {"runs": [latest[cell] for cell in matrix if cell in latest],
