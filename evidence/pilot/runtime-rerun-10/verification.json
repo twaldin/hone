@@ -1,0 +1,30 @@
+{
+  "schema": "pilot-infrastructure-rerun-verification-v10",
+  "engine_files_identical_to_two_completed_cells": 12,
+  "official_gepa_or_adapter_changed": false,
+  "complete_dependency_lock_matches_admission": true,
+  "zero_call_admission": "admission.json",
+  "admission_wall_seconds": 507.4,
+  "dispatcher_smoke": {
+    "kind": "actual dispatcher with search boundary simulated as infrastructure failure",
+    "first_new_failure_stops_at_three": true,
+    "new_cells_dispatched": [
+      [
+        1,
+        "mbpp",
+        "plain"
+      ]
+    ],
+    "retained_completed_cells_byte_identical": true,
+    "cumulative_recorded_calls": 6138,
+    "cumulative_pause_seconds": 0,
+    "model_calls": 0,
+    "new_bundle_verifies": true
+  },
+  "regressions": {
+    "command": "pilot/.venv/bin/python -m unittest pilot.test_rerun10 pilot.test_results",
+    "tests": 34,
+    "failures": 0
+  },
+  "new_search_calls_before_addendum_commit": 0
+}

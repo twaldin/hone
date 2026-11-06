@@ -1,0 +1,49 @@
+{
+  "account_domains": {
+    "gmail.com": 2,
+    "purdue.edu": 1
+  },
+  "account_pool_hash": "sha256:c95157948a5b83be8e349005855a8d58dacb7f2fbe5eb9eab0260139ff02d97b",
+  "api_keys_allowed": false,
+  "cli_file_hash": "sha256:1fa4bfb097c688fe73975940459ae171c5ea769f5a35be253896e60030476cb7",
+  "committed_head": "9613d9b1839a1b500677eb7dd36a0fbe06d6ae3e",
+  "cpu_affinity": [
+    6
+  ],
+  "execution_source_hashes": {
+    "pilot/__main__.py": "sha256:2003ee4a51f4aa52cf7678486227452c5406c7eebd80963f0071b20ed09bcc97",
+    "pilot/admission.py": "sha256:94018cdfc5f5965fdfdb637fe003f10578a8f81b3fd6fc68349ac1b7b6ed5168",
+    "pilot/search.py": "sha256:8bf99067e6d87a12e124b849285e623e4e631f6707e2708822b8330d3f3ef3cb"
+  },
+  "final_test_labels_read": false,
+  "gateway_omp_realpath": "/home/tim/worktrees/hone/hone-hone-pilot-seeds12-1/.pilot-cache/omp-18.16.0/node_modules/@oh-my-pi/pi-coding-agent/dist/cli.js",
+  "gateway_requests": 0,
+  "global_omp_broker_config_or_schedule_changed_by_lane": false,
+  "model_calls": 0,
+  "nice": 10,
+  "omp_executable": "/home/tim/worktrees/hone/hone-hone-pilot-seeds12-1/.pilot-cache/omp-18.16.0/node_modules/.bin/omp",
+  "package_lock_file_hash": "sha256:1bb35cc49273a734ff2cfbe41bc7200c48ee0dd34bcd8dcd64dfd77697a430cb",
+  "package_versions": {
+    "pi-ai": "18.16.0",
+    "pi-catalog": "18.16.0",
+    "pi-coding-agent": "18.16.0",
+    "pi-natives": "18.16.0",
+    "pi-utils": "18.16.0",
+    "pi-wire": "18.16.0"
+  },
+  "route_hash": "sha256:97208618086a8e7170f8dd26bd24518180e523fddfc4af6ce810cc3e46f21173",
+  "route_identity": {
+    "api": "anthropic-messages",
+    "endpoint_origin": "https://api.anthropic.com",
+    "local_model_overrides": false,
+    "model": "claude-sonnet-4-6",
+    "oauth_only_session": true,
+    "provider": "anthropic"
+  },
+  "schema": "pilot-pinned-runtime-admission-v10",
+  "selected_panel": [
+    "mbpp",
+    "hover"
+  ],
+  "version": "omp/18.16.0"
+}
