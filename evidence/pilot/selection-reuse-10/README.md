@@ -12,7 +12,7 @@ The corrected loop stores a complete validated selection score vector under the 
 
 ## Real admission and retained evidence
 
-[The CLI proof](admission.json) ran the unchanged `load_panel` through `pilot.main`, selected MBPP + HoVer, and stopped before environment, gateway, or search initialization. It verified CPU 6, nice 10, the sealed seed-0 bundle, and byte-identical official GEPA adapter source. It made zero model calls and loaded no final-test labels.
+[The refreshed CLI proof](admission.json) ran the unchanged `load_panel` through `pilot.main` on committed head `d60d2c2`, selected MBPP + HoVer, and stopped before environment, gateway, or search initialization. It records that head and all three changed execution-source hashes, CPU 6, nice 10, the verified seed-0 bundle, and byte-identical official GEPA adapter source. It made zero model calls and loaded no final-test labels. Replaying the print-only check does not rewrite this retained proof.
 
 Replay that boundary from the repository root:
 
@@ -29,5 +29,9 @@ nice -n 10 taskset -c 6 pilot/.venv/bin/python -m unittest pilot.test_results.Re
 ```
 
 The sealed seed-0 README and report remain unchanged. Their byte-identical report replay requires the frozen reporter from commit `6017e35`; the current reporter has a different `reporter_sha256`.
+
+The [full raw metric replay](metric-replay.json) verified the seed-0 bundle and reproduced all 12,764 retained rollout scores with zero model calls and no final-test labels. This is separate from the report-value regression above.
+
+[Guard CI](ci-guards.json) passed all 287 Python tests with real Docker and official metrics, including duplicate-seed rejection and coordinated search-plus-receipt tamper rejection. The [independent comment audit](comment-audit.json) found no remaining findings or added suppressions. [Resumption](resumption.json) records the explicit review-counter reset after the original stop. Fresh final-head CI and cross-family READY remain prerequisites for search.
 
 No final-test evaluation, seed beyond 2, broker/configuration change, automatic restart, or merge is authorized.

@@ -1,1 +1,18 @@
-{"boundary":"Original load_panel completes; stop before environment, gateway, or search.","elapsed_seconds":571.0400748739485,"execution_limits":[[6],10],"final_test_labels_read":false,"model_calls":0,"official_gepa_adapter_byte_unchanged":true,"schema":"pilot-selection-reuse-launch-proof-v10","search_seeds":[1,2],"seed0_bundle_verified":"evidence/pilot/seed0-search-9","selected_panel":["mbpp","hover"]}
+{
+  "boundary": "Original load_panel completes; stop before environment, gateway, or search.",
+  "committed_head": "d60d2c2d9823c45bc0a83a99a62d8d335174b032",
+  "elapsed_seconds": 437.0048008959275,
+  "execution_limits": [[6], 10],
+  "execution_source_hashes": {
+    "pilot/__main__.py": "sha256:2003ee4a51f4aa52cf7678486227452c5406c7eebd80963f0071b20ed09bcc97",
+    "pilot/admission.py": "sha256:94018cdfc5f5965fdfdb637fe003f10578a8f81b3fd6fc68349ac1b7b6ed5168",
+    "pilot/search.py": "sha256:8bf99067e6d87a12e124b849285e623e4e631f6707e2708822b8330d3f3ef3cb"
+  },
+  "final_test_labels_read": false,
+  "model_calls": 0,
+  "official_gepa_adapter_byte_unchanged": true,
+  "schema": "pilot-selection-reuse-launch-proof-v10",
+  "search_seeds": [1, 2],
+  "seed0_bundle_verified": "evidence/pilot/seed0-search-9",
+  "selected_panel": ["mbpp", "hover"]
+}
