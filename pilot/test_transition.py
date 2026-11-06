@@ -234,6 +234,9 @@ class TransitionTests(unittest.TestCase):
         (self.evidence / "predeclaration-10.md").write_text("reuse selection vectors\n")
         self.source.write_text("new = 'selection-policy-provenance'\n")
         search.write_text("selection = 'reused'\n")
+        search_pin = patch("pilot.admission.TRANSITION_10_SEARCH_HASH", sha(search.read_bytes()))
+        search_pin.start()
+        self.addCleanup(search_pin.stop)
         self.receipt10 = {
             "version": "pilot-selection-transition-v10", "source_head": TRANSITION_10_HEAD,
             "prior_source_transition_hash": sha(prior.read_bytes()),
@@ -260,6 +263,15 @@ class TransitionTests(unittest.TestCase):
                 with self.assertRaises(ValueError):
                     identity_source_hash(self.root, "pilot/runtime.py")
                 path.write_bytes(original)
+
+    def test_selection_transition_rejects_coordinated_search_and_receipt_change(self):
+        self.install_transition10()
+        search = self.root / "pilot/search.py"
+        search.write_text("selection = 'unapproved'\n")
+        self.receipt10["files"]["pilot/search.py"]["after"] = sha(search.read_bytes())
+        (self.evidence / "source-transition-10.json").write_text(json.dumps(self.receipt10))
+        with self.assertRaises(ValueError):
+            identity_source_hash(self.root, "pilot/runtime.py")
 
 
 if __name__ == "__main__":

@@ -1,5 +1,6 @@
 import ast
 import json
+import subprocess
 import sys
 import time
 from pathlib import Path
@@ -54,7 +55,9 @@ proof = {"schema": "pilot-selection-reuse-launch-proof-v10", **observed,
          "elapsed_seconds": time.monotonic() - started, "model_calls": 0,
          "official_gepa_adapter_byte_unchanged": True,
          "seed0_bundle_verified": "evidence/pilot/seed0-search-9",
+         "committed_head": subprocess.check_output(["git", "rev-parse", "HEAD"], cwd=root, text=True).strip(),
+         "execution_source_hashes": {name: cli.file_hash(root / name) for name in
+                                     ("pilot/__main__.py", "pilot/admission.py", "pilot/search.py")},
          "final_test_labels_read": False,
          "boundary": "Original load_panel completes; stop before environment, gateway, or search."}
-cli.save(root / "evidence/pilot/selection-reuse-10/admission.json", proof)
 print(json.dumps(proof, sort_keys=True), flush=True)

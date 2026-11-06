@@ -10,6 +10,6 @@
     "Update the top-level README's stale seed authorization and merged-PR statement."
   ],
   "core_findings": "Selection reuse, full-artifact hashing, candidate-first budget order, restart handling, exact admission chain, run-wide stop accounting, interval hierarchy and untouched official GEPA were accepted.",
-  "deliberate_limit": "The authorized --seed 1 2 command uses distinct seeds. Duplicate-seed CLI validation was a nice-to-have finding and was not added to this policy correction.",
+  "initial_nice_to_have": "Duplicate-seed validation was initially deferred. Subsequent bot triage reproduced the stop-accounting boundary bug, so duplicate seeds are now rejected before startup without changing the authorized --seed 1 2 behavior.",
   "comment_audit": {"needless_docstrings_removed": 2, "added_suppressions": 0, "code_changes": 0}
 }

@@ -945,6 +945,8 @@ def main():
     parser.add_argument("--task", choices=(*TASKS, "all"), default="all")
     parser.add_argument("--seed", type=int, nargs="+", default=[0])
     args = parser.parse_args()
+    if len(set(args.seed)) != len(args.seed):
+        parser.error("--seed values must be unique")
     configure_nlp(args.cache)
     if args.out is None:
         args.out = ROOT / "evidence/pilot" / (

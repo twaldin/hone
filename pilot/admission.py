@@ -147,6 +147,7 @@ TRANSITION_8A_HASH = "sha256:8d6f3298f0e5c0c26b30a32bce491f563e4e424cc4168150b27
 TRANSITION_9_HEAD = "cdb1e75fc76c2c3e44f313208e8f86d92ee50291"
 TRANSITION_9_HASH = "sha256:2e2b7d25ab9e487b82c05a98915295a477b7a220d42aad0a632757ab840d5d76"
 TRANSITION_10_HEAD = "6017e35e0b2f2f8dd72c0cdd8e2bbf94edeaf107"
+TRANSITION_10_SEARCH_HASH = "sha256:8bf99067e6d87a12e124b849285e623e4e631f6707e2708822b8330d3f3ef3cb"
 
 
 def transition10_baseline(root: Path) -> dict:
@@ -168,6 +169,7 @@ def transition10_baseline(root: Path) -> dict:
             or receipt.get("prior_source_transition_hash") != TRANSITION_9_HASH
             or receipt.get("source_snapshot_hash") != sha(snapshot_path.read_bytes())
             or receipt.get("predeclaration_hash") != sha((root / "evidence/pilot/predeclaration-10.md").read_bytes())
+            or receipt.get("files", {}).get("pilot/search.py", {}).get("after") != TRANSITION_10_SEARCH_HASH
             or set(receipt.get("files", {})) != set(prior["files"])):
         raise ValueError("Selection source transition does not authenticate its baseline")
     changed = {name for name, hashes in receipt["files"].items() if hashes["before"] != hashes["after"]}

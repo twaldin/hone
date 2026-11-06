@@ -67,6 +67,13 @@ class DispatchTests(unittest.TestCase):
         self.assertEqual(len(visited), 7)
         self.assertEqual(report["dispatch_stop"]["reason"], "consecutive-infrastructure-failures")
 
+    def test_duplicate_seeds_are_rejected_before_startup(self):
+        with patch.object(sys, "argv", ["pilot", "pilot", "--seed", "1", "1"]), patch.object(
+                cli, "configure_nlp", side_effect=AssertionError("duplicate seeds reached startup")), patch("sys.stderr"):
+            with self.assertRaises(SystemExit) as error:
+                cli.main()
+        self.assertEqual(error.exception.code, 2)
+
     def test_hidden_attempt_rate_stops_before_next_cell(self):
         visited, report, out = self.dispatch([{"hidden_attempts": 2}])
         self.assertEqual(visited, [("mbpp", 0, "hone")])

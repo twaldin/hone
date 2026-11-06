@@ -3,15 +3,15 @@
   "source_head": "6017e35e0b2f2f8dd72c0cdd8e2bbf94edeaf107",
   "prior_source_transition_hash": "sha256:2e2b7d25ab9e487b82c05a98915295a477b7a220d42aad0a632757ab840d5d76",
   "source_snapshot_hash": "sha256:3392c5154615c6a2bd892fe16be4390653f906eda3004df53153204b9e039378",
-  "predeclaration_hash": "sha256:c25328b0e2086e68d5443b48c9f120caf848c5a419a3b4f4bed5c10df1b20944",
+  "predeclaration_hash": "sha256:de3f06214307d03a41b686029af770782db2f74f5eebf61d1f4b65172199e0b0",
   "files": {
     "pilot/__main__.py": {
       "before": "sha256:b3f33177afe94f4c0f6155617fbc62f52d71d8ddb150865869bd0118fcb42290",
-      "after": "sha256:19ef55dde34e56ce229556a34634d8f4cf5482b4dc0c57edf03d7790b5cdd312"
+      "after": "sha256:2003ee4a51f4aa52cf7678486227452c5406c7eebd80963f0071b20ed09bcc97"
     },
     "pilot/admission.py": {
       "before": "sha256:e88381b0cec60b9ed6584e5b2d8d4d4e54ac85851f8a3f079415da65d693867b",
-      "after": "sha256:6d0021888b9f750eb3e9a3a0f9b925153cfa7bff26d0a9fbd39e638450dbb039"
+      "after": "sha256:94018cdfc5f5965fdfdb637fe003f10578a8f81b3fd6fc68349ac1b7b6ed5168"
     },
     "pilot/adversarial.py": {
       "before": "sha256:eb0630056646d1ac4aafd505971582a1c7f56a6d785ff9c9aa4e2cc0724c39fe",
