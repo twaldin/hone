@@ -1,0 +1,21 @@
+{
+  "head": "c2a03cc0ac9f8e03acaef83369d16b071d94442e",
+  "run_id": 42135836030,
+  "url": "https://github.com/twaldin/hone/actions/runs/42135836030",
+  "conclusion": "success",
+  "pilot_unittests": {
+    "tests": 284,
+    "failures": 0,
+    "skipped": 0,
+    "real_docker": true,
+    "official_metrics": true
+  },
+  "provider_receipts": {
+    "passed": 8,
+    "failed": 0,
+    "skipped": 4,
+    "total": 12
+  },
+  "log_sha256": "sha256:3b4f3e6f585d91d880cb55cb0d12b3d8f9a4b910b1fbd6589d5b5205dba8ceaa",
+  "model_calls": 0
+}

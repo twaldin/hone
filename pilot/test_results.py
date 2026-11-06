@@ -192,6 +192,14 @@ class ReportTests(unittest.TestCase):
         (root / "calls.jsonl").write_text("")
         return root
 
+    def test_seed0_archive_replays_all_measurements_and_intervals(self):
+        root = Path(__file__).resolve().parents[1]
+        actual = json.loads(json.dumps(report_results(root / "evidence/pilot/seed0-search-9")))
+        expected = json.loads((root / "evidence/pilot/results-9-seed0.json").read_text())
+        actual.pop("reporter_sha256")
+        expected.pop("reporter_sha256")
+        self.assertEqual(actual, expected)
+
     def test_partial_matrix_preserves_spend_without_missing_cell_zeros(self):
         root = self.write_cell()
         report = report_results(self.root)

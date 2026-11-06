@@ -79,7 +79,7 @@ Without either setting, Hone looks for capsules in `./capsules` under the direct
 
 ## Development optimizer pilot
 
-The authorized [seed-0 development pilot](evidence/pilot/seed0-search-9/README.md) completed all six searches: 18,250 calls and $50.533065-equivalent. No method's equal-weight two-task 95% interval excludes zero. The report separates stochastic same-artifact re-scores from artifact changes and records censored promotion attempts. Seeds 2–3 and final-test evaluation remain unauthorized; PR #37 stays unmerged.
+The authorized [seed-0 development pilot](evidence/pilot/seed0-search-9/README.md) completed all six searches: 18,250 calls and $50.533065-equivalent. No method's equal-weight two-task 95% interval excludes zero. The report separates stochastic same-artifact re-scores from artifact changes and records censored promotion attempts. [Predeclaration 10](evidence/pilot/predeclaration-10.md) authorizes seeds 1 and 2 after the Hone/plain selection-reuse fix. Seed 0 is not pooled with them for Hone or plain. Final-test evaluation and seeds beyond 2 remain out of scope.
 
 [Correction 8a](evidence/pilot/predeclaration-8a.md) fixed native gzip request observation after an infrastructure abort. The unchanged [contract 8](evidence/pilot/predeclaration-8.md) counts terminal provider refusals as zero-score responses, never retries them, and stops on refused-versus-answered request hashes. The final `controls-7b` attempt completed all 16 pairs without restart. IFBench failed its frozen noise gate: envelope 0.117281 exceeds contrast 0.020833. The selected panel is MBPP + HoVer, with no further substitution. Earlier evidence remains unchanged. At that admission handoff, no matrix or merge was authorized.
 

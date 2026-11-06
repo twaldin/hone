@@ -235,8 +235,6 @@ def _selection_diagnostics(loaded: dict, method: str, issues: list[dict]) -> dic
             "counting_rule": "Selection invocations after an archived complete vector for the same artifact; includes provable call-context tails. Gate candidates are distinct artifact hashes. Missing evidence is unknown, not zero. GEPA is measured as archived, not assumed to cache."}
 
 
-
-
 def extract_pair(manifest: dict, search: dict, result: dict, evaluations: list[dict], *, seed: int = 0) -> tuple[tuple[dict, dict] | None, dict]:
     """Extract exactly one archived vector per arm; absent full arms return null."""
     task = result["task"]
@@ -333,7 +331,6 @@ def _method_totals(selected: list[dict]) -> dict:
 
 
 def _report_seed(runs: Path, seed: int, *, diagnostics: bool = False) -> tuple[dict, dict, dict]:
-    """Read archived JSON evidence in one fixed six-cell matrix."""
     runs = Path(runs)
     if not runs.is_dir():
         raise ValueError("runs directory does not exist")

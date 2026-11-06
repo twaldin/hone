@@ -1,4 +1,3 @@
-"""Zero-model launch proof: run from the repository root on CPU 6 at nice 10."""
 import ast
 import json
 import sys
