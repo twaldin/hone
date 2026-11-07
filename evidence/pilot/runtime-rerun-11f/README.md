@@ -21,3 +21,11 @@ Run the full native suite with CPU 6, nice 10, one-thread settings, explicit NLT
 Green CI, fresh zero-call admission and full exact-head cross-family READY precede search. Active scripts differ from 11e only in runtime-directory references. Infrastructure rerun 2 uses one fresh `.pilot-runs/pilot-seeds12-11-rerun2` root: seed 1 then 2, each MBPP then HoVer, each Hone, official GEPA, plain. Preserve per-cell caps and joined safety history, the 35,000-call hard cap and before-cell completion projection, and the 100 GB disk floor.
 
 No per-row retry, partial-cell restart, third campaign, final-test labels, seeds beyond 2, global runtime/broker/config changes, home GUI, Deadlock or merge. Further same-class I/O findings are fixed without handback. GitHub timeouts back off at least 120 seconds and are never pilot failures. Policy questions, different defect classes and declared operational stops still require handback.
+
+## Observed proof
+
+All 345 native tests passed in 355.255 seconds, including every Docker boundary regression and the complete frozen MBPP ranking/noise replay with rows 640/847. The new suite transcript was captured directly, without an artifact read round-trip: 112,525 bytes, SHA-256 `5e0fa1a06f2ec3c24d11b25fd0cd8abdf4d4ed3460b74e9d4ba4580ac86f8916`. All thirteen standalone frozen-container smoke cases passed with retained receipts.
+
+Fresh admission unit `hone-predecl11f-admit-20261107T161822Z.service`, historical PID 2447485, passed in 505.407 seconds on implementation commit `122c98dc7eb30e9f5fdbe90f932a503af9093ade`. Actual CPU affinity was 6 and nice 10. Frozen omp 18.16.0, OAuth-only route/pool and existing admitted HoVer index matched. Its original journal retains 1,808 pass and 2,650 wrong-answer outcomes, with zero infrastructure outcomes, model calls and gateway requests.
+
+Original admission and journal bytes are retained. The unit exited and was collected; terminal `not-found` defaults are not the success proof. `admission.json` records passed=true after all checks. No measured cell has started. Final exact-head CI and full cross-family READY remain required.
