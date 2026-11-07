@@ -634,7 +634,7 @@ os.close(reader)
     def test_completed_queued_frame_is_drained_after_deadline(self):
         functions = "\n\n".join(ast.get_source_segment(verification._WORKER, node)
                                for node in ast.parse(verification._WORKER).body
-                               if isinstance(node, ast.FunctionDef) and node.name in ("_kill", "_supervise"))
+                               if isinstance(node, ast.FunctionDef) and node.name in ("_kill", "_trace", "_deadline_exit", "_supervise"))
         fixture = r'''
 results = []
 frames = [{"results": [{"t": "int", "v": "0x3"}, {"t": "int", "v": "0x4"}]},
@@ -678,7 +678,7 @@ for hidden, frame in [(hidden, frame) for hidden in (False, True) for frame in f
                     "exit": os.waitstatus_to_exitcode(status)})
 print(json.dumps(results), flush=True)
 '''
-        script = "import os,select,signal,time,json\n_WIRE=262144\n" + functions + "\n" + fixture
+        script = "import ctypes,os,select,signal,time,json\n_WIRE=262144\n" + functions + "\n" + fixture
         name = "hone-queued-regression-" + uuid.uuid4().hex
         try:
             result = subprocess.run(program.docker_command(name) + ["-c", script],
@@ -705,6 +705,21 @@ print(json.dumps(results), flush=True)
                     def completed(*args, **kwargs):
                         process = real_popen(*args, **kwargs)
                         process.wait(timeout=10)
+                        real_poll, real_wait, real_kill = process.poll, process.wait, process.kill
+                        hidden = True
+
+                        def wait(*args, **kwargs):
+                            nonlocal hidden
+                            hidden = False
+                            return real_wait(*args, **kwargs)
+
+                        def kill():
+                            nonlocal hidden
+                            hidden = False
+                            return real_kill()
+
+                        process.poll = lambda: None if hidden else real_poll()
+                        process.wait, process.kill = wait, kill
                         return process
 
                     def selector():
@@ -733,10 +748,29 @@ print(json.dumps(results), flush=True)
                     if not expected:
                         self.assertIn("TypeError", receipt["reason"])
 
+    def test_delayed_genuine_sigkill_is_unscored_infrastructure(self):
+        verification.prepare_plan(ADD, "", ADD_TESTS)
+        prefix, script = verification._STAGES["worker"]
+        delay = """import os
+_real_waitid = os.waitid
+os.waitid = lambda kind, pid, flags: None if flags & os.WNOHANG else _real_waitid(kind, pid, flags)
+"""
+        output = "import os, signal\nos.kill(os.getpid(), signal.SIGKILL)"
+        with patch.dict(verification._STAGES, worker=(prefix, delay + script)), \
+                tempfile.TemporaryDirectory() as directory:
+            journal = Path(directory) / "grader.jsonl"
+            with verification.grader_journal(journal):
+                with self.assertRaises(verification.GraderInfrastructureError) as caught:
+                    verification.score_solution(output, ADD, "", ADD_TESTS)
+            receipt = caught.exception.receipt
+            verification.validate_grader_receipt(receipt)
+            self.assertEqual((receipt["outcome"], receipt["score"]), ("nonzero_exit", None))
+            self.assertEqual(receipt["invocations"][-1]["exit_code"], 128 + signal.SIGKILL)
+
     def test_competing_reader_cannot_block_supervisor_deadline_or_exit_drain(self):
         functions = "\n\n".join(ast.get_source_segment(verification._WORKER, node)
                                for node in ast.parse(verification._WORKER).body
-                               if isinstance(node, ast.FunctionDef) and node.name in ("_kill", "_supervise"))
+                               if isinstance(node, ast.FunctionDef) and node.name in ("_kill", "_trace", "_deadline_exit", "_supervise"))
         fixture = r'''
 reader, writer = os.pipe()
 thief = os.open("/proc/self/fd/" + str(writer), os.O_RDONLY | os.O_NONBLOCK)
@@ -780,7 +814,7 @@ print(json.dumps({"stolen": stolen, "captured": captured.hex() if captured is no
 '''
         for case in ("live", "dead"):
             with self.subTest(case=case):
-                script = "import os,select,signal,time,json\n_WIRE=262144\ncase=" + repr(case) + "\n" + functions + "\n" + fixture
+                script = "import ctypes,os,select,signal,time,json\n_WIRE=262144\ncase=" + repr(case) + "\n" + functions + "\n" + fixture
                 name = "hone-reader-race-" + uuid.uuid4().hex
                 try:
                     result = subprocess.run(program.docker_command(name) + ["-c", script],

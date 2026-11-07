@@ -4,6 +4,7 @@ import json
 import os
 import re
 import selectors
+import signal
 import subprocess
 import tempfile
 import time
@@ -366,7 +367,7 @@ _emit(_out, {"gradeable": True, "reason": None, "calls": calls})
 '''
 
 _WORKER = r'''
-import select, signal, time
+import ctypes, select, signal, time
 os.nice(10)
 _payload = _loads(sys.stdin.read())
 _seconds, _code = _payload["seconds"], _payload["code"]
@@ -421,6 +422,23 @@ def _kill(child):
             pass
 
 
+def _trace(request, child, call=ctypes.CDLL(None).ptrace):
+    return call(ctypes.c_ulong(request), ctypes.c_ulong(child), None, None)
+
+
+def _deadline_exit(child):
+    seize, interrupt, event_stop = 0x4206, 0x4207, 128
+    if _trace(seize, child) == 0 and _trace(interrupt, child) == 0:
+        finished = os.waitid(os.P_PID, child, os.WEXITED | os.WSTOPPED | os.WNOWAIT)
+        if finished.si_code == os.CLD_TRAPPED and finished.si_status >> 8 == event_stop:
+            _kill(child)
+            return None
+        if finished.si_code in (os.CLD_EXITED, os.CLD_KILLED, os.CLD_DUMPED):
+            return finished
+    _kill(child)
+    return os.waitid(os.P_PID, child, os.WEXITED | os.WNOWAIT)
+
+
 def _supervise(child, reader, deadline):
     os.set_blocking(reader, False)
     data, eof = b"", False
@@ -428,9 +446,8 @@ def _supervise(child, reader, deadline):
         remaining = deadline - time.monotonic()
         finished = os.waitid(os.P_PID, child, os.WEXITED | os.WNOHANG | os.WNOWAIT)
         if finished is None and remaining <= 0:
-            _kill(child)
-            finished = os.waitid(os.P_PID, child, os.WEXITED | os.WNOWAIT)
-            if finished.si_code == os.CLD_KILLED and finished.si_status == signal.SIGKILL:
+            finished = _deadline_exit(child)
+            if finished is None:
                 return None
         if finished is not None:
             _kill(child)
@@ -511,6 +528,14 @@ def _run(stage: str, payload: dict) -> InvocationResult:
     selector = selectors.DefaultSelector()
     stdout, stderr = bytearray(), bytearray()
     outcome, error, exit_code = "completed", None, None
+
+    def expire():
+        process.kill()
+        code = process.wait()
+        if code == -signal.SIGKILL:
+            raise subprocess.TimeoutExpired("protected grader", seconds)
+        return code
+
     try:
         with tempfile.TemporaryFile() as inputs:
             inputs.write(data)
@@ -527,14 +552,12 @@ def _run(stage: str, payload: dict) -> InvocationResult:
             remaining = deadline - time.monotonic()
             exit_code = process.poll()
             if exit_code is None and remaining <= 0:
-                raise subprocess.TimeoutExpired("protected grader", seconds)
+                exit_code = expire()
             events = selector.select(0 if exit_code is not None else remaining)
             if not events:
                 if exit_code is not None:
                     break
-                if process.poll() is not None:
-                    continue
-                raise subprocess.TimeoutExpired("protected grader", seconds)
+                continue
             for key, _ in events:
                 try:
                     chunk = os.read(key.fd, 8192)
@@ -554,10 +577,10 @@ def _run(stage: str, payload: dict) -> InvocationResult:
         if error is None:
             exit_code = process.poll()
             if exit_code is None:
-                remaining = deadline - time.monotonic()
-                if remaining <= 0:
-                    raise subprocess.TimeoutExpired("protected grader", seconds)
-                exit_code = process.wait(timeout=remaining)
+                try:
+                    exit_code = process.wait(timeout=max(0, deadline - time.monotonic()))
+                except subprocess.TimeoutExpired:
+                    exit_code = expire()
             if exit_code != 0:
                 outcome, error = "nonzero_exit", "Invocation exited nonzero"
     except subprocess.TimeoutExpired:
