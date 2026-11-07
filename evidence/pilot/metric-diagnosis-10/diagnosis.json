@@ -1,0 +1,157 @@
+{
+  "schema": "pilot-offline-metric-diagnosis-v10",
+  "status": "mismatch-located; historical worker failure subtype unresolved",
+  "author_model": "openai-codex/gpt-6.1-sol",
+  "scope": {
+    "model_calls": 0,
+    "grader_or_engine_changes": false,
+    "retained_files_changed": false,
+    "model_retries": 0,
+    "search_or_seed2_launches": 0,
+    "budget_reset": false,
+    "merge": false
+  },
+  "run5_recovery": {
+    "unit": "hone-seeds12-10-offline-scan-4656a54.service",
+    "historical_main_pid": 2494811,
+    "main_pid_now": 0,
+    "exec_main_status": 0,
+    "result": "success",
+    "finished_utc": "2026-11-07T03:47:40Z",
+    "wall_seconds": 3218.256506351987,
+    "checked": 10236,
+    "mismatches": 1,
+    "per_cell": [
+      {
+        "cell": "hover/1/gepa",
+        "checked": 380,
+        "mismatches": 0
+      },
+      {
+        "cell": "hover/1/hone",
+        "checked": 420,
+        "mismatches": 0
+      },
+      {
+        "cell": "mbpp/1/gepa",
+        "checked": 2970,
+        "mismatches": 0
+      },
+      {
+        "cell": "mbpp/1/hone",
+        "checked": 3294,
+        "mismatches": 0
+      },
+      {
+        "cell": "mbpp/1/plain",
+        "checked": 3172,
+        "mismatches": 1
+      }
+    ],
+    "journal_observed": "The scan finished successfully before the lane deadline. The lane failed to consume/report its completion while blocked in an eval wait loop."
+  },
+  "sole_mismatch": {
+    "arm": "training:sha256:6722810f38759c00ffae683890e2535059015b12c84ced0adad983380abb5db2",
+    "candidate": "sha256:6722810f38759c00ffae683890e2535059015b12c84ced0adad983380abb5db2",
+    "cell": "mbpp/1/plain",
+    "evaluation_path": "evidence/pilot/seeds12-search-10-rerun1/raw/mbpp/1/plain/evaluations.jsonl",
+    "event": "mismatch",
+    "exception": null,
+    "expected": 0.0,
+    "global_score_ordinal_1based": 8502,
+    "jsonl_line_1based": 47,
+    "output_sha256": "abff8eae1323b36fa2aa9732bacb3d7e1e6c5137857752dc966a90a85ec34af6",
+    "partition": "training",
+    "record_start_checked": 8498,
+    "replayed": 1.0,
+    "row_id": "mbpp:train:720",
+    "seconds": 0.3432231252081692,
+    "vector_index_0based": 3
+  },
+  "counter_semantics": {
+    "matching_validated_prefix_original_checked_variable": 8498,
+    "scores_computed_through_failed_vector": 8506,
+    "first_bad_scalar_ordinal_1based": 8502,
+    "entire_diagnostic_checked": 10236,
+    "original_uninstrumented_failure_position": "not logged; cannot prove its historical location. This complete diagnostic reproduces the same exception condition with exactly one differing scalar."
+  },
+  "scope_of_affected_scores": {
+    "selection_rows_checked_by_cell": {
+      "hover/1/gepa": 300,
+      "hover/1/hone": 300,
+      "mbpp/1/gepa": 1530,
+      "mbpp/1/hone": 630,
+      "mbpp/1/plain": 2340
+    },
+    "all_retained_selection_scores_match": true,
+    "only_affected_partition": "training",
+    "training_vector_length": 8,
+    "direct_selection_delta_change": 0,
+    "search_feedback_implication": "Plain passes training scores and traces to the proposer (pilot/search.py:200-212). A retrospective scalar replacement cannot recover the counterfactual search path."
+  },
+  "repetitions": {
+    "counts": {
+      "1.0": 200
+    },
+    "event": "finished",
+    "model_calls": 0,
+    "retained_files_changed": false,
+    "scoring_changes": false,
+    "subprocesses": {
+      "docker": 402
+    },
+    "trials": 200,
+    "wall_seconds": 41.47313687414862,
+    "fresh_worker_per_trial": true,
+    "trusted_plans": 1,
+    "worker_invocations": 200,
+    "nonzero_exits": 0,
+    "timeouts_or_other_none_returns": 0,
+    "stderr_frames": 0,
+    "distinct_worker_stdout_frames": 1,
+    "intrinsic_nondeterminism_reproduced": false,
+    "limit": "200 passes do not prove determinism or rule out rare/correlated load-dependent failures; no deliberately injected failures, load changes or grader edits."
+  },
+  "cause": {
+    "proven": "One retained MBPP/plain seed1 task720 training score0 is not reproduced; all other10235 retained scalars matched in the complete diagnostic. Identical code was stored as1 five times elsewhere. Correct tuple-append code passes all three unchanged assertions and200 current fresh workers.",
+    "leading_hypothesis": "A transient protected-worker or frame-processing failure was converted to0 by verification.py:391-414. The old producer retained neither worker exit status, stderr, timeout nor frame, so this historical subtype is not proven.",
+    "less_supported": [
+      "Producer-side score/output association error: no evidence; recorder stores evaluate() scores and outputs directly with the same row order (pilot/__main__.py:694-712; pilot/tasks.py:315-357).",
+      "Intrinsic mathematical task/input nondeterminism: not reproduced in200 trials; code only appends a dict to a tuple; fixed literal inputs and expected values."
+    ],
+    "ruled_out_for_reproduced_failure": [
+      "ENOSPC truncation of a completed cell: all254 source hashes match, only damaged HoVer/plain has an invalid call tail and empty manifest, and all five completed-cell writes predate22:36Z.",
+      "HoVer retrieval drift: seven corpus/index payload hashes match admitted receipt, receipt matches retained manifest, JSON/NPY structure checks pass, and replay scores retained passages without querying retrieval.",
+      "OMP path difference: offline scorer subprocesses are only Docker, with the recorded pinned image; four scoring-source hashes match.",
+      "Post-hoc report arithmetic: disagreement is in a raw training scalar before report aggregation."
+    ]
+  },
+  "infrastructure_allowance": {
+    "classification": "ENOSPC at22:37Z fits the assistant-proven external root-filesystem exhaustion22:36-22:42Z; infrastructure abort, not a measured gate failure.",
+    "remaining_number": 2,
+    "basis": "predeclaration-10-addendum-1.md:3 explicitly extends predeclaration7 allowance to this campaign; rerun1 consumed.",
+    "automatic_permission": false,
+    "constraints": "Predeclaration10:48 and addendum1:48 prohibit automatic/selective restarts. Missing final response may have been a refusal; retain prefix/unknown usage and do not silently reset a cell budget. Changed-metric/cohort predeclaration11 is not an identical-contract infra rerun. No allowance consumed by offline diagnostics."
+  },
+  "predeclaration11_options": [
+    {
+      "option": "Keep all rows; add durable grader outcome receipts and distinguish infrastructure failure from incorrect output before new measurement",
+      "recommendation": "first choice given stable task720 repetitions",
+      "cost": "No extra model calls for recording itself. Requires a future authorized code/policy change, boundary verification and admission. Treating former zeroes as infrastructure changes the measurement contract and may increase censored/aborted cells; fresh matched measurement would need separate pool authorization. Historical missing status cannot be recovered."
+    },
+    {
+      "option": "Three independent worker grades per fixed generated output, aggregate with a predeclared majority rule",
+      "cost": "About3x candidate-worker invocations, no extra generation calls for those same outputs. More CPU/active time reduces search under unchanged7200-active-second caps. Changes the metric and requires new calibration/admission; correlated infrastructure errors can defeat majority voting. Refusals stay0 and are not retried."
+    },
+    {
+      "option": "Exclude task720 from MBPP training under a frozen quarantine rule",
+      "cost": "Training374 to373, selection90 unchanged. Filtering costs no model calls, but changes proposal feedback and the benchmark cohort, requires new admission/matched searches and prevents pooling with predecl10. Does not address arbitrary worker failures. Not supported by200 stable repetitions as a task-specific remedy."
+    },
+    {
+      "option": "Stop and publish predecl10 as a stopped exploratory pilot",
+      "cost": "No further pool or grader use. Sacrifices the12-cell development comparison; allseed2 cells stay unstarted and primary aggregates unavailable."
+    }
+  ],
+  "recommendation": "Do not replace the retained0, quarantine task720 or waive the failed checker on current evidence. Stop now. Choose a predeclaration11 policy separately, prioritizing durable grader outcomes; do not launch anything under this diagnostic grant.",
+  "future_pool_cost_limit": "Any changed-policy matched search campaign needs fresh authorization. This diagnostic did not measure that cost; the existing12-cell search ceilings were$120-equivalent/144million charged tokens, not a usage forecast or invoice."
+}

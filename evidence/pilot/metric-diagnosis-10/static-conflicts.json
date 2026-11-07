@@ -1,0 +1,109 @@
+{
+  "all254_source_hashes_match": true,
+  "evaluations": [
+    {
+      "cell": "hover/1/gepa",
+      "records": 11,
+      "scores": 380,
+      "mtime": "2026-11-06T19:19:45.406815+00:00",
+      "bytes": 4275373,
+      "newline_terminated": true
+    },
+    {
+      "cell": "hover/1/hone",
+      "records": 14,
+      "scores": 420,
+      "mtime": "2026-11-06T16:48:24.584888+00:00",
+      "bytes": 4726171,
+      "newline_terminated": true
+    },
+    {
+      "cell": "hover/1/plain",
+      "records": 14,
+      "scores": 404,
+      "mtime": "2026-11-06T22:08:32.047180+00:00",
+      "bytes": 4624941,
+      "newline_terminated": true
+    },
+    {
+      "cell": "mbpp/1/gepa",
+      "records": 197,
+      "scores": 2970,
+      "mtime": "2026-11-06T08:59:19.511750+00:00",
+      "bytes": 549053,
+      "newline_terminated": true
+    },
+    {
+      "cell": "mbpp/1/hone",
+      "records": 316,
+      "scores": 3294,
+      "mtime": "2026-11-06T06:00:04.946156+00:00",
+      "bytes": 731025,
+      "newline_terminated": true
+    },
+    {
+      "cell": "mbpp/1/plain",
+      "records": 130,
+      "scores": 3172,
+      "mtime": "2026-11-06T14:58:44.759216+00:00",
+      "bytes": 649847,
+      "newline_terminated": true
+    }
+  ],
+  "identical_row_output_score_conflicts": [
+    {
+      "row_id": "mbpp:train:720",
+      "output_sha256": "abff8eae1323b36fa2aa9732bacb3d7e1e6c5137857752dc966a90a85ec34af6",
+      "occurrences": [
+        {
+          "cell": "mbpp/1/gepa",
+          "line": 89,
+          "index": 6,
+          "score": 1.0,
+          "candidate": "sha256:d237b98a26759eb600e59e310641cd0e7150cb46aae73733190492b0af69c3a8",
+          "arm": "training:sha256:d237b98a26759eb600e59e310641cd0e7150cb46aae73733190492b0af69c3a8"
+        },
+        {
+          "cell": "mbpp/1/gepa",
+          "line": 177,
+          "index": 5,
+          "score": 1.0,
+          "candidate": "sha256:05d670caf710edfc6484cb11a875d05d16965ad9ced13e693a65520e0300cc2a",
+          "arm": "training:sha256:05d670caf710edfc6484cb11a875d05d16965ad9ced13e693a65520e0300cc2a"
+        },
+        {
+          "cell": "mbpp/1/hone",
+          "line": 109,
+          "index": 3,
+          "score": 1.0,
+          "candidate": "sha256:55ce6835c4571021bf712efa6f3eb527c1dbd8c2ff7db0df15c8833dfd686e7b",
+          "arm": "training:sha256:55ce6835c4571021bf712efa6f3eb527c1dbd8c2ff7db0df15c8833dfd686e7b"
+        },
+        {
+          "cell": "mbpp/1/hone",
+          "line": 110,
+          "index": 3,
+          "score": 1.0,
+          "candidate": "sha256:55ce6835c4571021bf712efa6f3eb527c1dbd8c2ff7db0df15c8833dfd686e7b",
+          "arm": "training:sha256:55ce6835c4571021bf712efa6f3eb527c1dbd8c2ff7db0df15c8833dfd686e7b"
+        },
+        {
+          "cell": "mbpp/1/hone",
+          "line": 111,
+          "index": 3,
+          "score": 1.0,
+          "candidate": "sha256:8faf889768dad6e09bfb6873c6edba43ade4846ba1f9cb50c9a55f79fb48aa4e",
+          "arm": "training:sha256:8faf889768dad6e09bfb6873c6edba43ade4846ba1f9cb50c9a55f79fb48aa4e"
+        },
+        {
+          "cell": "mbpp/1/plain",
+          "line": 47,
+          "index": 3,
+          "score": 0.0,
+          "candidate": "sha256:6722810f38759c00ffae683890e2535059015b12c84ced0adad983380abb5db2",
+          "arm": "training:sha256:6722810f38759c00ffae683890e2535059015b12c84ced0adad983380abb5db2"
+        }
+      ]
+    }
+  ]
+}

@@ -1,0 +1,49 @@
+{
+  "admitted_hashes_match": true,
+  "files": [
+    {
+      "file": "wiki.abstracts.2017.tar.gz",
+      "sha256": "744183e61af986bde9b25c880b59c1502618a8b673671e189cbc0ee684fceb42",
+      "bytes": 608448121
+    },
+    {
+      "file": "wiki.abstracts.2017.jsonl",
+      "sha256": "c006527c7c600f85ed594afa36d2a34d0598996405f560474227738342463724",
+      "bytes": 1780742620
+    },
+    {
+      "file": "bm25s_retriever/data.csc.index.npy",
+      "sha256": "66574350c13aaab3e0573d8db5331852b185970de0c1fdf2b151e38a5059da2d",
+      "bytes": 527289964,
+      "npy_header_and_size": "passed"
+    },
+    {
+      "file": "bm25s_retriever/indices.csc.index.npy",
+      "sha256": "ade1a43143a12df60712e44001de789f5e8df6629c3673f988810c49bc6770a1",
+      "bytes": 527289964,
+      "npy_header_and_size": "passed"
+    },
+    {
+      "file": "bm25s_retriever/indptr.csc.index.npy",
+      "sha256": "6ded75207cbfaf340339b1e8d9ddad0a1829975460df87a469e137fd672c19a5",
+      "bytes": 10198552,
+      "npy_header_and_size": "passed"
+    },
+    {
+      "file": "bm25s_retriever/params.index.json",
+      "sha256": "7d61f293719da341d547cc5b6c991d200b5b58aa7890dea8f3b6401fe5c14a3c",
+      "bytes": 225,
+      "json_parse": "passed",
+      "json_type": "dict"
+    },
+    {
+      "file": "bm25s_retriever/vocab.index.json",
+      "sha256": "788eb76beab87d1c3511485f23759582bf98f5295d22d6865d7bf85b5b447bbc",
+      "bytes": 54154918,
+      "json_parse": "passed",
+      "json_type": "dict"
+    }
+  ],
+  "rebuilt_index": false,
+  "model_calls": 0
+}

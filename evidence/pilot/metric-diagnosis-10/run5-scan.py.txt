@@ -1,0 +1,121 @@
+import collections
+import hashlib
+import json
+import os
+from pathlib import Path
+import sys
+import time
+
+from pilot import __main__ as cli
+from pilot import verification
+from pilot.tasks import load_task, score_output
+
+ROOT = Path('/home/tim/worktrees/hone/hone-hone-pilot-seeds12-1')
+RAW = ROOT / 'evidence/pilot/seeds12-search-10-rerun1/raw'
+OUT = Path('/home/tim/agents/assistant/state/lanes/hone-hone-pilot-seeds12-1/offline-score-diagnosis.jsonl')
+assert not OUT.exists()
+assert os.sched_getaffinity(0) == {6} and os.getpriority(os.PRIO_PROCESS, 0) == 10
+started = time.monotonic()
+observed_runs = []
+subprocesses = collections.Counter()
+
+
+def audit(event, args):
+    if event == 'subprocess.Popen':
+        assert Path(args[0]).name == 'docker', 'Offline diagnostic forbids non-Docker subprocesses'
+        subprocesses['docker'] += 1
+    if event in {'urllib.Request', 'socket.connect'}:
+        raise RuntimeError('Offline diagnostic forbids Python network access')
+
+
+def observe(frame, event, result):
+    if event == 'return' and frame.f_code is verification._run.__code__:
+        observed_runs.append({'prefix': frame.f_locals['prefix'],
+                              'seconds_limit': frame.f_locals['seconds'],
+                              'returned_none': result is None,
+                              'exit_code': None if result is None else result[0],
+                              'stdout': None if result is None else result[1].decode(errors='replace'),
+                              'payload': json.loads(frame.f_locals['payload'])})
+
+
+def emit(row):
+    with OUT.open('a') as stream:
+        stream.write(json.dumps(row, sort_keys=True) + '\n')
+        stream.flush()
+
+
+sys.addaudithook(audit)
+sys.setprofile(observe)
+cli.configure_nlp(ROOT / '.pilot-cache')
+cli.verify_bundle(RAW)
+cells = json.loads((RAW / 'comparison.json').read_text())['runs']
+assert len(cells) == 5 and all(cell['status'] == 'completed' for cell in cells)
+paths = sorted(RAW / cell['task'] / str(cell['seed']) / cell['method'] / 'evaluations.jsonl' for cell in cells)
+assert sum(len(json.loads(line)['scores']) for path in paths for line in path.read_text().splitlines()) == 10236
+emit({'event': 'start', 'cells': [str(path.parent.relative_to(RAW)) for path in paths],
+      'expected_scores': 10236, 'model_calls': 0, 'grader_changes': False,
+      'original_production_files_changed': False, 'raw_bundle': json.loads((RAW / 'bundle.json').read_text())['bundle_hash']})
+tasks = {}
+checked = 0
+matching_record_prefix = 0
+original_first_failed_record = None
+for path in paths:
+    cli.verify_bundle(path.parent)
+    cell = str(path.parent.relative_to(RAW))
+    manifest = json.loads((path.parent / 'manifest.json').read_text())
+    name = manifest['identity']['task']['task']
+    if name not in tasks:
+        tasks[name] = load_task(name, ROOT / '.pilot-cache')
+    task = tasks[name]
+    assert task.manifest == manifest['identity']['task'], 'Original replay resource-identity guard'
+    rows = {row['id']: row for row in task.train + task.selection}
+    cell_checked = 0
+    cell_mismatches = 0
+    emit({'event': 'cell_start', 'cell': cell, 'resource_identity_matches': True, 'global_checked': checked})
+    print(json.dumps({'event': 'cell_start', 'cell': cell, 'global_checked': checked}), flush=True)
+    for lineno, text in enumerate(path.read_text().splitlines(), 1):
+        record = json.loads(text)
+        assert not record.get('refusals'), 'All retained completed-cell refusal lists are empty'
+        assert len(record['row_ids']) == len(record['outputs']) == len(record['scores'])
+        record_start = checked
+        record_mismatches = []
+        for index, (row_id, output, expected) in enumerate(zip(record['row_ids'], record['outputs'], record['scores'], strict=True)):
+            observed_runs.clear()
+            error = None
+            before = time.monotonic()
+            try:
+                actual = score_output(task, rows[row_id], output)
+            except ValueError as exc:
+                actual = 0.0
+                error = repr(exc)
+            checked += 1
+            cell_checked += 1
+            if actual != expected:
+                cell_mismatches += 1
+                mismatch = {'event': 'mismatch', 'cell': cell, 'evaluation_path': str(path.relative_to(ROOT)),
+                            'jsonl_line_1based': lineno, 'vector_index_0based': index, 'row_id': row_id,
+                            'candidate': record.get('artifact_hash'), 'arm': record.get('arm'), 'partition': record.get('partition'),
+                            'expected': expected, 'replayed': actual, 'global_score_ordinal_1based': checked,
+                            'record_start_checked': record_start, 'output_sha256': hashlib.sha256(output.encode()).hexdigest(),
+                            'seconds': time.monotonic() - before, 'exception': error,
+                            'protected_invocations': list(observed_runs)}
+                if name == 'mbpp':
+                    mismatch['trusted_plan'] = verification.prepare_plan(rows[row_id]['reference_code'], rows[row_id]['test_setup_code'], rows[row_id]['test_list'])
+                emit(mismatch)
+                record_mismatches.append(index)
+                print(json.dumps({key: value for key, value in mismatch.items() if key not in {'protected_invocations', 'trusted_plan'}}), flush=True)
+        if record_mismatches and original_first_failed_record is None:
+            original_first_failed_record = {'cell': cell, 'line': lineno, 'matching_record_prefix_scores': matching_record_prefix,
+                                            'scores_computed_through_failed_record': checked, 'mismatched_indices': record_mismatches}
+            emit({'event': 'original_replay_would_stop', **original_first_failed_record})
+        if original_first_failed_record is None:
+            matching_record_prefix += len(record['scores'])
+    emit({'event': 'cell_end', 'cell': cell, 'checked': cell_checked, 'mismatches': cell_mismatches})
+    print(json.dumps({'event': 'cell_end', 'cell': cell, 'checked': cell_checked, 'mismatches': cell_mismatches}), flush=True)
+sys.setprofile(None)
+assert checked == 10236
+cli.verify_bundle(RAW)
+emit({'event': 'finished', 'checked': checked, 'original_first_failed_record_in_this_diagnostic': original_first_failed_record,
+      'wall_seconds': time.monotonic() - started, 'subprocesses': dict(subprocesses), 'model_calls': 0,
+      'raw_bundle_unchanged': True, 'search_launched': False, 'grader_or_scoring_changes': False})
+print(json.dumps({'event': 'finished', 'checked': checked, 'wall_seconds': time.monotonic() - started}), flush=True)
