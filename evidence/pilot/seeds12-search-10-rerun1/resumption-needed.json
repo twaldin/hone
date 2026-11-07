@@ -1,0 +1,32 @@
+{
+  "schema": "pilot-enospc-resumption-boundary-v10",
+  "new_search_authorized_by_this_record": false,
+  "primary_blocker": {
+    "kind": "protected-metric-replay-disagreement",
+    "error": "Replay metric disagrees with a retained evaluation",
+    "source_location": "pilot/__main__.py:911",
+    "mismatch_location_and_cause": "unresolved",
+    "retries_or_grader_changes_after_failure": 0
+  },
+  "infrastructure_reruns_consumed": 1,
+  "maximum_infrastructure_reruns": 2,
+  "retained_completed_producer_searches": 5,
+  "damaged_cell": "hover/1/plain",
+  "recorded_partial_usd_equivalent": 9.407745,
+  "unpersisted_response_outcome_and_usage": "unknown; possible refusal; never silently retry",
+  "unstarted_cells": [
+    "mbpp/2/hone", "mbpp/2/gepa", "mbpp/2/plain",
+    "hover/2/hone", "hover/2/gepa", "hover/2/plain"
+  ],
+  "why_no_automatic_restart": [
+    "The metric replay disagreement is a substantive unresolved validity blocker",
+    "The frozen dispatcher refuses to restart an existing output root",
+    "The damaged cell has already consumed at least $9.407745-equivalent, not a zero-call startup prefix",
+    "Its search state and final receipt are incomplete; a fresh full cap or reconstructed cache would change the declared accounting or resume policy",
+    "The last response might be a refusal and cannot be silently retried"
+  ],
+  "question": "Authorize a narrow offline diagnostic to locate and explain the first retained-score replay disagreement, without model calls or grader changes, or stop this pilot?",
+  "recommendation": "Authorize offline diagnosis only. Preserve all raw evidence and keep the damaged cell censored. Do not start seed2, reset budgets or retry the damaged cell until validity and partial accounting have explicit rulings.",
+  "global_omp_broker_configuration_or_update_schedule_changes_authorized": false,
+  "merge_authorized": false
+}
