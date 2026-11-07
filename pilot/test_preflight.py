@@ -2,6 +2,7 @@ import argparse
 from contextlib import contextmanager, redirect_stdout
 from io import StringIO
 import json
+import os
 from pathlib import Path
 from types import SimpleNamespace
 import tempfile
@@ -9,13 +10,14 @@ import unittest
 from unittest.mock import Mock, patch
 
 from pilot.__main__ import TASKS, audit_mbpp_measurement, controls as measured_controls, evaluator_identity, file_hash, load_panel, main, machine_proof, offline_adversarial, replay, reuse_mbpp, save, seal
-from pilot.controls import ControlsFailed, PAIRS, P_CONTROL_SEED, representative_rows
+from pilot.controls import ControlsFailed, NEGATIVE_PROBE, PAIRS, P_CONTROL_SEED, representative_rows
 from pilot.runtime import ROOT, CallFailed, TransportError, append_json, digest
 from pilot.tasks import Task
 from pilot.test_adversarial import admission_fixture, fixture_tasks
 from pilot.admission import MBPP_FILES, mbpp_source_contract, text_admission
 from pilot import tasks as task_module
 from pilot import hover
+from pilot import verification
 
 
 def run_controls(args, *transport):
@@ -366,6 +368,99 @@ class PreflightTests(unittest.TestCase):
                 replay(argparse.Namespace(out=out, cache=out / "cache"))
             self.assertEqual(json.loads(stream.getvalue())["replayed_rollouts"], 1)
             self.assertEqual(json.loads(stream.getvalue())["model_calls"], 0)
+
+
+@unittest.skipUnless(os.environ.get("PILOT_DOCKER_TESTS") == "1", "Parent-controlled real Docker smoke")
+class DockerRetainedMBPPAdmissionTests(unittest.TestCase):
+    def test_frozen_candidate_faults_score_zero_and_full_retained_admission_passes(self):
+        self.enterContext(patch.dict(verification._PLANS, clear=True))
+        for name in ("environment", "create_pool", "calls_for", "open_gateway"):
+            self.enterContext(patch("pilot.__main__." + name, side_effect=AssertionError(
+                "Retained admission must not initialize accounts or call models")))
+        source = ROOT / "evidence/pilot/mbpp-readmission-4a"
+        frozen = json.loads((source / "mbpp/controls.json").read_text())
+        evaluations = [json.loads(line) for line in (source / "mbpp/evaluations.jsonl").read_text().splitlines()]
+        naive = next(record for record in evaluations if record["control"] == "naive")
+        self.assertEqual(naive["row_ids"], frozen["rows"])
+        self.assertEqual(naive["outputs"], frozen["controls"]["naive"]["outputs"])
+        self.assertEqual(naive["scores"], frozen["controls"]["naive"]["scores"])
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            with verification.grader_journal(root / "preparation.jsonl", purpose="retained-admission-preparation"):
+                task = task_module.load_task("mbpp", ROOT / ".pilot-cache")
+            self.assertTrue(task.manifest["development_only"])
+            self.assertFalse(task.manifest["scored_final_tests_loaded"])
+            self.assertEqual((len(task.train), len(task.selection)), (374, 90))
+            rows = {row["id"]: row for row in task.train}
+            self.assertEqual([row["id"] for row in representative_rows(task)], frozen["rows"])
+            faults_path = root / "candidate-faults.jsonl"
+            with verification.grader_journal(faults_path, purpose="retained-candidate-faults"):
+                for row_id in ("mbpp:train:640", "mbpp:train:847"):
+                    with self.subTest(row_id=row_id):
+                        index = naive["row_ids"].index(row_id)
+                        self.assertEqual(naive["scores"][index], 0.0)
+                        self.assertEqual(task_module.score_output(task, rows[row_id], naive["outputs"][index]), 0.0)
+            faults = [record for line in faults_path.read_text().splitlines()
+                      if (record := json.loads(line)).get("event") == "grader-outcome"]
+            self.assertEqual([record["context"]["row_id"] for record in faults],
+                             ["mbpp:train:640", "mbpp:train:847"])
+            for record in faults:
+                verification.validate_grader_receipt(record)
+                self.assertEqual((record["outcome"], record["score"]), ("wrong_answer", 0.0))
+                self.assertEqual((record["invocations"][-1]["stage"], record["invocations"][-1]["outcome"]),
+                                 ("worker", "completed"))
+            admission_path = root / "retained-admission.jsonl"
+            with verification.grader_journal(admission_path, purpose="retained-admission"):
+                control, receipt = reuse_mbpp(task)
+            self.assertEqual(control, frozen)
+            self.assertTrue(control["ranking_passed"])
+            self.assertTrue(control["noise_passed"])
+            self.assertEqual(receipt["kind"], "unchanged-mbpp-admission")
+            self.assertEqual(receipt["source_control_hash"], digest(frozen))
+            self.assertFalse(receipt["controls_rerun"])
+            self.assertEqual(receipt["model_calls"], 0)
+            replayed = [record for line in admission_path.read_text().splitlines()
+                        if (record := json.loads(line)).get("event") == "grader-outcome"]
+            self.assertEqual(len(replayed), sum(len(record["scores"]) for record in evaluations))
+            scored = []
+            for record in replayed:
+                verification.validate_grader_receipt(record)
+                if record["context"].get("stage") != NEGATIVE_PROBE:
+                    self.assertIn(record["outcome"], ("pass", "wrong_answer"))
+                    self.assertIn(record["score"], (0.0, 1.0))
+                    scored.append(record)
+            self.assertEqual(len(scored), 20 * (2 + 2 * PAIRS))
+
+
+class ReferenceAuditDiagnosticsTests(unittest.TestCase):
+    def setUp(self):
+        from pilot import program
+        from pilot.test_program import local_command, local_remove
+        self.enterContext(patch.dict(verification._PLANS, clear=True))
+        self.enterContext(patch.object(program, "docker_command", local_command))
+        self.enterContext(patch.object(program, "_remove", local_remove))
+
+    def diagnose(self, code, test):
+        from pilot.reference_audit import _diagnose
+        row = {"reference_code": code, "test_setup_code": "", "test_list": [test]}
+        plan = verification.prepare_plan(code, "", [test])
+        return _diagnose(row, plan)
+
+    def test_reference_type_mismatch_keeps_canonical_diagnostic(self):
+        result = self.diagnose("def target(): return (1,)", "assert target() == [1]")
+        self.assertEqual(result["status"], "canonical_mismatch")
+        self.assertEqual(result["mismatches"][0]["kind"], "type_mismatch")
+        self.assertEqual((result["mismatches"][0]["actual_type"], result["mismatches"][0]["expected_type"]),
+                         ("tuple", "list"))
+
+    def test_reference_candidate_exception_is_not_worker_infrastructure(self):
+        result = self.diagnose("def target(): raise TypeError('candidate')", "assert target() == 1")
+        self.assertEqual(result["status"], "candidate_failure")
+
+    def test_abrupt_worker_exit_remains_unscored_infrastructure(self):
+        with self.assertRaises(verification.GraderInfrastructureError) as caught:
+            self.diagnose("import os\ndef target(): os._exit(7)", "assert target() == 1")
+        self.assertIsNone(caught.exception.receipt["score"])
 
 
 if __name__ == "__main__":

@@ -18,6 +18,7 @@ from .runtime import IMAGE, append_json, current_call_scope, digest
 
 PLAN_SECONDS = 10
 WORKER_SECONDS = 10
+SUPERVISOR_MARGIN_SECONDS = 5
 MAX_DEPTH = 64
 TYPE_NAMES = frozenset(("bool", "int", "float", "complex", "str", "bytes", "list", "tuple", "dict", "set", "frozenset"))
 _INT = re.compile(r"-?0x[0-9a-f]+")
@@ -49,6 +50,12 @@ def grader_input_hash(output: str, reference_code: str, setup: str, tests: list[
 
 def _source_hash() -> str:
     return _SOURCE_HASH
+
+
+def _limits(stage: str) -> tuple[float | None, float]:
+    if stage == "worker":
+        return WORKER_SECONDS, WORKER_SECONDS + SUPERVISOR_MARGIN_SECONDS
+    return None, PLAN_SECONDS
 
 
 def record_grader_outcome(outcome: str, score: float | None, *, invocations: list | None = None,
@@ -120,13 +127,13 @@ def validate_grader_receipt(receipt: dict) -> None:
                      and invocation["stage"] in ("planner", "worker", "wrapper")
                      and invocation["outcome"] in ("completed", *_INFRASTRUCTURE)
                      and (invocation["exit_code"] is None or type(invocation["exit_code"]) is int)
-                     and (invocation["error"] is None or type(invocation["error"]) is str))
+                     and (invocation["error"] is None or type(invocation["error"]) is str)
+                     and (invocation["candidate_seconds"], invocation["deadline_seconds"]) == _limits(invocation["stage"]))
         except (KeyError, ValueError, TypeError):
             raise ValueError("Malformed invocation receipt") from None
         if not valid:
             raise ValueError("Invalid invocation provenance")
-        scripts = {"planner": _PLANNER, "worker": _WORKER, "wrapper": _WRAPPER}
-        if invocation["script_hash"] != digest(_CODEC + scripts[invocation["stage"]]):
+        if invocation["script_hash"] != digest(_STAGES[invocation["stage"]][1]):
             raise ValueError("Mismatched invocation source")
         status, exit_code = invocation["outcome"], invocation["exit_code"]
         if ((status == "completed" and (exit_code != 0 or invocation["error"] is not None))
@@ -155,11 +162,20 @@ class InvocationResult:
     script_hash: str
 
     def receipt(self) -> dict:
+        candidate_seconds, deadline_seconds = _limits(self.stage)
         return {"stage": self.stage, "outcome": self.outcome, "exit_code": self.exit_code,
                 "stdout_hex": self.stdout.hex(), "stderr_hex": self.stderr.hex(),
                 "stdout_hash": digest(self.stdout.hex()), "stderr_hash": digest(self.stderr.hex()),
                 "elapsed_seconds": self.elapsed_seconds, "error": self.error,
-                "input_hash": self.input_hash, "script_hash": self.script_hash}
+                "input_hash": self.input_hash, "script_hash": self.script_hash,
+                "candidate_seconds": candidate_seconds, "deadline_seconds": deadline_seconds}
+
+
+@dataclass(frozen=True)
+class Verdict:
+    """A trusted result frame; results None means the candidate failed and scores zero."""
+    results: list | None
+    failure: dict | None
 
 
 def _raise_infrastructure(result: InvocationResult, invocations: list, input_hash: str):
@@ -167,7 +183,7 @@ def _raise_infrastructure(result: InvocationResult, invocations: list, input_has
         result.outcome, None, invocations=invocations, reason=result.error,
         input_hash=_JOURNAL.get()[1].get("input_hash", input_hash)))
 
-_CODEC = f"_DEPTH = {MAX_DEPTH}\n" + r'''import json, os, sys
+_CODEC = f"_DEPTH = {MAX_DEPTH}\n_WIRE = {program.MAX_WIRE_BYTES}\n" + r'''import json, os, sys
 _type, _id, _object, _isinstance, _all, _any, _set = type, id, object, isinstance, all, any, set
 _exec, _compile, _hex, _float_hex, _float_from_hex = exec, compile, hex, float.hex, float.fromhex
 _new, _setattr, _getattribute = object.__new__, object.__setattr__, object.__getattribute__
@@ -280,11 +296,14 @@ def _private_stdout():
     return out
 
 
-def _emit(fd, value):
-    data = (_dumps(value) + "\n").encode()
+def _send(fd, data, status):
     while data:
         data = data[_write(fd, data):]
-    _exit(0)
+    _exit(status)
+
+
+def _emit(fd, value):
+    _send(fd, (_dumps(value) + "\n").encode(), 0)
 '''
 
 _PLANNER = r'''
@@ -347,28 +366,97 @@ _emit(_out, {"gradeable": True, "reason": None, "calls": calls})
 '''
 
 _WORKER = r'''
+import select, signal, time
 os.nice(10)
 _payload = _loads(sys.stdin.read())
+_seconds, _code = _payload["seconds"], _payload["code"]
+_calls = [("call " + str(index), call["function"], call["args"]) for index, call in enumerate(_payload["calls"])]
+for _where, _function, _args in _calls:
+    for _arg in _args:
+        decode(_arg, lambda name: _type(name, (), {}))
 _out = _private_stdout()
-_scope = {"__name__": "__main__"}
-_plain = {}
+_BaseException, _len, _type_name = BaseException, len, type.__dict__["__name__"].__get__
 
 
-def _resolve(name):
-    found = _scope.get(name)
-    if _isinstance(found, _type):
-        return found
-    if name not in _plain:
-        _plain[name] = _type(name, (), {})
-    return _plain[name]
+def _fail(fd, where, error):
+    if _type(error) is Unsupported:
+        where, detail = where + ": ", error.args[0]
+    else:
+        where, detail = where + " raised ", _type_name(_type(error))
+    _emit(fd, {"failure": {"reason": where + (detail if _type(detail) is str else "?")[:120]}})
 
 
-_exec(_compile(_payload["code"], "solution", "exec"), _scope)
-_results = []
-for _call in _payload["calls"]:
-    _value = _scope[_call["function"]](*[decode(arg, _resolve) for arg in _call["args"]])
-    _results.append(encode(_value, None, _set()))
-_emit(_out, {"results": _results})
+def _solve(fd):
+    scope, plain = {"__name__": "__main__"}, {}
+
+    def resolve(name):
+        found = scope.get(name)
+        if _isinstance(found, _type):
+            return found
+        if name not in plain:
+            plain[name] = _type(name, (), {})
+        return plain[name]
+
+    try:
+        _exec(_compile(_code, "solution", "exec"), scope)
+    except _BaseException as error:
+        _fail(fd, "solution", error)
+    results = []
+    for where, function, args in _calls:
+        try:
+            value = scope[function](*[decode(arg, resolve) for arg in args])
+            results.append(encode(value, None, _set()))
+        except _BaseException as error:
+            _fail(fd, where, error)
+    if _len(_dumps({"results": results})) >= _WIRE:
+        _emit(fd, {"failure": {"reason": "results exceed the wire bound"}})
+    _emit(fd, {"results": results})
+
+
+def _kill(child):
+    for kill in (os.killpg, os.kill):
+        try:
+            kill(child, signal.SIGKILL)
+        except ProcessLookupError:
+            pass
+
+
+def _supervise(child, reader, deadline):
+    data, eof, exited = b"", False, False
+    while not (eof and exited) and len(data) <= _WIRE:
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            return None
+        if not exited and os.waitid(os.P_PID, child, os.WEXITED | os.WNOHANG | os.WNOWAIT) is not None:
+            exited = True
+            # Stray descendants must not hold the frame open.
+            _kill(child)
+        if eof:
+            time.sleep(min(remaining, 0.01))
+        elif select.select([reader], [], [], min(remaining, 0.01))[0]:
+            chunk = os.read(reader, 65536)
+            eof, data = not chunk, data + chunk
+    return data
+
+
+# As container init with no handlers, the supervisor cannot be signalled by the candidate.
+signal.signal(signal.SIGINT, signal.SIG_IGN)
+_reader, _writer = os.pipe()
+_deadline = time.monotonic() + _seconds
+_child = os.fork()
+if _child == 0:
+    os.setpgid(0, 0)
+    signal.signal(signal.SIGINT, signal.default_int_handler)
+    os.close(_reader)
+    os.close(_out)
+    _solve(_writer)
+os.close(_writer)
+_data = _supervise(_child, _reader, _deadline)
+_kill(_child)
+_status = os.waitpid(_child, 0)[1]
+if _data is None:
+    _emit(_out, {"failure": {"reason": "exceeded the " + str(_seconds) + " second time limit"}})
+_send(_out, _data[:_WIRE + 1], os.WEXITSTATUS(_status) if os.WIFEXITED(_status) else 128 + os.WTERMSIG(_status))
 '''
 
 _WRAPPER = r'''
@@ -376,23 +464,33 @@ os.nice(10)
 _payload = _loads(sys.stdin.read())
 _out = _private_stdout()
 _results = []
-for _value, _wrapper in zip(_payload["results"], _payload["wrappers"]):
+for _index, (_value, _wrapper) in enumerate(zip(_payload["results"], _payload["wrappers"])):
     if _wrapper == "int":
+        _where = "call " + str(_index) + ": official int wrapper "
         if _value["t"] not in ("bool", "int", "float", "str", "bytes"):
-            raise Unsupported("Official int wrapper requires a plain builtin value")
-        _value = encode(_CLASSES["int"](decode(_value, None)), None, set())
+            _emit(_out, {"failure": {"reason": _where + "received " + _value["t"]}})
+        _plain = decode(_value, None)
+        try:
+            _value = _CLASSES["int"](_plain)
+        except Exception as _error:
+            _emit(_out, {"failure": {"reason": _where + "raised " + type(_error).__name__}})
+        _value = encode(_value, None, set())
     _results.append(_value)
 _emit(_out, {"results": _results})
 '''
 
+_STAGES = {"planner": ("hone-pilot-plan-", _CODEC + _PLANNER), "worker": ("hone-pilot-score-", _CODEC + _WORKER),
+           "wrapper": ("hone-pilot-wrapper-", _CODEC + _WRAPPER)}
 
-def _run(prefix: str, script: str, payload: bytes, seconds: float) -> InvocationResult:
+
+def _run(stage: str, payload: dict) -> InvocationResult:
     from .campaign import check_disk
 
     check_disk()
+    prefix, script = _STAGES[stage]
+    candidate_seconds, seconds = _limits(stage)
+    data = json.dumps(payload if candidate_seconds is None else {**payload, "seconds": candidate_seconds}).encode()
     name = prefix + uuid.uuid4().hex
-    stage = {"hone-pilot-plan-": "planner", "hone-pilot-score-": "worker",
-             "hone-pilot-wrapper-": "wrapper"}[prefix]
     started = time.monotonic()
     process = None
     selector = selectors.DefaultSelector()
@@ -400,7 +498,7 @@ def _run(prefix: str, script: str, payload: bytes, seconds: float) -> Invocation
     outcome, error, exit_code = "completed", None, None
     try:
         with tempfile.TemporaryFile() as inputs:
-            inputs.write(payload)
+            inputs.write(data)
             inputs.seek(0)
             process = subprocess.Popen(program.docker_command(name) + ["-c", script], stdin=inputs,
                                        stdout=subprocess.PIPE, stderr=subprocess.PIPE)
@@ -456,7 +554,7 @@ def _run(prefix: str, script: str, payload: bytes, seconds: float) -> Invocation
             if process.stderr is not None:
                 process.stderr.close()
     result = InvocationResult(stage, outcome, exit_code, bytes(stdout), bytes(stderr),
-                              time.monotonic() - started, error, digest(payload.hex()), digest(script))
+                              time.monotonic() - started, error, digest(data.hex()), digest(script))
     path, context = _JOURNAL.get()
     if path is not None:
         append_json(path, {"event": "grader-invocation", "context": {**current_call_scope(), **context},
@@ -552,7 +650,7 @@ def prepare_plan(reference_code: str, setup: str, tests: list[str]) -> dict:
     row = {"reference": reference_code, "setup": setup, "tests": tests}
     key = digest(row)
     if key not in _PLANS:
-        finished = _run("hone-pilot-plan-", _CODEC + _PLANNER, json.dumps(row).encode(), PLAN_SECONDS)
+        finished = _run("planner", row)
         if finished.outcome != "completed":
             _raise_infrastructure(finished, [finished.receipt()], key)
         try:
@@ -564,20 +662,27 @@ def prepare_plan(reference_code: str, setup: str, tests: list[str]) -> dict:
     return json.loads(_PLANS[key])
 
 
-def _results(result: InvocationResult, count: int, invocations: list, input_hash: str) -> list:
+def _results(result: InvocationResult, count: int, invocations: list, input_hash: str) -> Verdict:
     if result.outcome == "completed":
         try:
             frame = _frame(result.stdout)
-            if set(frame) != {"results"} or type(frame["results"]) is not list or len(frame["results"]) != count:
-                raise ValueError("Malformed results")
-            for value in frame["results"]:
-                _canonical(value)
+            if set(frame) == {"failure"}:
+                failure = frame["failure"]
+                if type(failure) is not dict or set(failure) != {"reason"} or type(failure["reason"]) is not str:
+                    raise ValueError("Malformed candidate failure")
+                verdict = Verdict(None, failure)
+            else:
+                if set(frame) != {"results"} or type(frame["results"]) is not list or len(frame["results"]) != count:
+                    raise ValueError("Malformed results")
+                for value in frame["results"]:
+                    _canonical(value)
+                verdict = Verdict(frame["results"], None)
         except (ValueError, TypeError, OverflowError, RecursionError):
             result.outcome, result.error = "frame_failure", "Invocation returned an invalid result frame"
     invocations.append(result.receipt())
     if result.outcome != "completed":
         _raise_infrastructure(result, invocations, input_hash)
-    return frame["results"]
+    return verdict
 
 
 def score_solution(output: str, reference_code: str, setup: str, tests: list[str]) -> float:
@@ -598,14 +703,17 @@ def score_solution(output: str, reference_code: str, setup: str, tests: list[str
         calls = plan["calls"]
         payload = {"code": program.extract_solution(output),
                    "calls": [{"function": call["function"], "args": call["args"]} for call in calls]}
-        finished = _run("hone-pilot-score-", _CODEC + _WORKER, json.dumps(payload).encode(), WORKER_SECONDS)
-        results = _results(finished, len(calls), invocations, input_hash)
-        if any(call["wrapper"] for call in calls):
-            wrapped = _run("hone-pilot-wrapper-", _CODEC + _WRAPPER,
-                           json.dumps({"results": results, "wrappers": [call["wrapper"] for call in calls]}).encode(),
-                           PLAN_SECONDS)
-            results = _results(wrapped, len(calls), invocations, input_hash)
-        matched = all(_canonical(result) == _canonical(call["expected"]) for call, result in zip(calls, results))
+        verdict = _results(_run("worker", payload), len(calls), invocations, input_hash)
+        if verdict.results is not None and any(call["wrapper"] for call in calls):
+            verdict = _results(_run("wrapper", {"results": verdict.results,
+                                                "wrappers": [call["wrapper"] for call in calls]}),
+                               len(calls), invocations, input_hash)
+        if verdict.results is None:
+            record_grader_outcome("wrong_answer", 0.0, invocations=invocations,
+                                  reason="Candidate failure: " + verdict.failure["reason"], input_hash=input_hash)
+            return 0.0
+        matched = all(_canonical(result) == _canonical(call["expected"])
+                      for call, result in zip(calls, verdict.results))
         score = 1.0 if matched else 0.0
         record_grader_outcome("pass" if matched else "wrong_answer", score,
                               invocations=invocations, input_hash=input_hash)

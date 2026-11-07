@@ -1,11 +1,12 @@
 {
+  "amendment_commit": "3d9da07960d74a846fe42f0d1b58f56255635f99",
   "files": {
     "pilot/__main__.py": {
       "after": "sha256:1c6d2e5fec5b96d099a355b82c9ae11d9c56e706dd9d08441b199f94383a36d4",
       "before": "sha256:2003ee4a51f4aa52cf7678486227452c5406c7eebd80963f0071b20ed09bcc97"
     },
     "pilot/admission.py": {
-      "after": "sha256:5008c92b8c432eae330de024f705b6723dbdb565ccb35b830fdcf7091d2cc87a",
+      "after": "sha256:d01ccba5c0545645dbe34e32519a0a835d63ababfa1cce9d19774985c95db31b",
       "before": "sha256:94018cdfc5f5965fdfdb637fe003f10578a8f81b3fd6fc68349ac1b7b6ed5168"
     },
     "pilot/adversarial.py": {
@@ -61,11 +62,25 @@
       "before": "sha256:95248dd235a525636af1726e25ab2e9bd15a75a584dc2535ff85713878a0a3d0"
     },
     "pilot/verification.py": {
-      "after": "sha256:ad2654400810f2493a33e9225686870c768119a35a07874095ef151293729c46",
+      "after": "sha256:498fe936c847ebbcb25f83c7467adc4e94ec4c6b297c3192bf5df7d2656c056c",
       "before": "sha256:5b8cfac4162f31b154695b77172dd4b32da9e7ac7deb863f6053d575ed36b13d"
     }
   },
-  "predeclaration_hash": "sha256:65e4685de453ac66661aacdae2446b932a00683c834761950edb4e077325111e",
+  "grader_limits": {
+    "planner": {
+      "candidate_seconds": null,
+      "deadline_seconds": 10
+    },
+    "worker": {
+      "candidate_seconds": 10,
+      "deadline_seconds": 15
+    },
+    "wrapper": {
+      "candidate_seconds": null,
+      "deadline_seconds": 10
+    }
+  },
+  "predeclaration_hash": "sha256:5a5aa7275d72030f52b162680f0ac1bcab23b4044ba463e8d5c9d1c15b1bf4cc",
   "prior_source_transition_hash": "sha256:246f206edfdd9b0bb9b602108b6bb86a40f3fa0f589c65f5efa1fe9a58c0ad08",
   "source_head": "b453995e9add69d3d82a11673e80e0dfaa46c8d8",
   "source_snapshot_hash": "sha256:a623997f21a0308003e9915287a16256c5fb66ea8cde28166b4fcddd26e269ba",

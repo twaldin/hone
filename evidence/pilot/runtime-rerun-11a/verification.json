@@ -1,0 +1,47 @@
+{
+  "after": {
+    "frozen_mbpp_admission": {
+      "mock_grader_or_reuse_mbpp": false,
+      "ranking_and_noise_passed": true,
+      "retained_control_noise_rows": 720,
+      "rows": [
+        640,
+        847
+      ],
+      "trusted_wrong_scores": [
+        0.0,
+        0.0
+      ]
+    },
+    "log_artifact": "artifact://512",
+    "passed": true,
+    "real_docker_and_official_metrics": true,
+    "seconds": 381.114,
+    "skipped": 0,
+    "tests": 339
+  },
+  "amendment_commit": "3d9da07960d74a846fe42f0d1b58f56255635f99",
+  "before": "before.json",
+  "cpu_affinity": {
+    "actual_unit_admission": "pending",
+    "change": "explicit taskset -c6 for both admission/run via launch.py",
+    "policy_choice_required": false
+  },
+  "new_pilot_model_calls": 0,
+  "official_gepa_and_adapter_unchanged": true,
+  "sandbox_smoke": {
+    "candidate_timeout_seconds": 10,
+    "cases": 9,
+    "model_calls": 0,
+    "passed": true,
+    "proof": "smoke-result.json",
+    "receipts": "smoke-grader-outcomes.jsonl",
+    "worker_supervision_seconds": 15
+  },
+  "schema": "pilot-trusted-candidate-verification-v11a",
+  "search_gate": "passing actual admission, green CI and exact-head cross-family READY required",
+  "source_binding": {
+    "transition": "../source-transition-11.json",
+    "verification_hash": "sha256:498fe936c847ebbcb25f83c7467adc4e94ec4c6b297c3192bf5df7d2656c056c"
+  }
+}
