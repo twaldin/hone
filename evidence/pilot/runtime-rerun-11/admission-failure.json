@@ -1,0 +1,1 @@
+{"declaration_commit":"b453995e9add69d3d82a11673e80e0dfaa46c8d8","elapsed_seconds":0.00020631588995456696,"error":"Pilot execution must inherit affinity pinned to CPU 6","error_type":"ValueError","final_test_labels_read":false,"gateway_requests":0,"model_calls":0,"passed":false,"schema":"pilot-pinned-runtime-admission-v11"}

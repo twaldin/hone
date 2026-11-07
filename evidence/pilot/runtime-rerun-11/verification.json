@@ -38,6 +38,12 @@
     "restored": 0
   },
   "official_gepa_and_adapter_unchanged": true,
+  "provider_receipt_tests": {
+    "bun_version": "1.4.4",
+    "command": "nice -n 10 taskset -c 6 bun test --max-concurrency=1 pilot/gateway-receipts.test.mjs",
+    "failed": 0,
+    "passed": 12
+  },
   "run9_outage": {
     "classification": "No new campaign cell or model call was dispatched; no measured score needs outage reclassification.",
     "new_model_calls": 0,
