@@ -23,6 +23,12 @@ pilot/.venv/bin/python evidence/pilot/runtime-rerun-11a/wait-unit.py UNIQUE_ADMI
 
 The retained-admission regression uses real Docker and all frozen MBPP control and noise rows, including naive rows 640 and 847. It does not mock `reuse_mbpp` or the scorer, initialize accounts, or change sealed evidence.
 
+## Actual admission
+
+Unit `hone-predecl11a-admit-20261107T122903Z.service`, historical PID 687509, passed in 521.85 seconds on implementation commit `3f18b107d3b51abb5259b6566880da414052ff0f`. Actual inherited affinity was CPU 6 and nice 10. The pinned runtime was omp 18.16.0; the route and OAuth-only Gmail x2 plus Purdue x1 pool matched. The existing HoVer index hashes matched without rebuilding. Model calls and gateway requests were both zero.
+
+`admission.json` and `admission-grader-outcomes.jsonl` retain the original proof and receipt bytes: 1,808 pass and 2,650 wrong-answer outcomes. The launch, direct resource query and terminal observations are retained separately. `full-suite.log` retains the 339-test run; `smoke-result.json` retains the nine-case real-container smoke.
+
 ## Search gate
 
 A passing zero-call admission must bind the current declaration, code, exact pinned runtime, OAuth-only Gmail x2 plus Purdue x1 pool and admitted HoVer index. Do not rebuild the index. Green CI and exact-head cross-family READY remain required before a measured call. The ignored `.pilot-state/launch-11.json` records those final-head gates without a self-referential committed hash.

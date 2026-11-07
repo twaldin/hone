@@ -1,4 +1,17 @@
 {
+  "actual_admission": {
+    "proof": "admission.json",
+    "receipts": "admission-grader-outcomes.jsonl",
+    "passed": true,
+    "elapsed_seconds": 521.854194547981,
+    "model_calls": 0,
+    "gateway_requests": 0,
+    "pass": 1808,
+    "wrong_answer": 2650,
+    "implementation_commit": "3f18b107d3b51abb5259b6566880da414052ff0f",
+    "unit": "hone-predecl11a-admit-20261107T122903Z.service",
+    "historical_pid": 687509
+  },
   "after": {
     "frozen_mbpp_admission": {
       "mock_grader_or_reuse_mbpp": false,
@@ -14,6 +27,7 @@
       ]
     },
     "log_artifact": "artifact://512",
+    "log_file": "full-suite.log",
     "passed": true,
     "real_docker_and_official_metrics": true,
     "seconds": 381.114,
@@ -23,7 +37,10 @@
   "amendment_commit": "3d9da07960d74a846fe42f0d1b58f56255635f99",
   "before": "before.json",
   "cpu_affinity": {
-    "actual_unit_admission": "pending",
+    "actual_unit_admission": "passed",
+    "proof": "admission.json",
+    "observed_affinity": [6],
+    "observed_nice": 10,
     "change": "explicit taskset -c6 for both admission/run via launch.py",
     "policy_choice_required": false
   },
