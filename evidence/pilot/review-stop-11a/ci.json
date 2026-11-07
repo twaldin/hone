@@ -1,0 +1,12 @@
+{
+  "head_sha": "f3b00bbedf9f0b3045a30c5f362731945abbc310",
+  "run_id": 42373871068,
+  "url": "https://github.com/twaldin/hone/actions/runs/42373871068",
+  "status": "completed",
+  "conclusion": "success",
+  "created_at": "2026-11-07T12:45:17Z",
+  "updated_at": "2026-11-07T12:52:26Z",
+  "run_attempt": 1,
+  "ready": false,
+  "note": "Exact head and success observed from GitHub Actions REST metadata after transient DNS failures. Green CI does not override the reproduced trust-boundary defect."
+}

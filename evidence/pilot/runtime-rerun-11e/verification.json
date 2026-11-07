@@ -1,0 +1,61 @@
+{
+  "after_regression": {
+    "passed": true,
+    "proof": "after-regression.txt",
+    "tests": 4
+  },
+  "before": {
+    "errors": 4,
+    "failures": 1,
+    "proof": "before.txt"
+  },
+  "fresh_admission": {
+    "cpu_affinity": [
+      6
+    ],
+    "elapsed_seconds": 450.9540840568952,
+    "gateway_requests": 0,
+    "historical_pid": 2107520,
+    "model_calls": 0,
+    "nice": 10,
+    "outcomes": {
+      "pass": 1808,
+      "wrong_answer": 2650
+    },
+    "passed": true,
+    "proof": "admission.json",
+    "receipts": "admission-grader-outcomes.jsonl",
+    "unit": "hone-predecl11e-admit-20261107T153745Z.service"
+  },
+  "gate": "Final exact-head CI and cross-family READY before search",
+  "implementation_commit": "9d41f2ef42bf86a6818d627c72b5e3f46063b698",
+  "model_calls": 0,
+  "native_suite": {
+    "frozen_mbpp_rows": [
+      640,
+      847
+    ],
+    "passed": true,
+    "proof": "full-suite.txt",
+    "real_docker_and_official_metrics": true,
+    "seconds": 454.9,
+    "tests": 344
+  },
+  "official_gepa_unchanged": true,
+  "owned_child_trace_probe": {
+    "new_configuration": false,
+    "new_sandbox_capabilities": false,
+    "permitted": true,
+    "proof": "trace-probe-result.json"
+  },
+  "policy_changed": false,
+  "review_rule": "Fix further same-class worker I/O exit/deadline findings without handback",
+  "sandbox_smoke": {
+    "cases": 13,
+    "passed": true,
+    "proof": "smoke-result.json",
+    "receipts": "smoke-grader-outcomes.jsonl"
+  },
+  "schema": "pilot-observed-exit-verification-v11e",
+  "verification_hash": "sha256:b2c65653966aac8454e3a4e422a11826b79dda708a47713b6849ac9efcfffbce"
+}

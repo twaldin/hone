@@ -1,0 +1,24 @@
+{
+  "schema": "pilot-full-raw-seed0-replay-v10",
+  "completion_head": "d60d2c2d9823c45bc0a83a99a62d8d335174b032",
+  "command": "nice -n 10 taskset -c 6 env OPENBLAS_NUM_THREADS=1 OMP_NUM_THREADS=1 MKL_NUM_THREADS=1 JAX_PLATFORMS=cpu NLTK_DATA=/home/tim/worktrees/hone/hone-hone-pilot-seeds12-1/.pilot-cache/nltk pilot/.venv/bin/python -m pilot replay --out evidence/pilot/seed0-search-9",
+  "exit_status": 0,
+  "evidence_hashes_verified": true,
+  "replayed_rollouts": 12764,
+  "model_calls": 0,
+  "scored_final_tests_loaded": false,
+  "wall_seconds": 4207.43,
+  "observed_output": {
+    "model_calls": 0,
+    "replayed_rollouts": 12764,
+    "scored_final_tests_loaded": false
+  },
+  "warnings": "SyntaxWarnings emitted; no retained metric mismatch.",
+  "source_scope": "Protected graders and replay metric path were unchanged by the pending source/seed guards.",
+  "grader_source_hashes": {
+    "pilot/tasks.py": "sha256:95248dd235a525636af1726e25ab2e9bd15a75a584dc2535ff85713878a0a3d0",
+    "pilot/program.py": "sha256:5a09799538b382d6212c744bd4e6e72abe009e764dc505d1aa034f51929cdd53",
+    "pilot/verification.py": "sha256:5b8cfac4162f31b154695b77172dd4b32da9e7ac7deb863f6053d575ed36b13d",
+    "pilot/hover.py": "sha256:439e1b64550a35711b9b1b58c647be8f39d9d3a644669e1826885c258b800c37"
+  }
+}

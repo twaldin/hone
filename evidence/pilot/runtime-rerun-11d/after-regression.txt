@@ -1,0 +1,8 @@
+test_completed_outer_invocation_survives_deadline_before_read_or_after_eof (pilot.test_verification.DockerVerificationTests.test_completed_outer_invocation_survives_deadline_before_read_or_after_eof) ... ok
+test_competing_reader_cannot_block_supervisor_deadline_or_exit_drain (pilot.test_verification.DockerVerificationTests.test_competing_reader_cannot_block_supervisor_deadline_or_exit_drain) ... ok
+test_completed_queued_frame_is_drained_after_deadline (pilot.test_verification.DockerVerificationTests.test_completed_queued_frame_is_drained_after_deadline) ... ok
+
+----------------------------------------------------------------------
+Ran 3 tests in 3.750s
+
+OK

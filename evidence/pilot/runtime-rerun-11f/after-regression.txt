@@ -1,0 +1,6 @@
+test_live_signal_delivery_stop_retains_trusted_timeout_zero (pilot.test_verification.DockerVerificationTests.test_live_signal_delivery_stop_retains_trusted_timeout_zero) ... ok
+
+----------------------------------------------------------------------
+Ran 1 test in 10.445s
+
+OK

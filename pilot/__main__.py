@@ -213,7 +213,7 @@ def readmit_mbpp(args) -> None:
         "execution_contract": mbpp_source_contract(ROOT)})
     try:
         proof = run(prepared, identities, args.out / "adversarial")
-        validate_result(proof, identities, proof["cohorts"])
+        validate_result(proof, identities, proof["cohorts"], {row["id"]: row for row in mbpp.train})
     finally:
         seal(args.out / "adversarial")
         seal(args.out)
@@ -341,8 +341,8 @@ def load_adversarial(out: Path, prepared: list) -> dict:
     if "adversarial.json" not in bundle["files"]:
         raise ValueError("Adversarial proof is not in the sealed bundle")
     proof = json.loads((out / "adversarial.json").read_text())
-    validate_result(proof, proof.get("identities", {}), proof.get("cohorts", {}))
     mbpp = next(task for task in prepared if task.name == "mbpp")
+    validate_result(proof, proof.get("identities", {}), proof.get("cohorts", {}), {row["id"]: row for row in mbpp.train})
     expected_ids = [row["id"] for row in mbpp.train + mbpp.selection]
     if [row["id"] for row in proof["gradeability"]] != expected_ids:
         raise ValueError("Adversarial gradeability proof omits development rows")
@@ -662,15 +662,38 @@ def resume_result(out: Path, task_name: str, seed: int, method: str, error_type:
 
 
 def search_one(args, pool, env, task_name: str, seed: int, method: str, smoke: bool) -> dict:
-    from .tasks import evaluate, load_task
-    from .search import run_search
-    task = load_task(task_name, args.cache)
-    identity = evaluator_identity(task)
-    control = load_control(args, task)
+    from .campaign import CampaignStop
+    from .verification import GraderInfrastructureError, grader_journal
     out = args.out / task_name / str(seed) / method
     if out.exists():
         return resume_result(out, task_name, seed, method)
     out.mkdir(parents=True)
+    try:
+        with grader_journal(out / "grader-outcomes.jsonl", task=task_name, seed=seed, method=method, purpose="initialization"):
+            return _search_new(args, pool, env, task_name, seed, method, smoke)
+    except (GraderInfrastructureError, CampaignStop) as error:
+        save(out / "manifest.json", {"task": task_name, "seed": seed, "method": method,
+             "failure": True, "grader_policy": "predeclaration-11"})
+        result = resume_result(out, task_name, seed, method, type(error).__name__)
+        if isinstance(error, CampaignStop):
+            result["status"] = "campaign_stopped"
+        save(out / "failure.json", {"error_type": type(error).__name__, "receipt": error.receipt,
+             "rerun_policy": "Campaign rerun 2 is final; no cell restart or third replacement"})
+        save(out / "result.json", result)
+        seal(out)
+        return result
+
+
+def _search_new(args, pool, env, task_name: str, seed: int, method: str, smoke: bool) -> dict:
+    from .campaign import CampaignStop
+    from .verification import GraderInfrastructureError, grader_journal
+    from .tasks import evaluate, load_task
+    from .search import run_search
+    task = load_task(task_name, args.cache)
+    identity = evaluator_identity(task)
+    with grader_journal(purpose="admission"):
+        control = load_control(args, task)
+    out = args.out / task_name / str(seed) / method
     throttle = Throttle(pool, env, out / "pauses.jsonl",
                         pause_limit_seconds=getattr(args, "remaining_pause_seconds", None))
     try:
@@ -703,7 +726,7 @@ def search_one(args, pool, env, task_name: str, seed: int, method: str, smoke: b
         from .runtime import call_scope
         partition = "training" if capture_traces or all(row["id"] in set(task.manifest["train_ids"]) for row in rows) else "selection"
         arm = f"{partition}:{artifact_hash}"
-        with call_scope(arm=arm):
+        with call_scope(arm=arm), grader_journal(artifact_hash=artifact_hash, partition=partition, purpose="search"):
             result = evaluate(task, candidate, rows, call, capture_traces)
         append_json(out / "evaluations.jsonl", {"artifact_hash": artifact_hash, "row_ids": [row["id"] for row in rows],
                     "partition": partition, "arm": arm,
@@ -724,15 +747,25 @@ def search_one(args, pool, env, task_name: str, seed: int, method: str, smoke: b
                 "route_hash": digest(call.gateway.route_identity),
                 "control_hash": digest(control), "budget": LIMITS, "budget_hash": digest(LIMITS), "price_per_million": PRICES, "price_source": PRICE_SOURCE,
                 "account_pool_hash": digest(pool), "account_domains": pool_domains(pool), "api_keys_allowed": False,
+                "grader_policy": "predeclaration-11",
+                "grader_outcomes": "grader-outcomes.jsonl",
+                "grader_predeclaration_hash": file_hash(ROOT / "evidence/pilot/predeclaration-11.md"),
                 "retrieval_receipt": json.loads((args.controls / "cohorts.json").read_text()).get("retrieval_receipt") if task_name == "hover" else None,
                 "dispatch_transition_hash": file_hash(ROOT / "evidence/pilot/source-transition-9.json")
                     if (ROOT / "evidence/pilot/source-transition-9.json").exists() else None,
                 "dispatch_predeclaration_hash": file_hash(ROOT / "evidence/pilot/predeclaration-9.md")
                     if (ROOT / "evidence/pilot/predeclaration-9.md").exists() else None,
+                "selection_transition_hash": file_hash(ROOT / "evidence/pilot/source-transition-10.json")
+                    if (ROOT / "evidence/pilot/source-transition-10.json").exists() else None,
+                "selection_predeclaration_hash": file_hash(ROOT / "evidence/pilot/predeclaration-10.md")
+                    if (ROOT / "evidence/pilot/predeclaration-10.md").exists() else None,
+                "grader_transition_hash": file_hash(ROOT / "evidence/pilot/source-transition-11.json")
+                    if (ROOT / "evidence/pilot/source-transition-11.json").exists() else None,
                 "engine_files": {path: file_hash(ROOT / path) for path in (
                     "pilot/__main__.py", "pilot/runtime.py", "pilot/admission.py", "pilot/search.py", "pilot/spend.py", "optimizer/src/pilot-policy.ts", "optimizer/assets/policy.ts",
                     "optimizer/src/loop.ts", "schema/src/promotion.ts", "package.json", "pnpm-lock.yaml",
-                    "optimizer/worker/Dockerfile.mutation")},
+                    "optimizer/worker/Dockerfile.mutation", "pilot/verification.py", "pilot/tasks.py",
+                    "pilot/hover.py", "pilot/controls.py", "pilot/adversarial.py", "pilot/panel.py", "pilot/campaign.py")},
                 "limits": retry_comparison({method: summary})["limit"], "current_subscription_panel": True,
                 "smoke_proposal_cap": 1 if smoke else None, "historical_snapshot_replication": False})
         if result["candidate"] is None:
@@ -749,14 +782,20 @@ def search_one(args, pool, env, task_name: str, seed: int, method: str, smoke: b
         seal(out)
         raise
     except Exception as error:
-        save(out / "manifest.json", {"identity": identity, "budget": LIMITS, "price_per_million": PRICES,
-             "account_domains": pool_domains(pool), "failure": True})
+        save(out / "manifest.json", {"identity": identity, "identity_hash": digest(identity), "budget": LIMITS,
+             "price_per_million": PRICES, "account_domains": pool_domains(pool), "failure": True,
+             "grader_policy": "predeclaration-11", "grader_outcomes": "grader-outcomes.jsonl"})
         result = resume_result(out, task_name, seed, method, type(error).__name__)
         timing = ledger.summary(throttle)
         result.update({key: timing[key] for key in (
             "wall_seconds", "active_seconds", "pauses", "pause_seconds", "throttle_seconds", "poll_seconds")})
         if isinstance(error, PauseLimitExceeded):
             result["status"] = "pause_limit_exceeded"
+        if isinstance(error, CampaignStop):
+            result["status"] = "campaign_stopped"
+        if isinstance(error, (GraderInfrastructureError, CampaignStop)):
+            save(out / "failure.json", {"error_type": type(error).__name__, "receipt": error.receipt,
+                 "rerun_policy": "Campaign rerun 2 is final; no cell restart or third replacement"})
         save(out / "result.json", result)
         seal(out)
         return result
@@ -785,6 +824,8 @@ def archived_ifbench(task, manifest: dict, cache: Path):
 
 def replay(args) -> None:
     from .tasks import load_task, score_output
+    from .controls import zero_arms
+    from .panel import replay_control_record
     configure_nlp(args.cache)
     evaluation_paths = sorted(args.out.rglob("evaluations.jsonl"))
     admission_manifest = args.out / "adversarial.json"
@@ -862,11 +903,14 @@ def replay(args) -> None:
         from .adversarial import replay_proof
         prepared = [load_task(name, args.cache) for name in ARCHIVED_TASKS]
         proof = load_adversarial(args.out, prepared)
-        checked = replay_proof(proof, prepared)
-        print(canonical({"replayed_adversarial_checks": checked, "model_calls": 0, "scored_final_tests_loaded": False}))
+        replayed = replay_proof(proof, prepared)
+        print(canonical({"replayed_adversarial_checks": replayed["scored_checks"],
+                         "unscored_rejections": [receipt["receipt_hash"] for receipt in replayed["unscored_rejections"]],
+                         "model_calls": 0, "scored_final_tests_loaded": False}))
         return
     tasks = {}
     checked = 0
+    negative_checked = 0
     for evaluations in evaluation_paths:
         manifest = json.loads((evaluations.parent / "manifest.json").read_text())
         name = manifest["identity"]["task"]["task"]
@@ -891,11 +935,16 @@ def replay(args) -> None:
                     or not set(refused).issubset(record["row_ids"])
                     or any((arm, row_id) not in refusal_receipts for row_id in refused)):
                 raise ValueError("Replay refusal outcome lacks its metered row/arm receipt")
+            if any(row_id in refused and output != "" for row_id, output in zip(record["row_ids"], record["outputs"], strict=True)):
+                raise ValueError("Refused rollout contains a fabricated answer")
+            if record.get("control") in zero_arms(task.name):
+                if not replay_control_record(task, [rows[row_id] for row_id in record["row_ids"]], record, manifest["identity"]):
+                    raise ValueError("Replay negative-probe rejection differs from its retained record")
+                negative_checked += len(record["row_ids"])
+                continue
             scores = []
             for row_id, output in zip(record["row_ids"], record["outputs"], strict=True):
                 if row_id in refused:
-                    if output != "":
-                        raise ValueError("Refused rollout contains a fabricated answer")
                     scores.append(0.0 if task.name == "mbpp" else score_output(task, rows[row_id], output))
                     continue
                 try:
@@ -906,9 +955,10 @@ def replay(args) -> None:
             if scores != record["scores"]:
                 raise ValueError("Replay metric disagrees with a retained evaluation")
             checked += len(scores)
-    if not checked:
+    if not checked and not negative_checked:
         raise ValueError("Bundle has no scored outputs to replay")
-    print(canonical({"replayed_rollouts": checked, "model_calls": 0, "scored_final_tests_loaded": False}))
+    print(canonical({"replayed_rollouts": checked, "validated_negative_probe_rows": negative_checked,
+                     "model_calls": 0, "scored_final_tests_loaded": False}))
 
 
 def dispatch_stop(rows: list[dict]) -> dict | None:
@@ -939,13 +989,26 @@ def main():
     parser.add_argument("--adversarial", type=Path, default=ROOT / "evidence/pilot/adversarial-8a")
     parser.add_argument("--out", type=Path)
     parser.add_argument("--task", choices=(*TASKS, "all"), default="all")
-    parser.add_argument("--seed", type=int, default=0)
+    parser.add_argument("--seed", type=int, nargs="+", default=[0])
     args = parser.parse_args()
+    if len(set(args.seed)) != len(args.seed):
+        parser.error("--seed values must be unique")
     configure_nlp(args.cache)
     if args.out is None:
         args.out = ROOT / "evidence/pilot" / (
             "mbpp-readmission-4a" if args.command == "readmit-mbpp" else
             "adversarial-8a" if args.command == "adversarial" else "controls-7b" if args.command == "controls" else "smoke-8")
+    from .verification import grader_journal
+    journal = args.cache / "grader-journals" / f"{args.command}-{time.time_ns()}.jsonl"
+    if journal.resolve().is_relative_to(args.out.resolve()):
+        raise ValueError("Grader journal must be outside retained evidence")
+    with grader_journal(journal, purpose=args.command):
+        _dispatch_command(args)
+    if journal.exists():
+        print(canonical({"grader_journal": str(journal), "grader_journal_file_hash": file_hash(journal)}))
+
+
+def _dispatch_command(args):
     if args.command != "verify":
         execution_limits()
     if args.command in {"verify", "replay"}:
@@ -986,7 +1049,7 @@ def main():
         pool, env = environment(args.pool)
         rows = []
         tasks = ("mbpp",) if args.command == "smoke" and args.task == "all" else selected if args.task == "all" else (args.task,)
-        for task, seed, method in product(tasks, (args.seed,), METHODS):
+        for seed, task, method in product(args.seed, tasks, METHODS):
             if dispatch_stop(rows) is not None:
                 break
             args.remaining_pause_seconds = max(0, 6 * 3600 - sum(row.get("pause_seconds", 0) for row in rows))
@@ -1001,7 +1064,7 @@ def main():
         if stopped is not None:
             save(args.out / "stop.json", stopped)
             print(canonical({"dispatch_stop": stopped}), flush=True)
-        save(args.out / "comparison.json", {"runs": rows, "seeds": [args.seed],
+        save(args.out / "comparison.json", {"runs": rows, "seeds": args.seed,
              "dispatch_stop": stopped, "retry_comparison": retry_comparison(totals)})
         seal(args.out)
         if args.command == "smoke" and any(row.get("status") != "completed" for row in rows):

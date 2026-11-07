@@ -1,0 +1,35 @@
+{
+  "docker_returncode": 0,
+  "docker_stderr": "",
+  "finding_reproduced": true,
+  "fixture": "Unmodified _kill and _supervise extracted from current worker; completed child and valid queued frame before deadline, supervisor invocation delayed past deadline. This is a deterministic function-boundary fixture, not an end-to-end model evaluation.",
+  "functions_sha256": "8099b83ac87c6283f6d5c27435d1a1e6c4491310324645fd3fa9ea5e87018b8d",
+  "grader_or_engine_source_changes": false,
+  "head": "7040004e6c51b1960cc83750320424731fb3f20a",
+  "model_calls": 0,
+  "real_pinned_docker": true,
+  "results": [
+    {
+      "actual_unchanged_frame_decoder_rejects": true,
+      "captured_hex": "",
+      "case": "pass",
+      "child_exit": 0,
+      "exit_observed_before_deadline": true,
+      "expected_hex": "7b22726573756c7473223a205b7b2274223a2022696e74222c202276223a2022307833227d2c207b2274223a2022696e74222c202276223a2022307834227d5d7d0a",
+      "pipe_readable_before_supervision": true,
+      "queued_after_return_hex": "7b22726573756c7473223a205b7b2274223a2022696e74222c202276223a2022307833227d2c207b2274223a2022696e74222c202276223a2022307834227d5d7d0a",
+      "supervisor_resumed_after_deadline": true
+    },
+    {
+      "actual_unchanged_frame_decoder_rejects": true,
+      "captured_hex": "",
+      "case": "candidate-error",
+      "child_exit": 0,
+      "exit_observed_before_deadline": true,
+      "expected_hex": "7b226661696c757265223a207b22726561736f6e223a202263616c6c20302072616973656420547970654572726f72227d7d0a",
+      "pipe_readable_before_supervision": true,
+      "queued_after_return_hex": "7b226661696c757265223a207b22726561736f6e223a202263616c6c20302072616973656420547970654572726f72227d7d0a",
+      "supervisor_resumed_after_deadline": true
+    }
+  ]
+}

@@ -1,0 +1,42 @@
+test_exited_worker_with_escaped_descendant_preserves_verdict (pilot.test_verification.DockerVerificationTests.test_exited_worker_with_escaped_descendant_preserves_verdict) ... 
+  test_exited_worker_with_escaped_descendant_preserves_verdict (pilot.test_verification.DockerVerificationTests.test_exited_worker_with_escaped_descendant_preserves_verdict) [exit7] ... FAIL
+  test_exited_worker_with_escaped_descendant_preserves_verdict (pilot.test_verification.DockerVerificationTests.test_exited_worker_with_escaped_descendant_preserves_verdict) [exit0] ... FAIL
+  test_exited_worker_with_escaped_descendant_preserves_verdict (pilot.test_verification.DockerVerificationTests.test_exited_worker_with_escaped_descendant_preserves_verdict) [pass] ... FAIL
+  test_exited_worker_with_escaped_descendant_preserves_verdict (pilot.test_verification.DockerVerificationTests.test_exited_worker_with_escaped_descendant_preserves_verdict) [exception] ... FAIL
+
+======================================================================
+FAIL: test_exited_worker_with_escaped_descendant_preserves_verdict (pilot.test_verification.DockerVerificationTests.test_exited_worker_with_escaped_descendant_preserves_verdict) [exit7]
+----------------------------------------------------------------------
+Traceback (most recent call last):
+  File "/home/tim/worktrees/hone/hone-hone-pilot-seeds12-1/pilot/test_verification.py", line 618, in test_exited_worker_with_escaped_descendant_preserves_verdict
+    with self.assertRaises(verification.GraderInfrastructureError) as caught:
+AssertionError: GraderInfrastructureError not raised
+
+======================================================================
+FAIL: test_exited_worker_with_escaped_descendant_preserves_verdict (pilot.test_verification.DockerVerificationTests.test_exited_worker_with_escaped_descendant_preserves_verdict) [exit0]
+----------------------------------------------------------------------
+Traceback (most recent call last):
+  File "/home/tim/worktrees/hone/hone-hone-pilot-seeds12-1/pilot/test_verification.py", line 618, in test_exited_worker_with_escaped_descendant_preserves_verdict
+    with self.assertRaises(verification.GraderInfrastructureError) as caught:
+AssertionError: GraderInfrastructureError not raised
+
+======================================================================
+FAIL: test_exited_worker_with_escaped_descendant_preserves_verdict (pilot.test_verification.DockerVerificationTests.test_exited_worker_with_escaped_descendant_preserves_verdict) [pass]
+----------------------------------------------------------------------
+Traceback (most recent call last):
+  File "/home/tim/worktrees/hone/hone-hone-pilot-seeds12-1/pilot/test_verification.py", line 622, in test_exited_worker_with_escaped_descendant_preserves_verdict
+    self.assertEqual(verification.score_solution(spawn + ending, ADD, "", ADD_TESTS), expected_score)
+AssertionError: 0.0 != 1.0
+
+======================================================================
+FAIL: test_exited_worker_with_escaped_descendant_preserves_verdict (pilot.test_verification.DockerVerificationTests.test_exited_worker_with_escaped_descendant_preserves_verdict) [exception]
+----------------------------------------------------------------------
+Traceback (most recent call last):
+  File "/home/tim/worktrees/hone/hone-hone-pilot-seeds12-1/pilot/test_verification.py", line 629, in test_exited_worker_with_escaped_descendant_preserves_verdict
+    self.assertIn("TypeError", receipt["reason"])
+AssertionError: 'TypeError' not found in 'Candidate failure: exceeded the 10 second time limit'
+
+----------------------------------------------------------------------
+Ran 1 test in 41.135s
+
+FAILED (failures=4)

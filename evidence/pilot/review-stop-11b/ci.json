@@ -1,0 +1,9 @@
+{
+  "id": 42378473693,
+  "head_sha": "7040004e6c51b1960cc83750320424731fb3f20a",
+  "html_url": "https://github.com/twaldin/hone/actions/runs/42378473693",
+  "status": "completed",
+  "conclusion": "success",
+  "overall_ready": false,
+  "note": "Green exact-head CI does not cover or override the independently reproduced queued-frame boundary failure."
+}

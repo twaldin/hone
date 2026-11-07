@@ -1,0 +1,30 @@
+test_completed_queued_frame_is_drained_after_deadline (pilot.test_verification.DockerVerificationTests.test_completed_queued_frame_is_drained_after_deadline) ... 
+  test_completed_queued_frame_is_drained_after_deadline (pilot.test_verification.DockerVerificationTests.test_completed_queued_frame_is_drained_after_deadline) (frame={'results': [{'t': 'int', 'v': '0x3'}, {'t': 'int', 'v': '0x4'}]}) ... ERROR
+  test_completed_queued_frame_is_drained_after_deadline (pilot.test_verification.DockerVerificationTests.test_completed_queued_frame_is_drained_after_deadline) (frame={'failure': {'reason': 'call 0 raised TypeError'}}) ... ERROR
+
+======================================================================
+ERROR: test_completed_queued_frame_is_drained_after_deadline (pilot.test_verification.DockerVerificationTests.test_completed_queued_frame_is_drained_after_deadline) (frame={'results': [{'t': 'int', 'v': '0x3'}, {'t': 'int', 'v': '0x4'}]})
+----------------------------------------------------------------------
+Traceback (most recent call last):
+  File "/home/tim/worktrees/hone/hone-hone-pilot-seeds12-1/pilot/test_verification.py", line 691, in test_completed_queued_frame_is_drained_after_deadline
+    self.assertEqual(verification._frame(bytes.fromhex(row["captured"])), row["frame"])
+                     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/tim/worktrees/hone/hone-hone-pilot-seeds12-1/pilot/verification.py", line 568, in _frame
+    raise ValueError("Expected exactly one result line")
+ValueError: Expected exactly one result line
+
+======================================================================
+ERROR: test_completed_queued_frame_is_drained_after_deadline (pilot.test_verification.DockerVerificationTests.test_completed_queued_frame_is_drained_after_deadline) (frame={'failure': {'reason': 'call 0 raised TypeError'}})
+----------------------------------------------------------------------
+Traceback (most recent call last):
+  File "/home/tim/worktrees/hone/hone-hone-pilot-seeds12-1/pilot/test_verification.py", line 691, in test_completed_queued_frame_is_drained_after_deadline
+    self.assertEqual(verification._frame(bytes.fromhex(row["captured"])), row["frame"])
+                     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/tim/worktrees/hone/hone-hone-pilot-seeds12-1/pilot/verification.py", line 568, in _frame
+    raise ValueError("Expected exactly one result line")
+ValueError: Expected exactly one result line
+
+----------------------------------------------------------------------
+Ran 1 test in 0.419s
+
+FAILED (errors=2)

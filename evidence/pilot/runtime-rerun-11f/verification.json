@@ -1,0 +1,64 @@
+{
+  "after_regression": {
+    "passed": true,
+    "proof": "after-regression.txt",
+    "real_signal_delivery_stop": "SIGWINCH, CLD_TRAPPED checked inside frozen Docker",
+    "tests": 1
+  },
+  "before": {
+    "errors": 1,
+    "proof": "before.txt"
+  },
+  "fresh_admission": {
+    "cpu_affinity": [
+      6
+    ],
+    "elapsed_seconds": 505.4070297840517,
+    "gateway_requests": 0,
+    "historical_pid": 2447485,
+    "model_calls": 0,
+    "nice": 10,
+    "outcomes": {
+      "pass": 1808,
+      "wrong_answer": 2650
+    },
+    "passed": true,
+    "proof": "admission.json",
+    "receipts": "admission-grader-outcomes.jsonl",
+    "unit": "hone-predecl11f-admit-20261107T161822Z.service"
+  },
+  "gate": "Final exact-head green CI and full cross-family READY before search",
+  "implementation_commit": "122c98dc7eb30e9f5fdbe90f932a503af9093ade",
+  "model_calls": 0,
+  "native_suite": {
+    "bytes": 112525,
+    "captured_directly": true,
+    "file_hash": "sha256:5e0fa1a06f2ec3c24d11b25fd0cd8abdf4d4ed3460b74e9d4ba4580ac86f8916",
+    "frozen_mbpp_rows": [
+      640,
+      847
+    ],
+    "passed": true,
+    "proof": "full-suite.txt",
+    "real_docker_and_official_metrics": true,
+    "seconds": 355.255,
+    "tests": 345
+  },
+  "official_gepa_unchanged": true,
+  "policy_changed": false,
+  "recovered_prior_native_log": {
+    "bytes": 112354,
+    "file_hash": "sha256:bf4c1fbcef024ca5724cfe6610580946a65b236094429dadd3f9a2294a745371",
+    "original_bytes_authenticated": true,
+    "proof": "recovered-11e-full-suite.txt",
+    "source": "artifact://727"
+  },
+  "sandbox_smoke": {
+    "cases": 13,
+    "passed": true,
+    "proof": "smoke-result.json",
+    "receipts": "smoke-grader-outcomes.jsonl"
+  },
+  "schema": "pilot-live-stop-verification-v11f",
+  "verification_hash": "sha256:aa3c7714257dcc76fac5155a89015cf5df3ba596db751c7ecc622c8b460931d5"
+}

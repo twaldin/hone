@@ -1,15 +1,18 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from functools import partial
 import json
 from pathlib import Path
 import re
 
-from .controls import CONTROL_ROWS, CONTROL_SEED, ControlsFailed, SHORTCUT_CODE, representative_rows
+from .controls import (CONTROL_ROWS, CONTROL_SEED, ControlsFailed, SHORTCUT_CODE, negative_probe,
+                       representative_rows, validate_unscored_rejection)
 from .runtime import append_json, canonical, digest
 from .tasks import Task, evaluate, score_output
 
-VERSION = "pilot-adversarial-v3"
+VERSION = "pilot-adversarial-receipted-v11"
+LEGACY_VERSION = "pilot-adversarial-v3"
 TASK_NAMES = ("mbpp", "ifbench", "aime")
 TEXT_FIELDS = {"aime": ("answer",), "ifbench": ("response", "final_response"),
                "hover": ("summary", "query", "summary", "query")}
@@ -158,12 +161,16 @@ def run(tasks: list[Task], identities: dict, out: Path) -> dict:
             for row in representative_rows(mbpp):
                 source = solution(attack, row)
                 candidate = artifact(source)
-                execution = evaluate(mbpp, candidate, [row], _forbidden_call)
-                record = {"attack": attack.name, "row_id": row["id"], "artifact": candidate,
-                          "source": source, "output": execution["outputs"][0], "score": execution["scores"][0]}
+                record = {"attack": attack.name, "row_id": row["id"], "artifact": candidate, "source": source}
+                execution, receipt = negative_probe(partial(evaluate, mbpp, candidate, [row], _forbidden_call),
+                                                    row, source, identities["mbpp"], attack=attack.name)
+                if receipt is None:
+                    record.update(output=execution["outputs"][0], score=execution["scores"][0])
+                else:
+                    record.update(output=source, score=None, receipt=receipt)
                 proof["mbpp"].append(record)
                 append_json(out / "mbpp.jsonl", record)
-                if record["score"] != 0:
+                if record["score"] not in (0, None):
                     raise ControlsFailed(f"Adversarial positive: {attack.name} on {row['id']}; stop epoch without retuning")
                 if record["output"] != source:
                     raise ControlsFailed(f"Attack artifact was not emitted intact: {attack.name} on {row['id']}")
@@ -182,9 +189,20 @@ def run(tasks: list[Task], identities: dict, out: Path) -> dict:
         _write(out / "adversarial.json", proof)
 
 
-def validate_result(proof: dict, identities: dict, cohorts: dict) -> None:
+def _rejected(record: dict, legacy: bool, identity: dict, rows: dict | None) -> bool:
+    if "receipt" not in record:
+        return record["score"] == 0
+    if legacy or record["score"] is not None:
+        return False
+    if rows is None:
+        raise ValueError("Unscored adversarial receipts require their MBPP rows to bind each grader input")
+    validate_unscored_rejection(record["receipt"], rows[record["row_id"]], record["source"], identity, attack=record["attack"])
+    return True
+
+
+def validate_result(proof: dict, identities: dict, cohorts: dict, rows: dict | None = None) -> None:
     try:
-        valid = (proof["version"] == VERSION and proof["seed"] == CONTROL_SEED and proof["passed"] is True
+        valid = (proof["version"] in (VERSION, LEGACY_VERSION) and proof["seed"] == CONTROL_SEED and proof["passed"] is True
                  and proof["model_calls"] == 0 and proof["identities"] == identities and proof["cohorts"] == cohorts
                  and proof["attack_manifest"] == manifest() and isinstance(proof["gradeability_hash"], str)
                  and proof["text_attack_manifest"] == text_manifest()
@@ -193,8 +211,9 @@ def validate_result(proof: dict, identities: dict, cohorts: dict) -> None:
         ids = cohorts["mbpp"]["rows"]
         expected = [(attack.name, row_id) for attack in ATTACKS for row_id in ids]
         valid = valid and len(ids) == CONTROL_ROWS and [(r["attack"], r["row_id"]) for r in proof["mbpp"]] == expected
-        valid = valid and all(r["score"] == 0 and r["output"] == r["source"]
-                              and r["artifact"] == artifact(r["source"]) for r in proof["mbpp"])
+        legacy = proof["version"] == LEGACY_VERSION
+        valid = valid and all(r["output"] == r["source"] and r["artifact"] == artifact(r["source"])
+                              and _rejected(r, legacy, identities["mbpp"], rows) for r in proof["mbpp"])
         valid = valid and all(type(row["gradeable"]) is bool and (row["reason"] is None or isinstance(row["reason"], str))
                               for row in proof["gradeability"])
         valid = valid and set(proof["text_only"]) == {"ifbench", "aime"}
@@ -220,22 +239,33 @@ def validate_result(proof: dict, identities: dict, cohorts: dict) -> None:
 
 
 def validate_task_admission(proof: dict, task: Task, identity: dict, rows: list[dict]) -> None:
-    validate_result(proof, proof.get("identities", {}), proof.get("cohorts", {}))
+    if proof.get("version") != VERSION:
+        raise ValueError("New control measurements require the receipted outcome-boundary adversarial proof")
+    validate_result(proof, proof.get("identities", {}), proof.get("cohorts", {}), {row["id"]: row for row in rows})
     ids = [row["id"] for row in rows]
     if (proof["identities"][task.name] != identity or proof["cohorts"][task.name] != {"rows": ids, "cohort_hash": digest(ids)}
             or ids != [row["id"] for row in representative_rows(task)]):
         raise ValueError("Controls do not match the frozen adversarial evaluator and cohort")
 
 
-def replay_proof(proof: dict, tasks: list[Task]) -> int:
+def replay_proof(proof: dict, tasks: list[Task]) -> dict:
     mbpp = next(task for task in tasks if task.name == "mbpp")
     rows = {row["id"]: row for row in mbpp.train}
-    checked = 0
+    identity = proof["identities"]["mbpp"]
+    checked, unscored = 0, []
     for record in proof["mbpp"]:
-        score = score_output(mbpp, rows[record["row_id"]], record["output"])
-        if score != record["score"] or score != 0:
+        row, stored = rows[record["row_id"]], record["score"]
+        if "receipt" in record:
+            validate_unscored_rejection(record["receipt"], row, record["output"], identity, attack=record["attack"])
+        score, receipt = negative_probe(partial(score_output, mbpp, row, record["output"]),
+                                        row, record["output"], identity, attack=record["attack"])
+        if ((stored is None) != ("receipt" in record) or stored not in (0, None)
+                or (receipt is None and score != 0)):
             raise ControlsFailed("Adversarial replay disagrees with retained MBPP results")
-        checked += 1
+        if receipt is None:
+            checked += 1
+        else:
+            unscored.append(receipt)
     for task in tasks:
         if task.name == "mbpp":
             continue
@@ -250,4 +280,4 @@ def replay_proof(proof: dict, tasks: list[Task]) -> int:
             if direct != record["direct_score"] or execution["scores"] != record["scores"] or direct != 0:
                 raise ControlsFailed("Adversarial replay disagrees with retained text-only results")
             checked += 2
-    return checked
+    return {"scored_checks": checked, "unscored_rejections": unscored}

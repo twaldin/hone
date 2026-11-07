@@ -1,0 +1,71 @@
+{
+  "candidate_seconds": 10,
+  "model_calls": 0,
+  "passed": true,
+  "real_pinned_docker": true,
+  "results": [
+    {
+      "case": "pass",
+      "outcome": "pass",
+      "output_hash": "sha256:ef6a31481c64d31a09f63c8914f6d72658792bc592fcef10e21d30443536c240",
+      "receipt_hash": "sha256:d3ea73d8633ae1edcae756b3881c0a70155d56b76b1931d64e328ef28e2c5953",
+      "score": 1.0
+    },
+    {
+      "case": "wrong-output",
+      "outcome": "wrong_answer",
+      "output_hash": "sha256:1e5deea6b808316e204a77dbc287e9754c7a5e8a569cd09677fa49414f450e49",
+      "receipt_hash": "sha256:49f65a05573cb982b023c92572a31ee55cbf332a40e900eb2ccaf68d61072f59",
+      "score": 0.0
+    },
+    {
+      "case": "candidate-exception",
+      "outcome": "wrong_answer",
+      "output_hash": "sha256:49fe61413c8d3a8a85a6d91bf1d96a8aaa048beabb8f327ed631c21a11e0a610",
+      "receipt_hash": "sha256:d3e4674604396cae8f5d3c03e66e5840ab8e6fc4218292bfe1bcfeec80497995",
+      "score": 0.0
+    },
+    {
+      "case": "candidate-syntax",
+      "outcome": "wrong_answer",
+      "output_hash": "sha256:c772b206168be4456531061b9d458b70058d6ee1debb47f40ef117a099c67aed",
+      "receipt_hash": "sha256:df41160a1f429b6bdfbc6dd26f19eeadc6460eec019827a51152125d7395a0e5",
+      "score": 0.0
+    },
+    {
+      "case": "candidate-SystemExit",
+      "outcome": "wrong_answer",
+      "output_hash": "sha256:a913c9bc4976007ee264a5000125aad34e73597b570511c7bc67e651c9d88bbb",
+      "receipt_hash": "sha256:d1c66da72976c93d29986698818dd29c2cb8e2d42b97255425ebc3d3f281ced4",
+      "score": 0.0
+    },
+    {
+      "case": "candidate-unsupported-output",
+      "outcome": "wrong_answer",
+      "output_hash": "sha256:0a7bdf44fbd076230ef21dd32386dc922befc3a7e3b4b453feb87170fb48a403",
+      "receipt_hash": "sha256:c42ca612f3d08de11a3f2e47a976a00cabe50b4277e64700884bb419fe604e6e",
+      "score": 0.0
+    },
+    {
+      "case": "candidate-timeout",
+      "outcome": "wrong_answer",
+      "output_hash": "sha256:7d6dea7ceee6643d789ce8da17d45c4bfbe814f14267143d492c8c8602c8229a",
+      "receipt_hash": "sha256:54261ccd929d072937f46de66c54c8de8333a6dd74feaa87836cb4d1502574c7",
+      "score": 0.0
+    },
+    {
+      "case": "worker-exit",
+      "outcome": "nonzero_exit",
+      "output_hash": "sha256:210f10edc31bda2c713e165fb97241218752a84e7d44a835875f556601792e03",
+      "receipt_hash": "sha256:b0a9943e574e5ee5115878e28ab70ec4c76b4074e38dbe9a8d9cb25f7a4d3fc3",
+      "score": null
+    },
+    {
+      "case": "worker-no-frame",
+      "outcome": "frame_failure",
+      "output_hash": "sha256:f727d688c029140a405a5ca9835a1797289116b701cd0a17cfafb22403cda6dd",
+      "receipt_hash": "sha256:b1974193d5653f0eb3a3cd987994772dff7cfee4c8983d33fc049e99157fef8e",
+      "score": null
+    }
+  ]
+}

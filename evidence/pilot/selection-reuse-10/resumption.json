@@ -1,0 +1,15 @@
+{
+  "authorization": "Assistant resumption under Tim's order 302, 2026-11-06 around 00:45Z",
+  "prior_stop_honored": true,
+  "search_calls_before_resumption": 0,
+  "review_failure_counter_reset": true,
+  "additional_review_rounds_authorized": 2,
+  "handback_rule": "Stop for a substantive finding about measurement validity, budget fairness or official GEPA changes, or if a third review round fails.",
+  "corrections": [
+    "Active pilot documentation now states that PR37 merged as 6017e35 and seeds1–2 are authorized after the predeclaration10 launch gates.",
+    "Commit the independently pinned approved search SHA256 and duplicate-seed rejection with their failing-before/passing-after regression evidence.",
+    "Make launch-proof replay print-only and record committed-head plus execution-source hashes without rewriting sealed proof files."
+  ],
+  "required_before_launch": ["fresh admission proof on committed source", "complete raw seed0 metric replay", "green final-head CI", "exact-head cross-family READY"],
+  "unchanged": "Official GEPA, training gates, caps, scoring, twelve-cell order, refusal/throttle/abort rules, admitted HoVer index and no merge."
+}

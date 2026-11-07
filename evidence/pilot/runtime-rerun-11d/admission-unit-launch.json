@@ -1,0 +1,13 @@
+{
+  "Restart": "no",
+  "disk_available_bytes": 554141188096,
+  "mode": "admit",
+  "pid": 1739807,
+  "requested_affinity": [
+    6
+  ],
+  "requested_nice": 10,
+  "status": "started",
+  "taskset": "/usr/bin/taskset",
+  "unit": "hone-predecl11d-admit-20261107T145310Z.service"
+}

@@ -1,0 +1,64 @@
+{
+  "actual_admission": {
+    "proof": "admission.json",
+    "receipts": "admission-grader-outcomes.jsonl",
+    "passed": true,
+    "elapsed_seconds": 521.854194547981,
+    "model_calls": 0,
+    "gateway_requests": 0,
+    "pass": 1808,
+    "wrong_answer": 2650,
+    "implementation_commit": "3f18b107d3b51abb5259b6566880da414052ff0f",
+    "unit": "hone-predecl11a-admit-20261107T122903Z.service",
+    "historical_pid": 687509
+  },
+  "after": {
+    "frozen_mbpp_admission": {
+      "mock_grader_or_reuse_mbpp": false,
+      "ranking_and_noise_passed": true,
+      "retained_control_noise_rows": 720,
+      "rows": [
+        640,
+        847
+      ],
+      "trusted_wrong_scores": [
+        0.0,
+        0.0
+      ]
+    },
+    "log_artifact": "artifact://512",
+    "log_file": "full-suite.log",
+    "passed": true,
+    "real_docker_and_official_metrics": true,
+    "seconds": 381.114,
+    "skipped": 0,
+    "tests": 339
+  },
+  "amendment_commit": "3d9da07960d74a846fe42f0d1b58f56255635f99",
+  "before": "before.json",
+  "cpu_affinity": {
+    "actual_unit_admission": "passed",
+    "proof": "admission.json",
+    "observed_affinity": [6],
+    "observed_nice": 10,
+    "change": "explicit taskset -c6 for both admission/run via launch.py",
+    "policy_choice_required": false
+  },
+  "new_pilot_model_calls": 0,
+  "official_gepa_and_adapter_unchanged": true,
+  "sandbox_smoke": {
+    "candidate_timeout_seconds": 10,
+    "cases": 9,
+    "model_calls": 0,
+    "passed": true,
+    "proof": "smoke-result.json",
+    "receipts": "smoke-grader-outcomes.jsonl",
+    "worker_supervision_seconds": 15
+  },
+  "schema": "pilot-trusted-candidate-verification-v11a",
+  "search_gate": "passing actual admission, green CI and exact-head cross-family READY required",
+  "source_binding": {
+    "transition": "../source-transition-11.json",
+    "verification_hash": "sha256:498fe936c847ebbcb25f83c7467adc4e94ec4c6b297c3192bf5df7d2656c056c"
+  }
+}

@@ -1,0 +1,60 @@
+**READY.** I found no blocking problems in the full PR at exact head `7040004e6c51b1960cc83750320424731fb3f20a` (PR #38). Model: `anthropic/claude-opus-5-5`, which is cross-family to the author's `openai-codex/gpt-6.1-sol`. This was a read-only review: no edits, tests, builds or posts. Exact-head CI could not be checked from here.
+
+What this change does: When a candidate's worker process has exited but a detached child it started still holds the result pipe, the grader now keeps the worker's real exit code and whatever result frame it captured. Before, this case became "timed out, score 0". The head also adds a Docker regression test, updates the two source pins, keeps the fresh zero-call admission, smoke and full-suite proof, and points the active scripts and runner test at `runtime-rerun-11b`.
+
+**The fix itself** (`pilot/verification.py:424-459`)
+- The supervisor now checks whether the worker has exited before it checks the deadline. An exited worker's captured bytes go back to the caller with its real exit code. Only a worker still running at the deadline gets the "time limit, score 0" verdict.
+- Outcomes now match the ruling:
+  - A valid result frame scores normally, and a trusted candidate failure scores 0.
+  - Exit with a nonzero code is `nonzero_exit`, unscored.
+  - Exit 0 with no frame is `frame_failure`, unscored.
+  - A candidate still running at the deadline scores 0.
+- An escaped child cannot change the exit code. It can only corrupt the frame, which makes the case unscored. A candidate could already do that itself with `os._exit(0)`.
+- The planner's expected answers never reach the worker, so a forged frame gains nothing over solving the task.
+- Timing is unchanged. In the smoke run, escaped cases took about 10.33 s against the 15 s outer limit, about the same as the existing timeout case (10.347 s).
+
+**Observed evidence**
+- **Before/after:** the four failures in `before.txt` point at test lines 618, 622 and 629, which match the current file. `full-suite.txt` shows 340 tests OK, including the new test, the retained rows 640/847 test and both `test_rerun11` tests.
+- **Smoke:** all 13 receipts re-hash correctly and match `smoke-result.json`. The four escaped cases came out as exit code 7 unscored, exit 0 unscored, pass 1.0, and TypeError 0.
+- **Admission journal:**
+  - 4,458 outcomes: 1,808 pass and 2,650 wrong answer. None are infrastructure or time-limit outcomes.
+  - Every receipt carries the current grader's source hash and re-hashes correctly.
+  - The 1,440 worker runs took at most 0.243 s.
+  - Rows 640 and 847 are wrong answers from TypeError/KeyError candidate failures.
+  - All 160 negative-probe receipts scored 0.
+- **The retained admission is the original:** `admission.json` and the outcomes journal are byte-identical to the original unit output in `.pilot-state`. The recorded fields show `passed=true`, 0 model calls, 0 gateway requests, CPU 6, nice 10 and GEPA unchanged. That no model call could happen is my reading of `admit.py`, not something I observed.
+- **Pins:**
+  - All 21 pinned source files, the predeclaration, the transition file and the journal hash match the bytes at head.
+  - Compared with the 11a admission, exactly five pins changed: the three 11b scripts, `admission.py` and `verification.py`.
+  - Route, OAuth pool, omp CLI and package-lock pins equal the rerun-10 values. The HoVer index pins equal 11a.
+  - After `9a0d6e5`, only evidence files and `test_rerun11.py` changed.
+- **Old evidence untouched:** the 11b `admit.py`, `launch.py` and `run.py` differ from 11a only in the directory string, and `smoke.py` only adds four cases. So the duplicated scripts are not a method change; 11a stays as immutable evidence. Nothing under `runtime-rerun-11`, `11a`, `review-stop-11a`, `rerun1`, `seed0`, `controls-7b`, `predeclaration-11` or `snapshot-11` changed. The 11b bundle hash and all its files verify, with no extra or missing files.
+- **Launch guards:**
+  - All 12 cells run fresh in order: seed 1 then 2, MBPP then HoVer, Hone, GEPA, plain.
+  - Forecasts add up to 33,438.
+  - The 35,000-call hard cap is checked before every model call, and the projection before every cell.
+  - The 100 GB disk floor is checked at cell start, model dispatch and grading.
+  - Rerun 1's 7 rows plus the ENOSPC row stay joined, so the first new infrastructure failure stops the campaign at once. The pause budget and hidden-attempt history are joined too.
+  - Rerun 2 uses a fresh root with no restart and no per-row retry. Pins and the head gate are re-checked before every cell.
+  - No `launch-11.json` and no rerun-2 root exist yet.
+- **Official GEPA:** `search.py` equals the transition-10 hash. Compared with main, only the Hone/plain loop (the selection cache) and one import changed. `_gepa` and `GEPA_COMMIT` are unchanged, and the PR changes no dependency, lock file or global config.
+- **Selection cache:** each selection artifact is scored once per cell and its stored scores are reused. The child is scored first.
+
+**Nice to have** (neither blocks launch)
+
+1. **Rare edge at the exact deadline** (`pilot/verification.py:432-433`)
+   - **What this is:** at the deadline, if the worker has exited, the supervisor returns the bytes it has read so far.
+   - **Problem:** the worker might write its frame and exit in the few microseconds between the last read attempt and the exit check. Then the frame is still in the pipe and the result becomes unscored `frame_failure`; the old code gave score 0. This needs a CPU switch in that tiny window on the one-CPU container, plus a candidate finishing at exactly 10 s. I judge this negligible (inference); the slowest admission run took 0.243 s.
+   - **Fix:** in that branch, read whatever is already waiting (zero wait, capped at the wire limit) before returning. About 4 lines, but it would need new pins and a new admission, so only bundle it into a later grader change.
+   - **If we skip it:** at worst one cell stops as an infrastructure failure. It can never produce a wrong score.
+2. **Hone's policy file is not in the launch pins** (`admit.py:224-225`, `run.py:499-517`, `search.py:74-76`)
+   - **What this is:** Hone's accept/reject gate runs `optimizer/src/pilot-policy.ts` through `bun`.
+   - **Problem:** an uncommitted edit to that file after admission would still pass the per-cell check, because the head stays the same and the file is not pinned. This is older than this PR. The worktree is clean now, and each cell's manifest records the file's hash (`__main__.py:764-768`).
+   - **Fix:** nothing before this launch. Later, add it to the admitted sources or require a clean tree.
+   - **If we skip it:** only an out-of-band edit during the run would go unnoticed at launch, though the cell manifests would show it afterwards.
+
+There is also a local, untracked `evidence/pilot/runtime-rerun-11a/__pycache__/run.cpython-312.pyc`. It is not in the head or any bundle, and bundle checks ignore it; you may delete it.
+
+Verdict: Ship.
+
+Not checked: exact-head CI, because `api.github.com` failed to connect on both tries, at least two minutes apart. That is a communication failure, not a pilot failure. Live unit behaviour comes from the retained receipts only.

@@ -1,0 +1,35 @@
+What this change does: It preserves completed grader results across exit/deadline races. It distinguishes a live candidate timeout from genuine worker death before assigning score zero.
+
+- Model: `openai-codex/gpt-6-astra`
+- Exact SHA: `99a6881883aa31cc90993a922e05bfdd2fdbeb49`
+- **Scoped verdict: NOT_READY.** This is not full release clearance.
+
+## Must fix
+
+1. **A different live ptrace stop becomes false infrastructure** (`pilot/verification.py:429-439,486-491`).
+   - **What this is:** The supervisor accepts only `PTRACE_EVENT_STOP` as evidence that the worker is alive at expiry.
+   - **Problem:** [INFERENCE] A candidate looping on harmless `SIGWINCH`, or handling `SIGUSR1`, can enter a signal-delivery stop between `SEIZE` and `INTERRUPT`. Linux explicitly preserves an existing trap and says the resulting trap need not be `PTRACE_EVENT_STOP` ([kernel source](https://github.com/torvalds/linux/blob/v6.8/kernel/ptrace.c#L1114-L1138)). The returned `CLD_TRAPPED` proves a live stop, but line 433 rejects it. The fallback kills the worker and forwards exit 137; `_results` raises unscored infrastructure instead of reporting the candidate's own timeout zero.
+   - **Fix:** Recognize other observed live ptrace stops for this options-free seize. Preserve genuine exit/death handling. Add a Docker consumer regression that forces a benign signal-delivery stop and checks the final score and receipt.
+   - **If skipped:** An ordinary candidate overrun can abort the campaign rather than receive its required zero.
+   - **Class:** Same authorized worker-I/O exit/deadline class. No policy handback needed.
+
+2. **The committed native-suite proof contains only a tool error** (`evidence/pilot/runtime-rerun-11e/full-suite.txt:1`; `verification.json:39`; `README.md:39`).
+   - **What this is:** Required full-suite evidence is cited as retained.
+   - **Problem:** The committed file contains “Unbounded raw read blocked…”, not test output. The original `artifact://727` remains readable and does show **344 tests, 454.900 seconds, OK**, including Docker regressions.
+   - **Fix:** Retain the original log bytes and refresh the bundle hashes. No rerun is needed merely to recover this evidence.
+   - **If skipped:** The committed bundle cannot substantiate its required native-suite proof.
+   - **Class:** Evidence-retention defect, not worker I/O or a policy question. Reported to the release reviewer.
+
+## Confirmed
+
+- Both earlier 11d counterexamples are resolved: delayed normal outer exit is drained with its real status; delayed genuine SIGKILL remains unscored. Consumer-level regressions cover both, with retained failing-before/passing-after transcripts.
+- Inner reads handle competing readers without blocking. Escaped writers do not require EOF. Drains remain byte-bounded; overflow and malformed frames remain infrastructure.
+- Linux wait-status encoding supports the current event extraction. The frozen-image probe demonstrates permitted seize/interrupt without added sandbox capabilities. I found no ABI defect for the reviewed Linux/x86-64 use.
+- All thirteen smoke outcome receipts match current source provenance and their receipt hashes. Actual receipts preserve candidate-error/timeout zeros and worker-exit/missing-frame infrastructure.
+- Reviewed `verification.py` and `program.py` hashes match admission pins.
+
+**Principle applied:** Test Behavior, Not Implementation. I assessed consumer scores and receipts, not helper success alone.
+
+**Verdict: fix 1 and 2 first.**
+
+Not checked: No tests, containers, builds, linters or formatters were run. Campaign-wide release clearance remains outside this scoped audit.

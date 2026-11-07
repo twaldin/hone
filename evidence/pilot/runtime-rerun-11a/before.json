@@ -1,0 +1,11 @@
+{
+  "errors": 3,
+  "head": "3d9da07960d74a846fe42f0d1b58f56255635f99",
+  "observed": "Current scorer raises nonzero_exit/nonzero_exit/timeout infrastructure instead of wrong-answer0.",
+  "seconds": 0.177,
+  "tests": [
+    "VerificationTests.test_candidate_exception_keeps_wrong_answer_score",
+    "VerificationTests.test_candidate_syntax_error_keeps_wrong_answer_score",
+    "VerificationTests.test_candidate_time_limit_keeps_wrong_answer_score"
+  ]
+}

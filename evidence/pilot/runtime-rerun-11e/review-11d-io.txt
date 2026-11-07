@@ -1,0 +1,37 @@
+What this change does: It preserves completed grader results across deadline and exit boundaries. It keeps candidate failures scored zero and infrastructure failures unscored.
+
+- **SHA:** `abd22a4aa87bfecbc80637d535000381669a9c10`
+- **Model:** `openai-codex/gpt-6-astra`
+- **Scoped verdict:** **NOT_READY**
+
+## Must fix
+
+1. **Outer exit publication can still discard a completed verdict** (`pilot/verification.py:529-537,555-578`; `pilot/program.py:46-54`).
+   - **What this is:** The Docker invocation can finish producing its result before its exit status becomes observable.
+   - **Problem:** [INFERENCE] Concrete schedule: the result is queued or already read; the Docker process enters normal exit; `poll()` still returns `None` at expiry. `_run` commits `timeout`, then cleanup obtains exit code 0 but closes the streams without recovering the result or reconsidering the outcome.
+   - **Fix:** Resolve deadline termination and final status before closing the streams. If termination discovers an already-completing normal exit, perform the bounded nonblocking drain and retain its frame/status. Add a consumer-level delayed-publication regression.
+   - **If we skip it:** A completed pass or candidate-exception verdict becomes unscored infrastructure and stops the campaign.
+   - **Defect class:** Worker I/O at exit/deadline. Covered by current authorization.
+
+2. **Delayed SIGKILL publication becomes a false candidate-timeout zero** (`pilot/verification.py:430-434,469-474`).
+   - **What this is:** The supervisor identifies its deadline kill solely from the eventual `CLD_KILLED/SIGKILL` status.
+   - **Problem:** [INFERENCE] Concrete schedule: the candidate self-SIGKILLs, or suffers another genuine SIGKILL, and enters kernel exit before the deadline; publication is delayed. The nonblocking probe returns `None`, the supervisor sends another SIGKILL, and the existing genuine death is relabeled as a trusted timeout. `_emit` then produces exit 0 and `wrong_answer: 0`.
+   - **Fix:** Establish whether the worker is still executing before attributing its death to the deadline. An uncatchable stop followed by observing stopped-versus-exited state before killing can distinguish these cases without granting more candidate execution. Extend delayed-publication coverage to genuine SIGKILL and assert the consumer’s unscored receipt.
+   - **If we skip it:** Infrastructure death is silently converted into a numeric measurement.
+   - **Defect class:** Worker I/O at exit/deadline. Covered by current authorization.
+
+These publication windows are supported by [Linux’s exit ordering](https://github.com/torvalds/linux/blob/v6.8/kernel/exit.c#L817-L897): exit status is established and files are closed before `exit_notify()` publishes the zombie state. I did not measure their natural frequency.
+
+## Evidence assessed
+
+- Both inner and outer descriptors genuinely use nonblocking mode. Inner competing-read handling, bounded drains, overflow detection, partial-frame rejection and escaped-writer handling are otherwise coherent.
+- The outer Docker regression exercises `score_solution` and validates receipts. Its fixture pre-reaps the process, however, so it does not cover finding 1.
+- Retained transcripts show **2 failures and 6 errors before**, then **3 regression tests passing**. The full native transcript reports **343 passing tests**; the standalone smoke records **13 passing cases**.
+- Frozen MBPP 640/847 receipts retain their actual TypeError-zero outcomes. Admission records **1,808 pass and 2,650 wrong-answer outcomes**, with zero model/gateway calls.
+- Inspected source, transition, active-script and admission-journal digests match their recorded pins. Ordinary infrastructure propagation and the bound negative-probe exception remain coherent.
+
+**Principle applied:** Test Behavior, Not Implementation. Consumer scores and validated receipts determine coverage, not merely successful helper returns.
+
+**Verdict: fix 1 and 2 first.** Both remain fixable under the existing approval; neither requires policy handback.
+
+**Not checked:** No tests, builds, containers or formatters were run. This scoped audit is not the separate full cross-family release clearance.

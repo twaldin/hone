@@ -1,0 +1,24 @@
+{
+  "head": "99ce88b7023391c4d92d5c8882cee35eb576460f",
+  "ci": {
+    "status": "SUCCESS",
+    "run_id": 42207823091,
+    "url": "https://github.com/twaldin/hone/actions/runs/42207823091",
+    "python_tests": 290,
+    "receipt_pass": 8,
+    "receipt_skip": 4
+  },
+  "cross_family": {
+    "head": "99ce88b7023391c4d92d5c8882cee35eb576460f",
+    "reviewer_model": "anthropic/claude-opus-5-5",
+    "author_model": "openai-codex/gpt-6.1-sol",
+    "verdict": "READY",
+    "url": "https://github.com/twaldin/hone/pull/38#issuecomment-6683483922"
+  },
+  "predeclaration_addendum_commit": "1d354b2bad1f2145d8f6a2711309b864cdcd11c7",
+  "pinned_admission_passed": true,
+  "pinned_throttle_status_usage_passed": true,
+  "capacity_reason_at_check": null,
+  "new_search_calls": 0,
+  "recorded_at": "2026-11-06T11:12:49.477404+00:00"
+}

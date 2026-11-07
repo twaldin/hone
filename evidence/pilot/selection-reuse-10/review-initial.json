@@ -1,0 +1,15 @@
+{
+  "head": "c2a03cc0ac9f8e03acaef83369d16b071d94442e",
+  "author_model": "openai-codex/gpt-6.1-sol",
+  "reviewer_model": "anthropic/claude-opus-5-5",
+  "verdict": "NOT READY",
+  "cross_family_failure_count": 1,
+  "accepted_findings": [
+    "Add a regression comparing the real archived seed-0 report, excluding only the intentionally changed reporter source hash.",
+    "Use tracked evidence/pilot/seed0-search-9 for the required historical side-by-side report, never omit it.",
+    "Update the top-level README's stale seed authorization and merged-PR statement."
+  ],
+  "core_findings": "Selection reuse, full-artifact hashing, candidate-first budget order, restart handling, exact admission chain, run-wide stop accounting, interval hierarchy and untouched official GEPA were accepted.",
+  "initial_nice_to_have": "Duplicate-seed validation was initially deferred. Subsequent bot triage reproduced the stop-accounting boundary bug, so duplicate seeds are now rejected before startup without changing the authorized --seed 1 2 behavior.",
+  "comment_audit": {"needless_docstrings_removed": 2, "added_suppressions": 0, "code_changes": 0}
+}

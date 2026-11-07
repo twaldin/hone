@@ -1,0 +1,27 @@
+{
+  "schema": "pilot-selection-reuse-regression-v10",
+  "model_calls": 0,
+  "before": {
+    "source_head": "6017e35e0b2f2f8dd72c0cdd8e2bbf94edeaf107",
+    "command": "python3 -m unittest pilot.test_search.SearchTests.test_hone_gate_passer_receives_remaining_selection_budget pilot.test_search.SearchTests.test_hone_reuses_seed_parent_and_incumbent_vectors_on_restart pilot.test_search.SearchTests.test_plain_reproposed_artifacts_reuse_first_vector_even_if_rejected",
+    "tests": 3,
+    "failures": 3,
+    "observed_selection_artifacts": {
+      "gate_passer_budget": ["seed", "seed"],
+      "restart": ["seed", "seed", "better", "seed", "better", "best", "seed", "best", "better"],
+      "plain_reproposal": ["seed", "rejected", "rejected", "seed"]
+    }
+  },
+  "after": {
+    "command": "python3 -m unittest pilot.test_search pilot.test_transition pilot.test_dispatch",
+    "tests": 58,
+    "failures": 0,
+    "skipped": 11,
+    "note": "Initial integrated run before installing the native workspace and pinned GEPA runtime. Full installed-runtime verification is recorded separately."
+  },
+  "cause": {
+    "hone": "Base pilot/search.py:247-252 remeasured parent and optional incumbent before child selection.",
+    "plain": "Base pilot/search.py:260 evaluated each proposed artifact without artifact identity reuse.",
+    "declared_policy": "Base docs/pilot.md:163 and predeclaration-9.md:22, explicitly superseded by Tim's reuse decision in predeclaration 10."
+  }
+}

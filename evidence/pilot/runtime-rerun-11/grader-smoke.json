@@ -1,0 +1,32 @@
+{
+  "passed": true,
+  "real_pinned_docker_command": true,
+  "model_calls": 0,
+  "results": [
+    {
+      "outcome": "pass",
+      "score": 1.0,
+      "output_hash": "sha256:ef6a31481c64d31a09f63c8914f6d72658792bc592fcef10e21d30443536c240"
+    },
+    {
+      "outcome": "wrong_answer",
+      "score": 0.0,
+      "output_hash": "sha256:1e5deea6b808316e204a77dbc287e9754c7a5e8a569cd09677fa49414f450e49"
+    },
+    {
+      "outcome": "nonzero_exit",
+      "score": null,
+      "output_hash": "sha256:210f10edc31bda2c713e165fb97241218752a84e7d44a835875f556601792e03"
+    },
+    {
+      "outcome": "frame_failure",
+      "score": null,
+      "output_hash": "sha256:f727d688c029140a405a5ca9835a1797289116b701cd0a17cfafb22403cda6dd"
+    },
+    {
+      "outcome": "timeout",
+      "score": null,
+      "output_hash": "sha256:7d6dea7ceee6643d789ce8da17d45c4bfbe814f14267143d492c8c8602c8229a"
+    }
+  ]
+}

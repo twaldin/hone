@@ -1,0 +1,1388 @@
+{
+  "retained_json_or_jsonl_errors": [
+    {
+      "file": "hover/1/plain/calls.jsonl",
+      "line": 2017,
+      "bytes": 160,
+      "newline_terminated": false,
+      "error": "Unterminated string starting at: line 1 column 146 (char 145)"
+    },
+    {
+      "file": "hover/1/plain/manifest.json",
+      "bytes": 0,
+      "error": "Expecting value: line 1 column 1 (char 0)"
+    }
+  ],
+  "producer_file_mtimes": [
+    {
+      "file": "attempts.json",
+      "mtime": "2026-11-06T20:29:11.049901+00:00",
+      "bytes": 752807
+    },
+    {
+      "file": "cell-sources.json",
+      "mtime": "2026-11-06T20:29:11.039901+00:00",
+      "bytes": 1242
+    },
+    {
+      "file": "comparison.json",
+      "mtime": "2026-11-06T20:29:11.054902+00:00",
+      "bytes": 747393
+    },
+    {
+      "file": "controller.json",
+      "mtime": "2026-11-06T11:30:00.750922+00:00",
+      "bytes": 3388
+    },
+    {
+      "file": "first-call.json",
+      "mtime": "2026-11-06T11:30:00.751922+00:00",
+      "bytes": 1119
+    },
+    {
+      "file": "hover/1/gepa/artifacts/062021cdd3ef74419b09fb1a3652af0891eb7018433a7dfde3b5d00c6ac0b10f.json",
+      "mtime": "2026-11-06T19:15:59.062905+00:00",
+      "bytes": 356
+    },
+    {
+      "file": "hover/1/gepa/artifacts/7a6f593ad4329eef64582e6bd58fce7b10a896e44ceb2e9c7abc358fc7d79795.json",
+      "mtime": "2026-11-06T19:13:44.867532+00:00",
+      "bytes": 1367
+    },
+    {
+      "file": "hover/1/gepa/artifacts/84a4871e65105cc15f5b7621af3ae32ffa5afd20b9f423f4ccc2d9284a0037d4.json",
+      "mtime": "2026-11-06T19:09:50.739580+00:00",
+      "bytes": 1384
+    },
+    {
+      "file": "hover/1/gepa/artifacts/d87bdc5599d906396c96e81be38e72d557a348a159a7d66c5a1275e8924a23cd.json",
+      "mtime": "2026-11-06T19:06:09.998623+00:00",
+      "bytes": 1886
+    },
+    {
+      "file": "hover/1/gepa/artifacts/df090c1ee89f59329b7f6611433a1c6206328c927c50b0de3fcd00573496c795.json",
+      "mtime": "2026-11-06T19:19:45.434814+00:00",
+      "bytes": 2165
+    },
+    {
+      "file": "hover/1/gepa/artifacts/df6f109a937c5bbc9a43749acd4eda076af551b992abaa22efa2212e49205bfd.json",
+      "mtime": "2026-11-06T19:02:07.285918+00:00",
+      "bytes": 1639
+    },
+    {
+      "file": "hover/1/gepa/bundle.json",
+      "mtime": "2026-11-06T20:29:11.035902+00:00",
+      "bytes": 1664
+    },
+    {
+      "file": "hover/1/gepa/calls.jsonl",
+      "mtime": "2026-11-06T20:29:09.404911+00:00",
+      "bytes": 2713813
+    },
+    {
+      "file": "hover/1/gepa/evaluations.jsonl",
+      "mtime": "2026-11-06T19:19:45.406815+00:00",
+      "bytes": 4275373
+    },
+    {
+      "file": "hover/1/gepa/incumbents.jsonl",
+      "mtime": "2026-11-06T18:59:59.681598+00:00",
+      "bytes": 408
+    },
+    {
+      "file": "hover/1/gepa/manifest.json",
+      "mtime": "2026-11-06T20:29:10.969902+00:00",
+      "bytes": 30914
+    },
+    {
+      "file": "hover/1/gepa/result.json",
+      "mtime": "2026-11-06T20:29:10.967902+00:00",
+      "bytes": 976
+    },
+    {
+      "file": "hover/1/gepa/search.json",
+      "mtime": "2026-11-06T20:29:10.967902+00:00",
+      "bytes": 25998
+    },
+    {
+      "file": "hover/1/gepa/spend.json",
+      "mtime": "2026-11-06T20:29:11.031902+00:00",
+      "bytes": 169959
+    },
+    {
+      "file": "hover/1/hone/artifacts/062021cdd3ef74419b09fb1a3652af0891eb7018433a7dfde3b5d00c6ac0b10f.json",
+      "mtime": "2026-11-06T16:39:28.070423+00:00",
+      "bytes": 356
+    },
+    {
+      "file": "hover/1/hone/artifacts/38be2b81284dae44ff28a2bbac3b914eab888060270692bbe2a67bcae59e7996.json",
+      "mtime": "2026-11-06T16:19:42.246876+00:00",
+      "bytes": 1641
+    },
+    {
+      "file": "hover/1/hone/artifacts/b90f1d2e8857af4a9470cec4892809f7819bba3a109c989e5ccd0bf302de488c.json",
+      "mtime": "2026-11-06T16:48:24.585888+00:00",
+      "bytes": 1830
+    },
+    {
+      "file": "hover/1/hone/artifacts/bee546481d5cdb3a992b632bb6e17133eca011a305a6459d52556f67ecf161a6.json",
+      "mtime": "2026-11-06T16:28:27.756507+00:00",
+      "bytes": 1656
+    },
+    {
+      "file": "hover/1/hone/bundle.json",
+      "mtime": "2026-11-06T17:48:49.374824+00:00",
+      "bytes": 1352
+    },
+    {
+      "file": "hover/1/hone/calls.jsonl",
+      "mtime": "2026-11-06T17:48:47.607833+00:00",
+      "bytes": 2493365
+    },
+    {
+      "file": "hover/1/hone/evaluations.jsonl",
+      "mtime": "2026-11-06T16:48:24.584888+00:00",
+      "bytes": 4726171
+    },
+    {
+      "file": "hover/1/hone/incumbents.jsonl",
+      "mtime": "2026-11-06T16:15:43.443948+00:00",
+      "bytes": 392
+    },
+    {
+      "file": "hover/1/hone/manifest.json",
+      "mtime": "2026-11-06T17:48:49.296824+00:00",
+      "bytes": 30914
+    },
+    {
+      "file": "hover/1/hone/result.json",
+      "mtime": "2026-11-06T17:48:49.293824+00:00",
+      "bytes": 960
+    },
+    {
+      "file": "hover/1/hone/search.json",
+      "mtime": "2026-11-06T17:48:49.293824+00:00",
+      "bytes": 39678
+    },
+    {
+      "file": "hover/1/hone/spend.json",
+      "mtime": "2026-11-06T17:48:49.369824+00:00",
+      "bytes": 146788
+    },
+    {
+      "file": "hover/1/plain/artifacts/062021cdd3ef74419b09fb1a3652af0891eb7018433a7dfde3b5d00c6ac0b10f.json",
+      "mtime": "2026-11-06T22:06:34.621738+00:00",
+      "bytes": 356
+    },
+    {
+      "file": "hover/1/plain/artifacts/d1ba66015a7e6396a272a0a7bdbb74f2d81e5c8dd290b440ddde6ec6d66310b7.json",
+      "mtime": "2026-11-06T22:08:41.533135+00:00",
+      "bytes": 1512
+    },
+    {
+      "file": "hover/1/plain/calls.jsonl",
+      "mtime": "2026-11-06T22:37:28.498659+00:00",
+      "bytes": 2048000
+    },
+    {
+      "file": "hover/1/plain/evaluations.jsonl",
+      "mtime": "2026-11-06T22:08:32.047180+00:00",
+      "bytes": 4624941
+    },
+    {
+      "file": "hover/1/plain/incumbents.jsonl",
+      "mtime": "2026-11-06T21:41:31.130223+00:00",
+      "bytes": 408
+    },
+    {
+      "file": "hover/1/plain/manifest.json",
+      "mtime": "2026-11-06T22:37:28.499659+00:00",
+      "bytes": 0
+    },
+    {
+      "file": "launch-gate.json",
+      "mtime": "2026-11-06T11:30:00.748922+00:00",
+      "bytes": 822
+    },
+    {
+      "file": "machine.json",
+      "mtime": "2026-11-06T11:22:15.466188+00:00",
+      "bytes": 1143
+    },
+    {
+      "file": "mbpp/1/gepa/artifacts/020b73dfb5dbd64a56bf0190f4fba992fe044d353aed17fa170ae31c49bf6077.json",
+      "mtime": "2026-11-06T08:52:10.332172+00:00",
+      "bytes": 1696
+    },
+    {
+      "file": "mbpp/1/gepa/artifacts/0422d22103f803e38dc1b94c1849df60763ede5ea370798cfb37cf6f3c8f2862.json",
+      "mtime": "2026-11-06T08:54:13.432518+00:00",
+      "bytes": 4042
+    },
+    {
+      "file": "mbpp/1/gepa/artifacts/05d670caf710edfc6484cb11a875d05d16965ad9ced13e693a65520e0300cc2a.json",
+      "mtime": "2026-11-06T08:58:45.047942+00:00",
+      "bytes": 4402
+    },
+    {
+      "file": "mbpp/1/gepa/artifacts/085aa871cb6a05eaf75f857038052468bf1807b4015f6ccdacd66ee6fc9d922a.json",
+      "mtime": "2026-11-06T08:25:58.284094+00:00",
+      "bytes": 1953
+    },
+    {
+      "file": "mbpp/1/gepa/artifacts/0a213dd422426446b4f854680938557fbcb35c2ae685f7930a2fa965bdab13c0.json",
+      "mtime": "2026-11-06T08:55:49.083949+00:00",
+      "bytes": 1460
+    },
+    {
+      "file": "mbpp/1/gepa/artifacts/0fda658c453c2bc235b09a070c9aaaab639755a4718d4b25051587e986b78803.json",
+      "mtime": "2026-11-06T06:30:10.870037+00:00",
+      "bytes": 678
+    },
+    {
+      "file": "mbpp/1/gepa/artifacts/171d5b31dbdad4e37d5e14596f6d1539d2a6b62b0b03022a7b779687059fce04.json",
+      "mtime": "2026-11-06T07:39:08.786065+00:00",
+      "bytes": 5546
+    },
+    {
+      "file": "mbpp/1/gepa/artifacts/1beb6792aa44a9579c151939ed4e433cfeb13716b14efa7ef91b65b7a2d4a28c.json",
+      "mtime": "2026-11-06T08:12:11.489382+00:00",
+      "bytes": 3025
+    },
+    {
+      "file": "mbpp/1/gepa/artifacts/1c2ace6370e206195424af7396e96b3e0441eaac69befe26cee1bf60b4f28959.json",
+      "mtime": "2026-11-06T08:13:26.474996+00:00",
+      "bytes": 7829
+    },
+    {
+      "file": "mbpp/1/gepa/artifacts/1d8e7ab1032ba0aa94bbf886515bef53e249eff5823b141fc0cae625300b9e89.json",
+      "mtime": "2026-11-06T06:22:21.380449+00:00",
+      "bytes": 933
+    },
+    {
+      "file": "mbpp/1/gepa/artifacts/1f7c54e25cf0695775388882bd3d605a0c5dc5b890c030310039c1acb6a82cc6.json",
+      "mtime": "2026-11-06T07:54:35.656645+00:00",
+      "bytes": 6686
+    },
+    {
+      "file": "mbpp/1/gepa/artifacts/21bfa08f103a7923bf725dc2976aa2fa78774f2a8f06188339648dd124d30252.json",
+      "mtime": "2026-11-06T08:11:31.759586+00:00",
+      "bytes": 4885
+    },
+    {
+      "file": "mbpp/1/gepa/artifacts/25ddb856ea37329a9aab86d93a9b77a334a4935f53d531cb0d1db85a7ed32054.json",
+      "mtime": "2026-11-06T07:26:22.046568+00:00",
+      "bytes": 5635
+    },
+    {
+      "file": "mbpp/1/gepa/artifacts/26dcd57afaf8fb282a3fc41aed46183f3a643fe715e754fdd199d7398cf7c6a1.json",
+      "mtime": "2026-11-06T06:19:18.853382+00:00",
+      "bytes": 908
+    },
+    {
+      "file": "mbpp/1/gepa/artifacts/274e6fd1e5d1e4ff1c1bb4836ac33ab696e800bc83b459692ca5b2a51845ba0c.json",
+      "mtime": "2026-11-06T06:52:50.731789+00:00",
+      "bytes": 2035
+    },
+    {
+      "file": "mbpp/1/gepa/artifacts/2c9ee3448c9ceb305a83be5000a943a35f98dda619d4f7cad8d5b84a4c2ea555.json",
+      "mtime": "2026-11-06T08:38:31.516999+00:00",
+      "bytes": 4541
+    },
+    {
+      "file": "mbpp/1/gepa/artifacts/34fd2ce81b929bbf48af8560fb9dfa0e01f644ed76568893e9e091161ea656c9.json",
+      "mtime": "2026-11-06T07:27:54.270001+00:00",
+      "bytes": 1329
+    },
+    {
+      "file": "mbpp/1/gepa/artifacts/368c88f6ec73525e69cff506a2038df21c086812e94e2e8ba1cbd1c0534d203c.json",
+      "mtime": "2026-11-06T07:57:37.759778+00:00",
+      "bytes": 3811
+    },
+    {
+      "file": "mbpp/1/gepa/artifacts/41ed9318dd5b55c704baa58bb8a58336e2e2a074fe6792f56256cd9bc763e0b0.json",
+      "mtime": "2026-11-06T08:55:04.141214+00:00",
+      "bytes": 8009
+    },
+    {
+      "file": "mbpp/1/gepa/artifacts/43717ccdbaf593a9fbcc1684998362fbe437c601e6ffb37cc5babcef00d180e3.json",
+      "mtime": "2026-11-06T07:09:38.063853+00:00",
+      "bytes": 3865
+    },
+    {
+      "file": "mbpp/1/gepa/artifacts/450992a0db7a531be0c5b4da0e8e81c560a06b49234399f06ffcf019bde422ee.json",
+      "mtime": "2026-11-06T07:10:47.227509+00:00",
+      "bytes": 2573
+    },
+    {
+      "file": "mbpp/1/gepa/artifacts/46a269f568ec2f95a465fcca4ad98427a90d640ee3e6ca7c5a833d14e5c9f6c8.json",
+      "mtime": "2026-11-06T07:26:56.554355+00:00",
+      "bytes": 4777
+    },
+    {
+      "file": "mbpp/1/gepa/artifacts/46efb4d59c2f98715cb30c31ca96e9f97d1763a7d8095d15d5a171542c8ba666.json",
+      "mtime": "2026-11-06T06:53:56.364474+00:00",
+      "bytes": 1396
+    },
+    {
+      "file": "mbpp/1/gepa/artifacts/4991a611a69688219b500f3e2a0bf461e5bd42c9e9f21effd32c412aea2ef6a8.json",
+      "mtime": "2026-11-06T08:03:57.327900+00:00",
+      "bytes": 6644
+    },
+    {
+      "file": "mbpp/1/gepa/artifacts/4d0f5df2af1363f6c2d4a5d7fe652e25a8071445dc1b4912113d1677a98f56a7.json",
+      "mtime": "2026-11-06T06:21:46.150629+00:00",
+      "bytes": 462
+    },
+    {
+      "file": "mbpp/1/gepa/artifacts/4ed49165315255abe33446d3d685dd36c2d7c46caa1a88ae5da16b77b81340af.json",
+      "mtime": "2026-11-06T06:14:44.097777+00:00",
+      "bytes": 1133
+    },
+    {
+      "file": "mbpp/1/gepa/artifacts/52eafcfc2484e3b75c9c10507a410668621997c22f6264b4c5d5c6e69cc19fdb.json",
+      "mtime": "2026-11-06T07:38:04.688429+00:00",
+      "bytes": 3148
+    },
+    {
+      "file": "mbpp/1/gepa/artifacts/55ce6835c4571021bf712efa6f3eb527c1dbd8c2ff7db0df15c8833dfd686e7b.json",
+      "mtime": "2026-11-06T06:30:12.268029+00:00",
+      "bytes": 539
+    },
+    {
+      "file": "mbpp/1/gepa/artifacts/56d9174a26bbf0f8fa9c460f68243f6e8957d0fd2df232888c4880a4c4019f71.json",
+      "mtime": "2026-11-06T08:14:51.514557+00:00",
+      "bytes": 4321
+    },
+    {
+      "file": "mbpp/1/gepa/artifacts/5c0aa5d990b562ab8f78b83a292afdd7133e4fbd9575e6093d5dcbdd3374f5fe.json",
+      "mtime": "2026-11-06T06:11:37.878714+00:00",
+      "bytes": 1096
+    },
+    {
+      "file": "mbpp/1/gepa/artifacts/5d8d3156000158060c681f797e230c88980e51e088a7da11dc0ffb2f5a6eb464.json",
+      "mtime": "2026-11-06T07:33:49.846892+00:00",
+      "bytes": 3651
+    },
+    {
+      "file": "mbpp/1/gepa/artifacts/5dd110bc6a5c6b146c65a4d17d0de012bb474d3059803fb335cd66e1540da3b3.json",
+      "mtime": "2026-11-06T07:53:55.342833+00:00",
+      "bytes": 5162
+    },
+    {
+      "file": "mbpp/1/gepa/artifacts/6021ef34b1615208737246bed930267ace2ab747826f821ead85a9fa149700a3.json",
+      "mtime": "2026-11-06T06:51:07.712279+00:00",
+      "bytes": 2301
+    },
+    {
+      "file": "mbpp/1/gepa/artifacts/608b58e176b4d39b3f74f5c54c00af84c6c09288f5141f3f11d3567090bf6279.json",
+      "mtime": "2026-11-06T08:23:01.053658+00:00",
+      "bytes": 1820
+    },
+    {
+      "file": "mbpp/1/gepa/artifacts/65e636b2a533df19907f8d322b1bd14c6c597eab885d7f651e1c4f6e93a8ce74.json",
+      "mtime": "2026-11-06T08:24:48.367328+00:00",
+      "bytes": 8040
+    },
+    {
+      "file": "mbpp/1/gepa/artifacts/6ae3abd3c79cca6bf06538c464fe015007fd2efed802534d57962b70c5c8040f.json",
+      "mtime": "2026-11-06T06:20:46.236936+00:00",
+      "bytes": 551
+    },
+    {
+      "file": "mbpp/1/gepa/artifacts/6afc9720fc3b46e724e60e91731c773ea395104ac8886dd9b601b38d1a016136.json",
+      "mtime": "2026-11-06T07:11:47.289987+00:00",
+      "bytes": 1615
+    },
+    {
+      "file": "mbpp/1/gepa/artifacts/6ba30fbf899a800e6f053863196e9a4daf95390cfb86fa430c3266e5e9552689.json",
+      "mtime": "2026-11-06T07:12:56.496359+00:00",
+      "bytes": 3744
+    },
+    {
+      "file": "mbpp/1/gepa/artifacts/6f5b35e0df60af4968a9d49eb4db65b434b6126a597d9d46e36bd9206c4726bb.json",
+      "mtime": "2026-11-06T08:29:08.479394+00:00",
+      "bytes": 4901
+    },
+    {
+      "file": "mbpp/1/gepa/artifacts/73a9b9ad2b04f7e41c6d86131240a77dabd5892a39e3253385bc965902e154c1.json",
+      "mtime": "2026-11-06T07:37:00.582795+00:00",
+      "bytes": 3158
+    },
+    {
+      "file": "mbpp/1/gepa/artifacts/73fef1b3ab84f281f504b015b22b74ea06f56c634b34054f3c131232f47d356b.json",
+      "mtime": "2026-11-06T08:41:39.306142+00:00",
+      "bytes": 7472
+    },
+    {
+      "file": "mbpp/1/gepa/artifacts/7a53454ba2660ee688bca804e0623f13c596096398bc684ba85d04fa98986971.json",
+      "mtime": "2026-11-06T06:36:59.400945+00:00",
+      "bytes": 979
+    },
+    {
+      "file": "mbpp/1/gepa/artifacts/7db12bc18deacabd7fed3357bb4fb26562da20cc0d722560d3a792f3a628bc99.json",
+      "mtime": "2026-11-06T07:55:14.368463+00:00",
+      "bytes": 1668
+    },
+    {
+      "file": "mbpp/1/gepa/artifacts/7db2b5349d64fb3f332d26152a6566066675a1e67b0a83f509f7a1711573f7c9.json",
+      "mtime": "2026-11-06T07:35:18.524380+00:00",
+      "bytes": 1287
+    },
+    {
+      "file": "mbpp/1/gepa/artifacts/83bf00a32cb3f2fe470d1466fd29c6a96a546f2a07f06f51e471c0f4bad9c6d2.json",
+      "mtime": "2026-11-06T08:36:46.623469+00:00",
+      "bytes": 1581
+    },
+    {
+      "file": "mbpp/1/gepa/artifacts/83cf6afa91f409b70493e611a490247da2c93df4e979c0b3f82480bc83600312.json",
+      "mtime": "2026-11-06T08:27:48.096700+00:00",
+      "bytes": 1613
+    },
+    {
+      "file": "mbpp/1/gepa/artifacts/85ae5662cbec1a2d786165871efd78b036c1bd4fb7ad29e93524ca18c9f71612.json",
+      "mtime": "2026-11-06T07:09:00.955037+00:00",
+      "bytes": 5570
+    },
+    {
+      "file": "mbpp/1/gepa/artifacts/86db51b30e8dc25e83256f5f5dbd6a7e11dac559ce864736aeb4c61e44c2aba5.json",
+      "mtime": "2026-11-06T08:23:37.092551+00:00",
+      "bytes": 1330
+    },
+    {
+      "file": "mbpp/1/gepa/artifacts/87f9da97fb2107364ea2682131d4dcc9a658fb23cbd47855a5fd2befad45d7e1.json",
+      "mtime": "2026-11-06T08:03:58.964892+00:00",
+      "bytes": 3602
+    },
+    {
+      "file": "mbpp/1/gepa/artifacts/8f642265b6b1a95365fab3b27878e83a3f6377f4ea678da3384ca9eb4d81a077.json",
+      "mtime": "2026-11-06T06:17:50.618831+00:00",
+      "bytes": 746
+    },
+    {
+      "file": "mbpp/1/gepa/artifacts/929e739b642143a1b9f5b4fecc515024a2e16617c52ee07528eeabaffa12dbe2.json",
+      "mtime": "2026-11-06T07:47:23.363534+00:00",
+      "bytes": 4375
+    },
+    {
+      "file": "mbpp/1/gepa/artifacts/93675ebb704b1858c182dcd8c958a34e6e7d36ca3e2b25b5ce240af14d52c1f0.json",
+      "mtime": "2026-11-06T06:50:30.074456+00:00",
+      "bytes": 1657
+    },
+    {
+      "file": "mbpp/1/gepa/artifacts/94cec622992efcd16730e304a6665f207341694e76da41a7c7463671f8d44ad4.json",
+      "mtime": "2026-11-06T07:20:51.407712+00:00",
+      "bytes": 3195
+    },
+    {
+      "file": "mbpp/1/gepa/artifacts/98fa1bc78b3c74b7cf2c8061dcab27c71135b7e6ab540df462398b48e0ed06fe.json",
+      "mtime": "2026-11-06T08:14:09.044776+00:00",
+      "bytes": 5211
+    },
+    {
+      "file": "mbpp/1/gepa/artifacts/9a685dae65f7dab21167563e4ff98c1df33ebb96d01ecd3002444b2a43a69f49.json",
+      "mtime": "2026-11-06T08:40:21.988497+00:00",
+      "bytes": 1259
+    },
+    {
+      "file": "mbpp/1/gepa/artifacts/a4bb6840671cfeae3a1aa38908a146f2b5459e7c1a78a37072a3b28c52697a5d.json",
+      "mtime": "2026-11-06T06:53:25.082624+00:00",
+      "bytes": 1216
+    },
+    {
+      "file": "mbpp/1/gepa/artifacts/a57b8579f7ca0cef60568f9e82fd93f75023805acbd87016371406834aef290b.json",
+      "mtime": "2026-11-06T08:26:41.906941+00:00",
+      "bytes": 3330
+    },
+    {
+      "file": "mbpp/1/gepa/artifacts/a5de77984558d1c20d8679300910549987250fb326fba6f149f5f9d02e145175.json",
+      "mtime": "2026-11-06T08:51:26.749380+00:00",
+      "bytes": 8345
+    },
+    {
+      "file": "mbpp/1/gepa/artifacts/a9cb1cb4d4f322ad82af55df6ed8523e3480b634eea1bce97d862f6a70691b00.json",
+      "mtime": "2026-11-06T08:28:27.132553+00:00",
+      "bytes": 2699
+    },
+    {
+      "file": "mbpp/1/gepa/artifacts/ab481596cb6ea8f3a26c815d3d2352267ec8f6f8668e672adf36341e8e41a4c3.json",
+      "mtime": "2026-11-06T08:43:54.874513+00:00",
+      "bytes": 4740
+    },
+    {
+      "file": "mbpp/1/gepa/artifacts/abdf2c4d95c4a5ee14b253c6eb0f113364412937ff299ed874ce03c7723493f0.json",
+      "mtime": "2026-11-06T08:53:00.320934+00:00",
+      "bytes": 4369
+    },
+    {
+      "file": "mbpp/1/gepa/artifacts/b54c15d1acb18b37f8391fad6de802271cde666c438ddc9595a694d58266eafe.json",
+      "mtime": "2026-11-06T08:42:28.233916+00:00",
+      "bytes": 8228
+    },
+    {
+      "file": "mbpp/1/gepa/artifacts/b94af4c1fa0c3528d0ea7bf2dee6e7c7adece5536de24ed2127babb7fcedc9b7.json",
+      "mtime": "2026-11-06T06:16:17.245306+00:00",
+      "bytes": 966
+    },
+    {
+      "file": "mbpp/1/gepa/artifacts/be91f2e3b563b72282215b43e17daf2e7dad6c4481f88ce77aa67d1a2736baa6.json",
+      "mtime": "2026-11-06T07:36:16.992044+00:00",
+      "bytes": 5627
+    },
+    {
+      "file": "mbpp/1/gepa/artifacts/bf2041fa8221562876e0bd654f5b19e7f7fefdc7f6182807978e990911750046.json",
+      "mtime": "2026-11-06T06:43:46.176300+00:00",
+      "bytes": 822
+    },
+    {
+      "file": "mbpp/1/gepa/artifacts/c774aa92a9a972ba21fc0f7ae8b3f098f7d227b512eea559e70a48dcdaea8c90.json",
+      "mtime": "2026-11-06T07:55:56.669263+00:00",
+      "bytes": 3509
+    },
+    {
+      "file": "mbpp/1/gepa/artifacts/cd42bc0156f9b1dfbd3dd745953ce1321bddf4f7b80365926daab3d147ddcbc1.json",
+      "mtime": "2026-11-06T08:57:54.043230+00:00",
+      "bytes": 1151
+    },
+    {
+      "file": "mbpp/1/gepa/artifacts/d237b98a26759eb600e59e310641cd0e7150cb46aae73733190492b0af69c3a8.json",
+      "mtime": "2026-11-06T07:39:10.232057+00:00",
+      "bytes": 2873
+    },
+    {
+      "file": "mbpp/1/gepa/artifacts/d5aa65c3c882d9c3546cc0ea887c8188894f8906e8778adaa0a8903ad3f4fbff.json",
+      "mtime": "2026-11-06T07:01:39.125221+00:00",
+      "bytes": 3950
+    },
+    {
+      "file": "mbpp/1/gepa/artifacts/d89532b366ce99adff0143bc849a4aa694ad05b53627d0fa9d9241a3c65dcaad.json",
+      "mtime": "2026-11-06T07:46:14.471801+00:00",
+      "bytes": 7130
+    },
+    {
+      "file": "mbpp/1/gepa/artifacts/dbccb6493852385cf7d5000ddb51b7faea80d540b829215f7b8489dd2eeb3a38.json",
+      "mtime": "2026-11-06T06:51:50.208077+00:00",
+      "bytes": 1587
+    },
+    {
+      "file": "mbpp/1/gepa/artifacts/e959706e6d5b932a8c4cc28da8a66bd796aab4bf23a1d79d922da2f556c6adf5.json",
+      "mtime": "2026-11-06T06:36:58.068950+00:00",
+      "bytes": 1096
+    },
+    {
+      "file": "mbpp/1/gepa/artifacts/e9d629543dedaf6e8f5512f30f9cb06f25f172ca2d41cfdb5f4d76e94eaaf27b.json",
+      "mtime": "2026-11-06T06:20:16.671087+00:00",
+      "bytes": 289
+    },
+    {
+      "file": "mbpp/1/gepa/artifacts/eb4fc3b21d26175f4cac5802205a435b3760f047cf4d2e6ac9e7e6d8e9f6cb16.json",
+      "mtime": "2026-11-06T08:37:36.336247+00:00",
+      "bytes": 7569
+    },
+    {
+      "file": "mbpp/1/gepa/artifacts/f482dedbeac3552f9026bdeba2829f19339529e72cf5580bbb5e22f3485749fc.json",
+      "mtime": "2026-11-06T08:58:40.695966+00:00",
+      "bytes": 1801
+    },
+    {
+      "file": "mbpp/1/gepa/artifacts/f4c716bd6c5eae36500746011c8433bea8980ca32eaa06ca309bc803b3903379.json",
+      "mtime": "2026-11-06T08:57:16.149445+00:00",
+      "bytes": 4884
+    },
+    {
+      "file": "mbpp/1/gepa/artifacts/f75b2189259807301cefc41fd09d867272dc4fa9992f107685712d69fb97f511.json",
+      "mtime": "2026-11-06T07:33:09.151129+00:00",
+      "bytes": 1604
+    },
+    {
+      "file": "mbpp/1/gepa/artifacts/f7e19b97b074bfb4905bd5fb1bb62ce944fdf2aa18e19137a8e9d940ec09e6a6.json",
+      "mtime": "2026-11-06T08:15:22.190399+00:00",
+      "bytes": 1067
+    },
+    {
+      "file": "mbpp/1/gepa/artifacts/f920ed148224f81543fc53c6b3ddfb6ee34464e6a198c3432f3eac0a3ac012c6.json",
+      "mtime": "2026-11-06T06:23:24.387126+00:00",
+      "bytes": 1080
+    },
+    {
+      "file": "mbpp/1/gepa/artifacts/faa26d1b0df2809678c2c8ce9b27d62d12da6369dde6aba7a41f2dbda8d0ba15.json",
+      "mtime": "2026-11-06T06:43:44.772306+00:00",
+      "bytes": 1052
+    },
+    {
+      "file": "mbpp/1/gepa/artifacts/fdd2e050f243aaf1d23b54ad7c140ee600d1191a2e76c3422209b3c03309ef01.json",
+      "mtime": "2026-11-06T07:12:57.864347+00:00",
+      "bytes": 2180
+    },
+    {
+      "file": "mbpp/1/gepa/bundle.json",
+      "mtime": "2026-11-06T08:59:22.313734+00:00",
+      "bytes": 13364
+    },
+    {
+      "file": "mbpp/1/gepa/calls.jsonl",
+      "mtime": "2026-11-06T08:59:18.805754+00:00",
+      "bytes": 2566996
+    },
+    {
+      "file": "mbpp/1/gepa/evaluations.jsonl",
+      "mtime": "2026-11-06T08:59:19.511750+00:00",
+      "bytes": 549053
+    },
+    {
+      "file": "mbpp/1/gepa/incumbents.jsonl",
+      "mtime": "2026-11-06T06:49:57.132611+00:00",
+      "bytes": 1693
+    },
+    {
+      "file": "mbpp/1/gepa/manifest.json",
+      "mtime": "2026-11-06T08:59:22.198735+00:00",
+      "bytes": 24720
+    },
+    {
+      "file": "mbpp/1/gepa/result.json",
+      "mtime": "2026-11-06T08:59:22.197735+00:00",
+      "bytes": 964
+    },
+    {
+      "file": "mbpp/1/gepa/search.json",
+      "mtime": "2026-11-06T08:59:22.196735+00:00",
+      "bytes": 613676
+    },
+    {
+      "file": "mbpp/1/gepa/spend.json",
+      "mtime": "2026-11-06T08:59:22.303734+00:00",
+      "bytes": 143948
+    },
+    {
+      "file": "mbpp/1/hone/artifacts/075d87245d9e5e032bc24e971f0c3c6f930816d08170277a3fd71675493647bd.json",
+      "mtime": "2026-11-06T04:46:34.736017+00:00",
+      "bytes": 653
+    },
+    {
+      "file": "mbpp/1/hone/artifacts/09572c27c3e26d332caabc087e027be7a40c683f1882930e553f27ae1ed9a901.json",
+      "mtime": "2026-11-06T04:48:46.277297+00:00",
+      "bytes": 771
+    },
+    {
+      "file": "mbpp/1/hone/artifacts/098a16d233cfc4c4f1abad0dceb947b859acec5d1b0c27a128d9682092a1c16b.json",
+      "mtime": "2026-11-06T05:51:24.407915+00:00",
+      "bytes": 731
+    },
+    {
+      "file": "mbpp/1/hone/artifacts/17c850e039e84196e59d76d311606e380652420d4d82cd5bda426a43b6f4cb7d.json",
+      "mtime": "2026-11-06T03:16:12.465390+00:00",
+      "bytes": 675
+    },
+    {
+      "file": "mbpp/1/hone/artifacts/1af7f2bab16979927b67efd950a389e9d0ab036ac22950f8b0b1a1a284d7207f.json",
+      "mtime": "2026-11-06T05:38:04.020254+00:00",
+      "bytes": 730
+    },
+    {
+      "file": "mbpp/1/hone/artifacts/1b5ccd030d728b4f1a754c102a156d482a0a3df79535458c8eeefbe2b75f792b.json",
+      "mtime": "2026-11-06T05:39:36.726739+00:00",
+      "bytes": 644
+    },
+    {
+      "file": "mbpp/1/hone/artifacts/1d63961b7e6cf2c0e8dce28931cacfd8135ad194cb9aae68fea61d2f4361ea5b.json",
+      "mtime": "2026-11-06T03:39:09.092944+00:00",
+      "bytes": 633
+    },
+    {
+      "file": "mbpp/1/hone/artifacts/24940098ba9ea94c2173ebe9e02d9f5a649c4de8d78c37cd630fa92cf2177543.json",
+      "mtime": "2026-11-06T04:53:32.194750+00:00",
+      "bytes": 636
+    },
+    {
+      "file": "mbpp/1/hone/artifacts/26f9afeb417b6fbcaa5a44ab4a570c4510fc7fc0d165bbc8886cca66ae26024b.json",
+      "mtime": "2026-11-06T02:45:35.654748+00:00",
+      "bytes": 1048
+    },
+    {
+      "file": "mbpp/1/hone/artifacts/29ef79e2192260eddaa395f1110c98245709a1f94417037deda9d99130cfc989.json",
+      "mtime": "2026-11-06T03:53:34.828562+00:00",
+      "bytes": 802
+    },
+    {
+      "file": "mbpp/1/hone/artifacts/2c8fa4d32dc80035910f56f3a2f2e69a4f1b6bbcaaaa0e4d77e98fd40b7651d0.json",
+      "mtime": "2026-11-06T03:12:13.108759+00:00",
+      "bytes": 832
+    },
+    {
+      "file": "mbpp/1/hone/artifacts/2e368ba76f3e0cad6233f96f574d85150833a4b408609afc718b13d89afe5572.json",
+      "mtime": "2026-11-06T05:18:45.469603+00:00",
+      "bytes": 866
+    },
+    {
+      "file": "mbpp/1/hone/artifacts/2e46a48b077ade605d7b5cf4cdf08bf97a556061099de69052ab627251c21dd0.json",
+      "mtime": "2026-11-06T04:58:01.032602+00:00",
+      "bytes": 771
+    },
+    {
+      "file": "mbpp/1/hone/artifacts/2f544d7e3950b1ae74b9cf7c8becb858846a98ac72e225a6f6d4195934d09695.json",
+      "mtime": "2026-11-06T03:34:30.620426+00:00",
+      "bytes": 907
+    },
+    {
+      "file": "mbpp/1/hone/artifacts/2fcc716d53a4cb4c820f3cad719e20736f4277b8c99ad6397e27d97020e23e34.json",
+      "mtime": "2026-11-06T04:19:40.627794+00:00",
+      "bytes": 751
+    },
+    {
+      "file": "mbpp/1/hone/artifacts/30f82cdbd44dd19c513a6829670c56c8317f2613341d76a9d7302ac2b4aead8e.json",
+      "mtime": "2026-11-06T03:50:56.960074+00:00",
+      "bytes": 707
+    },
+    {
+      "file": "mbpp/1/hone/artifacts/38a55a4b5a9a6196f9c25ea0f9a746764a6e4461b20cf905d988665f0c61f779.json",
+      "mtime": "2026-11-06T04:50:24.930761+00:00",
+      "bytes": 700
+    },
+    {
+      "file": "mbpp/1/hone/artifacts/3cebf25c94b460563720eb6505038483c2d38e7ca7d9147f503698bc16a3d7b8.json",
+      "mtime": "2026-11-06T02:56:44.533774+00:00",
+      "bytes": 718
+    },
+    {
+      "file": "mbpp/1/hone/artifacts/42bea1a70407786e2744e5d0cc1483e91ebf97516c2c1edf6cc3f27dc320ce79.json",
+      "mtime": "2026-11-06T03:49:36.923303+00:00",
+      "bytes": 678
+    },
+    {
+      "file": "mbpp/1/hone/artifacts/45a619f16bdcaad3fd8e155ef747f30ef4478fcb2c409617b9219ba1a6766771.json",
+      "mtime": "2026-11-06T04:16:56.480557+00:00",
+      "bytes": 622
+    },
+    {
+      "file": "mbpp/1/hone/artifacts/463755e6bc27f98b6d6ce644a51e5b6c3abcecf8a2fd59abcd38d6448982e931.json",
+      "mtime": "2026-11-06T05:22:13.287549+00:00",
+      "bytes": 693
+    },
+    {
+      "file": "mbpp/1/hone/artifacts/497585c7d5c56f0b6bd6dfe5d5156c000acf39feeb6746e055406c971aebdb4e.json",
+      "mtime": "2026-11-06T04:35:43.574730+00:00",
+      "bytes": 763
+    },
+    {
+      "file": "mbpp/1/hone/artifacts/4b0376e37a3cdba6c0562c61bd7d13750104e545306381fd91593fd90c5a785d.json",
+      "mtime": "2026-11-06T05:54:37.652888+00:00",
+      "bytes": 860
+    },
+    {
+      "file": "mbpp/1/hone/artifacts/4c0a04a0124b67037f7227ff3192ab385df88edeacc2b1090d24425c0aeefe2e.json",
+      "mtime": "2026-11-06T04:05:44.778610+00:00",
+      "bytes": 757
+    },
+    {
+      "file": "mbpp/1/hone/artifacts/50541bd4007026553038b5d75d5173784cea40e37362a35180a01090f9a66fa1.json",
+      "mtime": "2026-11-06T04:07:04.386257+00:00",
+      "bytes": 681
+    },
+    {
+      "file": "mbpp/1/hone/artifacts/50f9327fcb39966549361aff611a4fe1870e79220fcdb7dc3477ef9ef52eabc8.json",
+      "mtime": "2026-11-06T04:28:16.974614+00:00",
+      "bytes": 875
+    },
+    {
+      "file": "mbpp/1/hone/artifacts/53e245909d2ede867ac32dc75d8d5a4014ec24ee3f78372ac6f91ca9538d6110.json",
+      "mtime": "2026-11-06T04:21:06.597073+00:00",
+      "bytes": 858
+    },
+    {
+      "file": "mbpp/1/hone/artifacts/55ce6835c4571021bf712efa6f3eb527c1dbd8c2ff7db0df15c8833dfd686e7b.json",
+      "mtime": "2026-11-06T05:58:59.825500+00:00",
+      "bytes": 539
+    },
+    {
+      "file": "mbpp/1/hone/artifacts/58baf8df833452a836fbc832e8576aed7e678d72bc85ccda298deef03da4136e.json",
+      "mtime": "2026-11-06T03:14:49.394860+00:00",
+      "bytes": 740
+    },
+    {
+      "file": "mbpp/1/hone/artifacts/5f2d5528a0687168e07051990a484fe14404f7a3eb05f4550d7cf423fc4c6144.json",
+      "mtime": "2026-11-06T03:40:37.617474+00:00",
+      "bytes": 816
+    },
+    {
+      "file": "mbpp/1/hone/artifacts/61fd9ae9fd9764e7f68f87e27bf97e8b93c70b42878333450fd56438491ec95f.json",
+      "mtime": "2026-11-06T05:17:04.749111+00:00",
+      "bytes": 776
+    },
+    {
+      "file": "mbpp/1/hone/artifacts/6b2d87c6c75b4883a907486533ad0769ea7127879e9fddfc7172920a61744af0.json",
+      "mtime": "2026-11-06T05:03:37.117080+00:00",
+      "bytes": 777
+    },
+    {
+      "file": "mbpp/1/hone/artifacts/71eb8274b7dd6d3bb9e010cac984f5f6d6328e48aca8ffb9a53cc19e1bfde789.json",
+      "mtime": "2026-11-06T04:33:14.438646+00:00",
+      "bytes": 911
+    },
+    {
+      "file": "mbpp/1/hone/artifacts/729a93455bd10529a2d9a1cefee61e47ed52c58fdd1487665407ee5b32ad1e7f.json",
+      "mtime": "2026-11-06T02:54:00.850696+00:00",
+      "bytes": 678
+    },
+    {
+      "file": "mbpp/1/hone/artifacts/72b34a7a1faa8e935ab05ee4a560299b91f03e04d0401177825a75b18770b85a.json",
+      "mtime": "2026-11-06T05:20:26.560091+00:00",
+      "bytes": 776
+    },
+    {
+      "file": "mbpp/1/hone/artifacts/77f5cdb5be00d9d4869af044bbe822093a22e200f625964e2a43461993425437.json",
+      "mtime": "2026-11-06T03:13:31.031308+00:00",
+      "bytes": 650
+    },
+    {
+      "file": "mbpp/1/hone/artifacts/7cd38c5a5a022eba5a295cc057ce5c7af7f644c2a7aa626a633cc1199f63b12f.json",
+      "mtime": "2026-11-06T03:07:53.380151+00:00",
+      "bytes": 769
+    },
+    {
+      "file": "mbpp/1/hone/artifacts/7d1bcd416a000d02cc8d3bac2237b2eb5f1425d673dca43cfadbceee76d4b630.json",
+      "mtime": "2026-11-06T05:56:14.436375+00:00",
+      "bytes": 660
+    },
+    {
+      "file": "mbpp/1/hone/artifacts/805765358dc38d95061abb7decee74b724e25ee0a932326204174ffb4dfae978.json",
+      "mtime": "2026-11-06T04:31:34.580282+00:00",
+      "bytes": 710
+    },
+    {
+      "file": "mbpp/1/hone/artifacts/88ab1847b770f12eb6c4ad14636f0c9bf5eef9482435538b30aa57d4cdd36a93.json",
+      "mtime": "2026-11-06T04:08:51.021779+00:00",
+      "bytes": 868
+    },
+    {
+      "file": "mbpp/1/hone/artifacts/89cf0970146f317e4fe44e3e1a6ce96285e11dcc2db499a73d0a89dac8ba4ed5.json",
+      "mtime": "2026-11-06T03:04:55.573100+00:00",
+      "bytes": 889
+    },
+    {
+      "file": "mbpp/1/hone/artifacts/8a0bdc9f00abe00f73d8d3d60d47ef3b455e87ad06c2980421811d41b40ae748.json",
+      "mtime": "2026-11-06T05:01:56.840548+00:00",
+      "bytes": 780
+    },
+    {
+      "file": "mbpp/1/hone/artifacts/8a5e0d1a6b7cfa5c54d1a50096f24cd9fafc5f8c224057ae15dd305913163d95.json",
+      "mtime": "2026-11-06T05:05:11.683632+00:00",
+      "bytes": 779
+    },
+    {
+      "file": "mbpp/1/hone/artifacts/8c1df5b6881d08a38db3c802b85820be9773521437904644563787c2891d9689.json",
+      "mtime": "2026-11-06T03:09:13.100728+00:00",
+      "bytes": 785
+    },
+    {
+      "file": "mbpp/1/hone/artifacts/8e20394a9e7536613f93b9f20c70a88687345774ac7770be0582470252a03b4b.json",
+      "mtime": "2026-11-06T03:56:47.270857+00:00",
+      "bytes": 668
+    },
+    {
+      "file": "mbpp/1/hone/artifacts/8faf889768dad6e09bfb6873c6edba43ade4846ba1f9cb50c9a55f79fb48aa4e.json",
+      "mtime": "2026-11-06T03:45:24.560951+00:00",
+      "bytes": 782
+    },
+    {
+      "file": "mbpp/1/hone/artifacts/901e96ffb6fc9126036d82d814cedb19e674ea4775a2aba5ed2ef17e61bce11e.json",
+      "mtime": "2026-11-06T05:46:34.531465+00:00",
+      "bytes": 681
+    },
+    {
+      "file": "mbpp/1/hone/artifacts/9512f3c355e08acbb4a4e2f527a4edeebf897063c1f9fa1319be704996f74744.json",
+      "mtime": "2026-11-06T05:48:10.903948+00:00",
+      "bytes": 586
+    },
+    {
+      "file": "mbpp/1/hone/artifacts/996760cf9895d2f6bb9b28afb6b8f1aa00546f652ddaf1dd3f2cf6c53af7a11e.json",
+      "mtime": "2026-11-06T04:29:55.358937+00:00",
+      "bytes": 699
+    },
+    {
+      "file": "mbpp/1/hone/artifacts/9bc96bd744b6ad8039df53207f404864ec47e5c690e133f4a1d8676470bee71f.json",
+      "mtime": "2026-11-06T03:43:39.438508+00:00",
+      "bytes": 703
+    },
+    {
+      "file": "mbpp/1/hone/artifacts/a01d1d715a7e45d9c80e48b54eee1a7099f5f9f4ae7a50b77e85a64d72df1dd5.json",
+      "mtime": "2026-11-06T05:44:56.448994+00:00",
+      "bytes": 977
+    },
+    {
+      "file": "mbpp/1/hone/artifacts/a3c4c6e9db2303a3febb73dc163847aea77b5fc9ed140a6ac7a84aab2d083441.json",
+      "mtime": "2026-11-06T04:24:10.740471+00:00",
+      "bytes": 753
+    },
+    {
+      "file": "mbpp/1/hone/artifacts/ab4d32fbf26fbcd149a0cc73a1a1bba087603d6be7d4d36bcfe66e1a37b40d7d.json",
+      "mtime": "2026-11-06T03:55:25.753165+00:00",
+      "bytes": 839
+    },
+    {
+      "file": "mbpp/1/hone/artifacts/b62a9bca555b98cdc64d375ae89c6b6b92fe95264a19e618b5bc8743ba038c17.json",
+      "mtime": "2026-11-06T02:55:21.033242+00:00",
+      "bytes": 623
+    },
+    {
+      "file": "mbpp/1/hone/artifacts/b67960d43e8421a9d1f2b9f851d3f79d46c97e0f7ccd5862bb88bb77fdbb8b75.json",
+      "mtime": "2026-11-06T06:00:04.950156+00:00",
+      "bytes": 1115
+    },
+    {
+      "file": "mbpp/1/hone/artifacts/b93079e7900ed964ceab1b5577b635b8f6d930d25dcf79130d5c22aeea0d71f6.json",
+      "mtime": "2026-11-06T05:49:49.391421+00:00",
+      "bytes": 747
+    },
+    {
+      "file": "mbpp/1/hone/artifacts/b999e80fc001c68cd267372bc764479799d22b680f325e2a26c336606cffafb3.json",
+      "mtime": "2026-11-06T03:17:35.059928+00:00",
+      "bytes": 608
+    },
+    {
+      "file": "mbpp/1/hone/artifacts/be3680d302d319a5c9628242571a9095a607d6952edd85434a8ee9eeeea0f1d6.json",
+      "mtime": "2026-11-06T03:01:06.816333+00:00",
+      "bytes": 713
+    },
+    {
+      "file": "mbpp/1/hone/artifacts/c5449313417abccc4f37f0af78ce6de47d17cec13cfe4254f62bc92d8cb1b8dc.json",
+      "mtime": "2026-11-06T03:10:47.819226+00:00",
+      "bytes": 832
+    },
+    {
+      "file": "mbpp/1/hone/artifacts/c564a49a1605b98cab7c6e8850fabee4a52d344c5dafc495f9003b15ba6280fd.json",
+      "mtime": "2026-11-06T04:43:04.240183+00:00",
+      "bytes": 733
+    },
+    {
+      "file": "mbpp/1/hone/artifacts/c63103c3c6890a933cc9cafb8958a4869b25736e9f326eae62047d5ebed4a2f6.json",
+      "mtime": "2026-11-06T02:48:00.371830+00:00",
+      "bytes": 811
+    },
+    {
+      "file": "mbpp/1/hone/artifacts/c79a08601f84cfba7820aaa1ddc5cb636e6439d943be6948afb7c694509bfc52.json",
+      "mtime": "2026-11-06T05:23:50.927053+00:00",
+      "bytes": 738
+    },
+    {
+      "file": "mbpp/1/hone/artifacts/c922cd294b828ae0af43b81b1d40029f247e740c6e611feb6b8711f12ce37084.json",
+      "mtime": "2026-11-06T02:41:08.257597+00:00",
+      "bytes": 844
+    },
+    {
+      "file": "mbpp/1/hone/artifacts/cc9ea9d1bfedd7532cd2a9ebd98f79fec1a73ea9523998bd268a4f061cf424a6.json",
+      "mtime": "2026-11-06T04:39:29.534401+00:00",
+      "bytes": 817
+    },
+    {
+      "file": "mbpp/1/hone/artifacts/cd52e1c1d24055dc05d145f4fbff2f600095aa81f8ba5cc1c41c8e7aea6608c3.json",
+      "mtime": "2026-11-06T05:41:10.227224+00:00",
+      "bytes": 666
+    },
+    {
+      "file": "mbpp/1/hone/artifacts/d09bb6828e13b6b77f78bb558ee8d350ec5d970b9fa1db29a17fc72550aabb0f.json",
+      "mtime": "2026-11-06T04:26:33.607362+00:00",
+      "bytes": 908
+    },
+    {
+      "file": "mbpp/1/hone/artifacts/d51808bf070cfa411a260b47c91eb0d8d5eb04716532a3bea97667481dff4f76.json",
+      "mtime": "2026-11-06T03:20:59.832796+00:00",
+      "bytes": 824
+    },
+    {
+      "file": "mbpp/1/hone/artifacts/d99a25e799049497af45386a53661f559431fdd1f0e95741461902d25f66cd32.json",
+      "mtime": "2026-11-06T05:34:43.375388+00:00",
+      "bytes": 1031
+    },
+    {
+      "file": "mbpp/1/hone/artifacts/debd3a12e57f481bcd8e25b6652392a9064cb9e79bdf796167bbd7c7ddd5d3e9.json",
+      "mtime": "2026-11-06T03:42:14.184961+00:00",
+      "bytes": 730
+    },
+    {
+      "file": "mbpp/1/hone/artifacts/df4c7bc360444ac43a9d19982da30d4d570a977564037662a67946e54440133a.json",
+      "mtime": "2026-11-06T05:00:14.887012+00:00",
+      "bytes": 664
+    },
+    {
+      "file": "mbpp/1/hone/artifacts/dfb97fc6933d3a90d9dab701dc77feff072032c848de77073a7987c02624d7cd.json",
+      "mtime": "2026-11-06T05:25:52.821432+00:00",
+      "bytes": 694
+    },
+    {
+      "file": "mbpp/1/hone/artifacts/eb193abc93f0da4a546e9532cba427bbe054ec100e2e4ba310926b6c35ab1133.json",
+      "mtime": "2026-11-06T03:58:28.052461+00:00",
+      "bytes": 703
+    },
+    {
+      "file": "mbpp/1/hone/artifacts/ebe58664b2988246b34bb4d16c81f9cbcff1b0bf5bbf2cc65ab647a7db737d21.json",
+      "mtime": "2026-11-06T05:57:50.912864+00:00",
+      "bytes": 593
+    },
+    {
+      "file": "mbpp/1/hone/artifacts/ee9d7dd33e20588b106173f99c8baf3eb4af24ca6dca3344dbfde75d1c533369.json",
+      "mtime": "2026-11-06T05:10:07.268196+00:00",
+      "bytes": 777
+    },
+    {
+      "file": "mbpp/1/hone/artifacts/efd4f54160d38f4cd65ff7670162b6c40be016a9e9c3e03cfb59c23a1ef4968b.json",
+      "mtime": "2026-11-06T03:03:08.611674+00:00",
+      "bytes": 995
+    },
+    {
+      "file": "mbpp/1/hone/artifacts/f159d2673728ed3fd867711eee3269be1b8d5a719f8e3604ca5ac2d428f42054.json",
+      "mtime": "2026-11-06T04:51:59.982247+00:00",
+      "bytes": 797
+    },
+    {
+      "file": "mbpp/1/hone/artifacts/f27ba5582d6510cf4af89bc1c8ea79b11f6717348610b214a0de2993f5ec1192.json",
+      "mtime": "2026-11-06T03:25:36.360291+00:00",
+      "bytes": 925
+    },
+    {
+      "file": "mbpp/1/hone/artifacts/f6727c5603b204567cc31da3777e9159e29b696740a4220a49aa9ab678109a2a.json",
+      "mtime": "2026-11-06T02:39:27.008369+00:00",
+      "bytes": 1313
+    },
+    {
+      "file": "mbpp/1/hone/artifacts/f7ebba897432433a438ad3f2688b6050e571d384ef2486ab6ba9afd7a9fddcd0.json",
+      "mtime": "2026-11-06T05:36:22.447824+00:00",
+      "bytes": 628
+    },
+    {
+      "file": "mbpp/1/hone/artifacts/faa0073a16f901e43d49bce27cdb34bad19bd579f1247318d306c944def23012.json",
+      "mtime": "2026-11-06T04:04:16.512997+00:00",
+      "bytes": 896
+    },
+    {
+      "file": "mbpp/1/hone/artifacts/fdae61412908011626f7562756acb20ad51423b82c3cade470d7fc981bd167f0.json",
+      "mtime": "2026-11-06T03:37:49.329368+00:00",
+      "bytes": 710
+    },
+    {
+      "file": "mbpp/1/hone/artifacts/ff7356510cf9ef0a5b58b593a05fec904ca2509fc7b1f0a324e91098d5c3f139.json",
+      "mtime": "2026-11-06T02:59:18.245925+00:00",
+      "bytes": 688
+    },
+    {
+      "file": "mbpp/1/hone/bundle.json",
+      "mtime": "2026-11-06T06:00:40.162970+00:00",
+      "bytes": 13520
+    },
+    {
+      "file": "mbpp/1/hone/calls.jsonl",
+      "mtime": "2026-11-06T06:00:37.385985+00:00",
+      "bytes": 3238819
+    },
+    {
+      "file": "mbpp/1/hone/evaluations.jsonl",
+      "mtime": "2026-11-06T06:00:04.946156+00:00",
+      "bytes": 731025
+    },
+    {
+      "file": "mbpp/1/hone/incumbents.jsonl",
+      "mtime": "2026-11-06T02:38:06.439020+00:00",
+      "bytes": 590
+    },
+    {
+      "file": "mbpp/1/hone/manifest.json",
+      "mtime": "2026-11-06T06:00:40.087971+00:00",
+      "bytes": 24720
+    },
+    {
+      "file": "mbpp/1/hone/result.json",
+      "mtime": "2026-11-06T06:00:40.085971+00:00",
+      "bytes": 981
+    },
+    {
+      "file": "mbpp/1/hone/search.json",
+      "mtime": "2026-11-06T06:00:40.085971+00:00",
+      "bytes": 485261
+    },
+    {
+      "file": "mbpp/1/hone/spend.json",
+      "mtime": "2026-11-06T06:00:40.154970+00:00",
+      "bytes": 154551
+    },
+    {
+      "file": "mbpp/1/plain/artifacts/006755decec5eef213e1f771520071259b58d775e44a5e1c56544d5d4eb1a34d.json",
+      "mtime": "2026-11-06T11:59:46.764088+00:00",
+      "bytes": 1025
+    },
+    {
+      "file": "mbpp/1/plain/artifacts/119ad531b5819373916495e6bf3ce5c95ae140a8fed7ce6139b2014579815fbc.json",
+      "mtime": "2026-11-06T12:30:49.724387+00:00",
+      "bytes": 1145
+    },
+    {
+      "file": "mbpp/1/plain/artifacts/1dc0ac0ab9f970ac90f55a5214ba70b70864050b9d6b53898c2435c47a894385.json",
+      "mtime": "2026-11-06T12:19:31.264523+00:00",
+      "bytes": 1142
+    },
+    {
+      "file": "mbpp/1/plain/artifacts/1de6627a024b8f175313e6371957bce3a513bcfa9bb80f8115f38e6306613d7e.json",
+      "mtime": "2026-11-06T12:39:26.900618+00:00",
+      "bytes": 1083
+    },
+    {
+      "file": "mbpp/1/plain/artifacts/26b735214aab42ae72880d5110d0dc007f33215a9d2f3fbd07d23e5280842e8a.json",
+      "mtime": "2026-11-06T14:58:20.356331+00:00",
+      "bytes": 1471
+    },
+    {
+      "file": "mbpp/1/plain/artifacts/3d4287d65a36d5e1b6535bb87e50876ac7db8f17b203c95cdad9a6db794a3919.json",
+      "mtime": "2026-11-06T14:58:52.974177+00:00",
+      "bytes": 1692
+    },
+    {
+      "file": "mbpp/1/plain/artifacts/4c6c06fa3e81659472970e8c92d7c9292fb5887eed9f123fc78fc674d18257e6.json",
+      "mtime": "2026-11-06T13:35:50.762771+00:00",
+      "bytes": 1681
+    },
+    {
+      "file": "mbpp/1/plain/artifacts/4f4c1339d9595c7d6501425017b12ec1e17766e27b5b255632ca656a2cb36c73.json",
+      "mtime": "2026-11-06T12:46:34.538413+00:00",
+      "bytes": 1292
+    },
+    {
+      "file": "mbpp/1/plain/artifacts/55ce6835c4571021bf712efa6f3eb527c1dbd8c2ff7db0df15c8833dfd686e7b.json",
+      "mtime": "2026-11-06T11:35:22.207373+00:00",
+      "bytes": 539
+    },
+    {
+      "file": "mbpp/1/plain/artifacts/59477f83db8c6d985e59808b77d9a6f4dcf36505598fdce9663db59cf8c962f2.json",
+      "mtime": "2026-11-06T14:14:00.348064+00:00",
+      "bytes": 1564
+    },
+    {
+      "file": "mbpp/1/plain/artifacts/59fdf760648c47dee2d627ba177bacc5ab1fe2545ca4a5c54ac6f17bf4275bc7.json",
+      "mtime": "2026-11-06T13:30:11.688124+00:00",
+      "bytes": 1526
+    },
+    {
+      "file": "mbpp/1/plain/artifacts/6722810f38759c00ffae683890e2535059015b12c84ced0adad983380abb5db2.json",
+      "mtime": "2026-11-06T13:11:56.311175+00:00",
+      "bytes": 917
+    },
+    {
+      "file": "mbpp/1/plain/artifacts/724b36867ecd7e1b479a2cb8b8003c6f045dc6e924e46d216e6ed6b16847b2d6.json",
+      "mtime": "2026-11-06T11:53:09.704794+00:00",
+      "bytes": 1812
+    },
+    {
+      "file": "mbpp/1/plain/artifacts/780db175b33c009cf97219302639289ed87e6b5ec78ba2217a5b7db9a596901d.json",
+      "mtime": "2026-11-06T14:42:16.995766+00:00",
+      "bytes": 1585
+    },
+    {
+      "file": "mbpp/1/plain/artifacts/798ddf93a5ef00ad7ec0259f57d6868f88a30aaf1719c3a698f69b52ed0be3a1.json",
+      "mtime": "2026-11-06T14:31:23.530629+00:00",
+      "bytes": 1331
+    },
+    {
+      "file": "mbpp/1/plain/artifacts/8010d405e0c7ab6561d29fa5e53f4afc89f106ef44f0d98eb43681c51a939176.json",
+      "mtime": "2026-11-06T14:07:36.900246+00:00",
+      "bytes": 1440
+    },
+    {
+      "file": "mbpp/1/plain/artifacts/8af850c0cfe7195bab94a5a790b2757f3217b59e3ebe82d57551fa94df422537.json",
+      "mtime": "2026-11-06T12:12:43.953586+00:00",
+      "bytes": 997
+    },
+    {
+      "file": "mbpp/1/plain/artifacts/8b6642ddb312dcfd6d278952c6c4d32848c5a3d86550f122ff2ed37e374f956d.json",
+      "mtime": "2026-11-06T13:17:31.281538+00:00",
+      "bytes": 1197
+    },
+    {
+      "file": "mbpp/1/plain/artifacts/9537afedf044821aef33c437828a5852f8391aaba06df01141503c4a106bf21f.json",
+      "mtime": "2026-11-06T14:48:05.011208+00:00",
+      "bytes": 1530
+    },
+    {
+      "file": "mbpp/1/plain/artifacts/a6b7e967c479f5dd48438f38e4a71f63ae6d01ed622cfa6c8513436b124a5f21.json",
+      "mtime": "2026-11-06T14:25:08.008545+00:00",
+      "bytes": 1493
+    },
+    {
+      "file": "mbpp/1/plain/artifacts/b66ee23ed77b4d65760c0447b9f27fd4dfdd581271c99c9f2e3bbd72e6f020d7.json",
+      "mtime": "2026-11-06T12:06:06.089394+00:00",
+      "bytes": 1048
+    },
+    {
+      "file": "mbpp/1/plain/artifacts/c46adceb3096db18d18310d52dad5bb8b50ea70e85632e44d70e578a323c3766.json",
+      "mtime": "2026-11-06T14:02:05.694355+00:00",
+      "bytes": 1507
+    },
+    {
+      "file": "mbpp/1/plain/artifacts/e0bb69c5d1ed2b86311af9ab71a5f5d0df3873f437b2ddd4b3ff356de981603d.json",
+      "mtime": "2026-11-06T13:00:23.704491+00:00",
+      "bytes": 1095
+    },
+    {
+      "file": "mbpp/1/plain/artifacts/f31da411c89719b6616b498a94b44cd0f27e1f0749c0bc0ac56956a5142287ae.json",
+      "mtime": "2026-11-06T12:53:40.710309+00:00",
+      "bytes": 1135
+    },
+    {
+      "file": "mbpp/1/plain/artifacts/f3aabfe3012af62898a3929039d4a08bbe55fff9600039f9c74e01d9b6d44053.json",
+      "mtime": "2026-11-06T13:50:02.555950+00:00",
+      "bytes": 1620
+    },
+    {
+      "file": "mbpp/1/plain/artifacts/fa02b136f9caa47f3238ff2497101c63f3d47c9dd23fe3bbe79194d0b9cf7f89.json",
+      "mtime": "2026-11-06T11:46:11.960429+00:00",
+      "bytes": 1077
+    },
+    {
+      "file": "mbpp/1/plain/artifacts/ff058a33114513a2e3929ddd355fcabe544d1f85e8672c289c100aba5134ba8e.json",
+      "mtime": "2026-11-06T13:43:18.757804+00:00",
+      "bytes": 1574
+    },
+    {
+      "file": "mbpp/1/plain/bundle.json",
+      "mtime": "2026-11-06T15:01:10.402524+00:00",
+      "bytes": 4940
+    },
+    {
+      "file": "mbpp/1/plain/calls.jsonl",
+      "mtime": "2026-11-06T15:01:08.306534+00:00",
+      "bytes": 3151834
+    },
+    {
+      "file": "mbpp/1/plain/evaluations.jsonl",
+      "mtime": "2026-11-06T14:58:44.759216+00:00",
+      "bytes": 649847
+    },
+    {
+      "file": "mbpp/1/plain/incumbents.jsonl",
+      "mtime": "2026-11-06T14:37:13.246037+00:00",
+      "bytes": 5695
+    },
+    {
+      "file": "mbpp/1/plain/manifest.json",
+      "mtime": "2026-11-06T15:01:10.331524+00:00",
+      "bytes": 24720
+    },
+    {
+      "file": "mbpp/1/plain/result.json",
+      "mtime": "2026-11-06T15:01:10.330524+00:00",
+      "bytes": 1002
+    },
+    {
+      "file": "mbpp/1/plain/search.json",
+      "mtime": "2026-11-06T15:01:10.330524+00:00",
+      "bytes": 326487
+    },
+    {
+      "file": "mbpp/1/plain/spend.json",
+      "mtime": "2026-11-06T15:01:10.398524+00:00",
+      "bytes": 127178
+    },
+    {
+      "file": "rerun.json",
+      "mtime": "2026-11-06T11:22:15.467188+00:00",
+      "bytes": 2472
+    }
+  ],
+  "producer_files_modified_in_reported_full_disk_window": [
+    {
+      "file": "hover/1/plain/calls.jsonl",
+      "mtime": "2026-11-06T22:37:28.498659+00:00",
+      "bytes": 2048000
+    },
+    {
+      "file": "hover/1/plain/manifest.json",
+      "mtime": "2026-11-06T22:37:28.499659+00:00",
+      "bytes": 0
+    }
+  ],
+  "completed_cell_latest_producer_file_mtime": {
+    "hover/1/gepa": "2026-11-06T20:29:11.035902+00:00",
+    "hover/1/hone": "2026-11-06T17:48:49.374824+00:00",
+    "mbpp/1/gepa": "2026-11-06T08:59:22.313734+00:00",
+    "mbpp/1/hone": "2026-11-06T06:00:40.162970+00:00",
+    "mbpp/1/plain": "2026-11-06T15:01:10.402524+00:00"
+  },
+  "cache_metadata": [
+    {
+      "file": ".pilot-cache/mbpp_train.parquet",
+      "mtime": "2026-11-04T21:10:54.994096+00:00",
+      "bytes": 87223
+    },
+    {
+      "file": ".pilot-cache/mbpp_selection.parquet",
+      "mtime": "2026-11-04T21:10:55.364094+00:00",
+      "bytes": 25144
+    },
+    {
+      "file": ".pilot-cache/hover_train_release_v1.1.json",
+      "mtime": "2026-11-04T21:07:21.728496+00:00",
+      "bytes": 9205582
+    },
+    {
+      "file": ".pilot-cache/hover-retrieval/index-receipt.json",
+      "mtime": "2026-11-03T09:43:07.747028+00:00",
+      "bytes": 877
+    },
+    {
+      "file": ".pilot-cache/hover-retrieval/bm25s_retriever/data.csc.index.npy",
+      "mtime": "2026-11-03T09:43:03.840056+00:00",
+      "bytes": 527289964
+    },
+    {
+      "file": ".pilot-cache/hover-retrieval/bm25s_retriever/indices.csc.index.npy",
+      "mtime": "2026-11-03T09:43:04.088054+00:00",
+      "bytes": 527289964
+    },
+    {
+      "file": ".pilot-cache/hover-retrieval/bm25s_retriever/indptr.csc.index.npy",
+      "mtime": "2026-11-03T09:43:04.093054+00:00",
+      "bytes": 10198552
+    },
+    {
+      "file": ".pilot-cache/hover-retrieval/bm25s_retriever/params.index.json",
+      "mtime": "2026-11-03T09:43:04.776049+00:00",
+      "bytes": 225
+    },
+    {
+      "file": ".pilot-cache/hover-retrieval/bm25s_retriever/vocab.index.json",
+      "mtime": "2026-11-03T09:43:04.739049+00:00",
+      "bytes": 54154918
+    }
+  ],
+  "twelve_engine_source_hashes_match": {
+    "optimizer/assets/policy.ts": true,
+    "optimizer/src/loop.ts": true,
+    "optimizer/src/pilot-policy.ts": true,
+    "optimizer/worker/Dockerfile.mutation": true,
+    "package.json": true,
+    "pilot/__main__.py": true,
+    "pilot/admission.py": true,
+    "pilot/runtime.py": true,
+    "pilot/search.py": true,
+    "pilot/spend.py": true,
+    "pnpm-lock.yaml": true,
+    "schema/src/promotion.ts": true
+  },
+  "index_small_json_parse": "passed",
+  "hover_replay_uses_index": false,
+  "mbpp_plan_cache": "verification._PLANS is in-process only, keyed by row contents and copied through JSON; not a disk cache",
+  "assistant_context": "deckbox root filesystem full due another project lane output around2026-11-06T22:36Z through22:42Z; authoritative assistant finding, not inferred from later free space",
+  "scoring_source_files_match_frozen_identity": [
+    "pilot/tasks.py",
+    "pilot/program.py",
+    "pilot/verification.py",
+    "pilot/hover.py"
+  ],
+  "observed_grader_image_proof": [
+    {
+      "parent": 2494811,
+      "child": 2630365,
+      "images": [
+        "python@sha256:623674a14ef93d052bb9b0de4dbf5f28eb578a35263838941cc8aa43213c1487"
+      ]
+    }
+  ],
+  "recorded_image": "python@sha256:623674a14ef93d052bb9b0de4dbf5f28eb578a35263838941cc8aa43213c1487"
+}

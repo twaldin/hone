@@ -1,0 +1,22 @@
+test_live_signal_delivery_stop_retains_trusted_timeout_zero (pilot.test_verification.DockerVerificationTests.test_live_signal_delivery_stop_retains_trusted_timeout_zero) ... ERROR
+
+======================================================================
+ERROR: test_live_signal_delivery_stop_retains_trusted_timeout_zero (pilot.test_verification.DockerVerificationTests.test_live_signal_delivery_stop_retains_trusted_timeout_zero)
+----------------------------------------------------------------------
+Traceback (most recent call last):
+  File "/home/tim/worktrees/hone/hone-hone-pilot-seeds12-1/pilot/test_verification.py", line 792, in test_live_signal_delivery_stop_retains_trusted_timeout_zero
+    self.assertEqual(verification.score_solution("while True: pass", ADD, "", ADD_TESTS), 0.0)
+                     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/tim/worktrees/hone/hone-hone-pilot-seeds12-1/pilot/verification.py", line 756, in score_solution
+    verdict = _results(_run("worker", payload), len(calls), invocations, input_hash)
+              ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/tim/worktrees/hone/hone-hone-pilot-seeds12-1/pilot/verification.py", line 734, in _results
+    _raise_infrastructure(result, invocations, input_hash)
+  File "/home/tim/worktrees/hone/hone-hone-pilot-seeds12-1/pilot/verification.py", line 183, in _raise_infrastructure
+    raise GraderInfrastructureError(record_grader_outcome(
+pilot.verification.GraderInfrastructureError: Protected grader infrastructure failure: nonzero_exit
+
+----------------------------------------------------------------------
+Ran 1 test in 10.466s
+
+FAILED (errors=1)

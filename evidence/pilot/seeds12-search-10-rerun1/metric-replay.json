@@ -1,0 +1,21 @@
+{
+  "schema": "pilot-completed-cell-metric-replay-v10",
+  "status": "failed",
+  "exit_code": 1,
+  "source": "Owned offline job bg_15, delivered session tool result",
+  "scope": "All five completed cells; excludes damaged HoVer/seed1/plain and all incomplete evaluation tails",
+  "expected_retained_scored_rollouts": 10236,
+  "replayed_rollouts_before_failure": null,
+  "first_mismatch_location": null,
+  "error_type": "ValueError",
+  "error_message": "Replay metric disagrees with a retained evaluation",
+  "source_location": "pilot/__main__.py:911",
+  "input_bundle_hash_verification": "passed before metric replay",
+  "completed_input_inventory_digest": "sha256:bd254c2e332fadba19173222cf93c96a4d10c2127356b441eab774b7dbdba256",
+  "wall_seconds": 2624.60,
+  "model_calls": 0,
+  "final_test_labels_read": false,
+  "retries_or_grader_changes_after_failure": 0,
+  "interpretation": "At least one retained score was not reproduced. Location and cause remain unresolved. Archive-derived quality figures are not independently validated by this attempt.",
+  "new_measured_search_authorized": false
+}

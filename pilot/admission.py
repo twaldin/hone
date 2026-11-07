@@ -145,6 +145,82 @@ def task_source_ast(source: str, task_name: str) -> str:
 
 TRANSITION_8A_HASH = "sha256:8d6f3298f0e5c0c26b30a32bce491f563e4e424cc4168150b2757b5e6ad3e36a"
 TRANSITION_9_HEAD = "cdb1e75fc76c2c3e44f313208e8f86d92ee50291"
+TRANSITION_9_HASH = "sha256:2e2b7d25ab9e487b82c05a98915295a477b7a220d42aad0a632757ab840d5d76"
+TRANSITION_10_HEAD = "6017e35e0b2f2f8dd72c0cdd8e2bbf94edeaf107"
+TRANSITION_10_SEARCH_HASH = "sha256:8bf99067e6d87a12e124b849285e623e4e631f6707e2708822b8330d3f3ef3cb"
+TRANSITION_11_HEAD = "b453995e9add69d3d82a11673e80e0dfaa46c8d8"
+TRANSITION_11_VERIFICATION_HASH = "sha256:aa3c7714257dcc76fac5155a89015cf5df3ba596db751c7ecc622c8b460931d5"
+
+
+def transition11_baseline(root: Path) -> dict:
+    import hashlib
+    import json
+    declaration = root / "evidence/pilot/source-transition-11.json"
+    if not declaration.exists():
+        return {}
+    sha = lambda data: "sha256:" + hashlib.sha256(data).hexdigest()
+    receipt = json.loads(declaration.read_text())
+    prior_path = root / "evidence/pilot/source-transition-10.json"
+    prior = json.loads(prior_path.read_text())
+    snapshot_path = root / "evidence/pilot/source-snapshot-11.json"
+    snapshot = json.loads(snapshot_path.read_text())
+    if (receipt.get("version") != "pilot-grader-transition-v11"
+            or receipt.get("source_head") != TRANSITION_11_HEAD
+            or snapshot.get("source_head") != TRANSITION_11_HEAD
+            or receipt.get("prior_source_transition_hash") != sha(prior_path.read_bytes())
+            or receipt.get("source_snapshot_hash") != sha(snapshot_path.read_bytes())
+            or receipt.get("predeclaration_hash") != sha((root / "evidence/pilot/predeclaration-11.md").read_bytes())
+            or set(receipt.get("files", {})) != set(prior["files"]) | {"pilot/campaign.py"}
+            or set(snapshot.get("files", {})) != set(prior["files"])
+            or receipt["files"].get("pilot/verification.py", {}).get("after") != TRANSITION_11_VERIFICATION_HASH):
+        raise ValueError("Grader source transition does not authenticate its baseline")
+    changed_files = {"pilot/__main__.py", "pilot/admission.py", "pilot/adversarial.py", "pilot/controls.py",
+                     "pilot/hover.py", "pilot/panel.py", "pilot/runtime.py", "pilot/tasks.py", "pilot/verification.py",
+                     "pilot/campaign.py"}
+    for filename, hashes in receipt["files"].items():
+        before = snapshot["files"].get(filename)
+        if (hashes.get("before") != (sha(before.encode()) if before is not None else None)
+                or (filename in prior["files"] and hashes["before"] != prior["files"][filename]["after"])
+                or (filename not in changed_files and hashes["before"] != hashes["after"])
+                or hashes.get("after") != sha((root / filename).read_bytes())):
+            raise ValueError("Grader source transition changed: " + filename)
+    return snapshot["files"]
+
+
+def transition10_baseline(root: Path) -> dict:
+    import hashlib
+    import json
+    grader_baseline = transition11_baseline(root)
+    declaration = root / "evidence/pilot/source-transition-10.json"
+    if not declaration.exists():
+        return {}
+    sha = lambda data: "sha256:" + hashlib.sha256(data).hexdigest()
+    receipt = json.loads(declaration.read_text())
+    prior_path = root / "evidence/pilot/source-transition-9.json"
+    prior = json.loads(prior_path.read_text())
+    snapshot_path = root / "evidence/pilot/source-snapshot-10.json"
+    snapshot = json.loads(snapshot_path.read_text())
+    if (sha(prior_path.read_bytes()) != TRANSITION_9_HASH
+            or receipt.get("version") != "pilot-selection-transition-v10"
+            or receipt.get("source_head") != TRANSITION_10_HEAD
+            or snapshot.get("source_head") != TRANSITION_10_HEAD
+            or receipt.get("prior_source_transition_hash") != TRANSITION_9_HASH
+            or receipt.get("source_snapshot_hash") != sha(snapshot_path.read_bytes())
+            or receipt.get("predeclaration_hash") != sha((root / "evidence/pilot/predeclaration-10.md").read_bytes())
+            or receipt.get("files", {}).get("pilot/search.py", {}).get("after") != TRANSITION_10_SEARCH_HASH
+            or set(receipt.get("files", {})) != set(prior["files"])):
+        raise ValueError("Selection source transition does not authenticate its baseline")
+    changed = {name for name, hashes in receipt["files"].items() if hashes["before"] != hashes["after"]}
+    if not changed or set(snapshot.get("files", {})) != changed:
+        raise ValueError("Selection source transition snapshot inventory changed")
+    for filename, hashes in receipt["files"].items():
+        current = grader_baseline.get(filename, "").encode() if filename in grader_baseline else (root / filename).read_bytes()
+        baseline = snapshot["files"][filename].encode() if filename in changed else current
+        if (hashes["before"] != prior["files"][filename]["after"]
+                or hashes["before"] != sha(baseline)
+                or hashes["after"] != sha(current)):
+            raise ValueError("Selection source transition changed: " + filename)
+    return {**grader_baseline, **snapshot["files"]}
 
 
 def transition9_baseline(root: Path, prior: dict) -> tuple[dict, dict]:
@@ -153,6 +229,7 @@ def transition9_baseline(root: Path, prior: dict) -> tuple[dict, dict]:
     declaration = root / "evidence/pilot/source-transition-9.json"
     if not declaration.exists():
         return {}, {}
+    selection_baseline = transition10_baseline(root)
     sha = lambda data: "sha256:" + hashlib.sha256(data).hexdigest()
     receipt = json.loads(declaration.read_text())
     snapshot_path = root / "evidence/pilot/source-snapshot-9.json"
@@ -171,12 +248,13 @@ def transition9_baseline(root: Path, prior: dict) -> tuple[dict, dict]:
     if not changed or set(snapshot.get("files", {})) != changed:
         raise ValueError("Dispatch source transition snapshot inventory changed")
     for filename, hashes in receipt["files"].items():
-        baseline = snapshot["files"][filename].encode() if filename in changed else (root / filename).read_bytes()
+        current = selection_baseline[filename].encode() if filename in selection_baseline else (root / filename).read_bytes()
+        baseline = snapshot["files"][filename].encode() if filename in changed else current
         if (hashes["before"] != prior["files"][filename]["after"]
                 or hashes["before"] != sha(baseline)
-                or hashes["after"] != sha((root / filename).read_bytes())):
+                or hashes["after"] != sha(current)):
             raise ValueError("Dispatch source transition changed: " + filename)
-    return snapshot["files"], {
+    return {**selection_baseline, **snapshot["files"]}, {
         "source_transition_hash": sha(declaration.read_bytes()),
         "source_snapshot_hash": receipt["source_snapshot_hash"],
         "predeclaration_hash": receipt["predeclaration_hash"],

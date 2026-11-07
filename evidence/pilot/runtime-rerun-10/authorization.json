@@ -1,0 +1,37 @@
+{
+  "schema": "pilot-infrastructure-rerun-authorization-v10",
+  "source": "Assistant decision in lane conversation, approximately 2026-11-06T10:20Z",
+  "proven_cause": "Our own omp-update replaced global omp 18.16.0 with 18.17.0 between cells; the frozen runtime refused the new version before ModelCalls.",
+  "timeline_utc": {
+    "mbpp_seed1_gepa_completed": "2026-11-06T08:59:22Z",
+    "omp_update_roll": "2026-11-06T09:05Z approximate",
+    "mbpp_seed1_plain_failed": "2026-11-06T09:06:14Z",
+    "hover_seed1_hone_failed": "2026-11-06T09:06:21Z"
+  },
+  "refusing_guard": "pilot/runtime.py:434-435: Pilot requires omp 18.16.0",
+  "completed_cells_runtime": "18.16.0",
+  "retained_completed_cells": [
+    {"seed": 1, "task": "mbpp", "method": "hone"},
+    {"seed": 1, "task": "mbpp", "method": "gepa"}
+  ],
+  "infrastructure_rerun": 1,
+  "max_infrastructure_reruns": 2,
+  "remaining_cells": 10,
+  "local_install": ".pilot-cache/omp-18.16.0",
+  "global_omp_broker_config_and_update_schedule_changes_authorized": false,
+  "measurement_changes_authorized": false,
+  "merge_authorized": false,
+  "stop_conditions": [
+    "Pinned copy requires changing global omp, broker or configuration",
+    "Zero-call admission smoke fails",
+    "Substantive review finding",
+    "Third consecutive infrastructure failure"
+  ],
+  "integrity_correction_gate": {
+    "head": "9613d9b1839a1b500677eb7dd36a0fbe06d6ae3e",
+    "ci": "https://github.com/twaldin/hone/actions/runs/42201486576",
+    "reviewer_model": "anthropic/claude-opus-5-5",
+    "verdict": "READY",
+    "review": "https://github.com/twaldin/hone/pull/38#issuecomment-6682586238"
+  }
+}

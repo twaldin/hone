@@ -1,0 +1,27 @@
+What this change does: It preserves an exited worker's status and captured result when an escaped descendant keeps its pipe open. The new Docker regression covers four early-exit cases, but a deadline-boundary case still loses a completed verdict.
+
+**Scoped verdict: NOT_READY**  
+**Head:** `7040004e6c51b1960cc83750320424731fb3f20a`  
+**Resolved model:** `openai-codex/gpt-6-astra`
+
+## Must fix
+
+1. **An exited worker's queued result is discarded at the deadline** (`pilot/verification.py:424-438`).
+   - **What this is:** `_supervise` distinguishes a live overrun from an exited worker, then forwards the collected bytes.
+   - **Problem:** [INFERENCE] When `remaining <= 0`, it returns before draining bytes already available in the pipe. Concrete case: the worker writes a complete valid result and exits before ten seconds, but the supervisor resumes after the deadline with that frame still unread. `waitid` correctly observes the exit, yet line 433 returns `b""` or an incomplete prefix. Lines 665–684 then report `frame_failure/null` instead of the worker's pass or candidate-failure verdict. This also occurs when the final portion of a larger frame remains queued.
+   - **Fix:** After observing exit, drain immediately available bytes without waiting for EOF, retaining the wire bound. Do not give a live candidate additional execution time. Add a regression with a completed frame queued when the supervisor observes the expired deadline.
+   - **If we skip it:** A valid completed evaluation can become an infrastructure failure and abort the evaluation. `pilot/tasks.py:354` does not swallow `GraderInfrastructureError`; the failure reaches the campaign handling in `pilot/__main__.py:784-800`.
+
+The new regression does not cover this ordering. Its worker exits immediately after the descendant handshake, leaving almost ten seconds to drain the tiny frame (`pilot/test_verification.py:593-629`).
+
+## Evidence assessed
+
+- **The reported regression is supported.** `evidence/pilot/runtime-rerun-11b/before.txt:1-42` records all four cases failing before the correction. `full-suite.txt:668,706-708` records the regression passing within the 340-test suite.
+- **Real smoke receipts preserve the intended ordinary classifications.** `smoke-grader-outcomes.jsonl:15-27` retains live overrun as `wrong_answer/0`, exit 7 as `nonzero_exit/null`, clean missing-frame exit as `frame_failure/null`, and the escaped-descendant pass and TypeError verdicts.
+- **Fresh admission reports success without calls.** `admission.json:1` records 1,808 passes, 2,650 wrong answers, zero model/gateway requests, and the same verification source hash pinned at `pilot/admission.py:152`.
+- **Connected handling is consistent once classification is correct.** `_results` rejects malformed frames; receipt validation rejects scored infrastructure (`pilot/verification.py:138-149,665-684`). `reference_audit.py:43-68` distinguishes candidate failures and lets infrastructure propagate. The negative-probe exception requires a bound unscored receipt (`pilot/controls.py:88-108`).
+- **Test Behavior, Not Implementation** shaped the requested regression: assert the final score and receipt, not merely that exit detection precedes the deadline check.
+
+**Verdict: fix 1 first.** Stopping on this substantive outcome-preservation finding.
+
+**Not checked:** No tests, builds, formatters, or edits were run. The new boundary case is source-derived, not an observed runtime reproduction. This is a scoped audit, not full release approval.

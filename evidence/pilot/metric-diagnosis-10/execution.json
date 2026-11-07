@@ -1,0 +1,37 @@
+{
+  "schema": "offline-diagnostic-execution-receipts-v10",
+  "run5": {
+    "unit": "hone-seeds12-10-offline-scan-4656a54.service",
+    "historical_main_pid": 2494811,
+    "finished_utc": "2026-11-07T03:47:40Z",
+    "active_state_observed": "inactive",
+    "main_pid_observed": 0,
+    "exec_main_status_observed": 0,
+    "result_observed": "success",
+    "checked": 10236,
+    "model_calls": 0
+  },
+  "run6": {
+    "unit": "hone-seeds12-task720-repeat-20261107T0545.service",
+    "source": "systemd-run --wait --pipe tool result",
+    "result": "success",
+    "exit_code": 0,
+    "service_runtime_seconds": 41.59,
+    "trials": 200,
+    "all_scores": 1,
+    "restart": "no",
+    "cpu_affinity": [
+      6
+    ],
+    "nice": 10,
+    "runtime_max_seconds": 600,
+    "model_calls": 0
+  },
+  "verification": {
+    "source_files_byte_identical": 254,
+    "engine_files_unchanged": 12,
+    "scoring_files_unchanged": 4,
+    "completed_selection_scalars_matching": 5100,
+    "committed_prior_bundles_modified": 0
+  }
+}

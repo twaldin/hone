@@ -1,0 +1,134 @@
+test_completed_outer_invocation_survives_deadline_before_read_or_after_eof (pilot.test_verification.DockerVerificationTests.test_completed_outer_invocation_survives_deadline_before_read_or_after_eof) ... 
+  test_completed_outer_invocation_survives_deadline_before_read_or_after_eof (pilot.test_verification.DockerVerificationTests.test_completed_outer_invocation_survives_deadline_before_read_or_after_eof) (boundary='queued', expected=1.0) ... ERROR
+  test_completed_outer_invocation_survives_deadline_before_read_or_after_eof (pilot.test_verification.DockerVerificationTests.test_completed_outer_invocation_survives_deadline_before_read_or_after_eof) (boundary='queued', expected=0.0) ... ERROR
+  test_completed_outer_invocation_survives_deadline_before_read_or_after_eof (pilot.test_verification.DockerVerificationTests.test_completed_outer_invocation_survives_deadline_before_read_or_after_eof) (boundary='after-eof', expected=1.0) ... ERROR
+  test_completed_outer_invocation_survives_deadline_before_read_or_after_eof (pilot.test_verification.DockerVerificationTests.test_completed_outer_invocation_survives_deadline_before_read_or_after_eof) (boundary='after-eof', expected=0.0) ... ERROR
+test_competing_reader_cannot_block_supervisor_deadline_or_exit_drain (pilot.test_verification.DockerVerificationTests.test_competing_reader_cannot_block_supervisor_deadline_or_exit_drain) ... 
+  test_competing_reader_cannot_block_supervisor_deadline_or_exit_drain (pilot.test_verification.DockerVerificationTests.test_competing_reader_cannot_block_supervisor_deadline_or_exit_drain) (case='live') ... ERROR
+  test_competing_reader_cannot_block_supervisor_deadline_or_exit_drain (pilot.test_verification.DockerVerificationTests.test_competing_reader_cannot_block_supervisor_deadline_or_exit_drain) (case='dead') ... ERROR
+test_completed_queued_frame_is_drained_after_deadline (pilot.test_verification.DockerVerificationTests.test_completed_queued_frame_is_drained_after_deadline) ... 
+  test_completed_queued_frame_is_drained_after_deadline (pilot.test_verification.DockerVerificationTests.test_completed_queued_frame_is_drained_after_deadline) (frame={'results': [{'t': 'int', 'v': '0x3'}, {'t': 'int', 'v': '0x4'}]}, hidden_exit=True) ... FAIL
+  test_completed_queued_frame_is_drained_after_deadline (pilot.test_verification.DockerVerificationTests.test_completed_queued_frame_is_drained_after_deadline) (frame={'failure': {'reason': 'call 0 raised TypeError'}}, hidden_exit=True) ... FAIL
+
+======================================================================
+ERROR: test_completed_outer_invocation_survives_deadline_before_read_or_after_eof (pilot.test_verification.DockerVerificationTests.test_completed_outer_invocation_survives_deadline_before_read_or_after_eof) (boundary='queued', expected=1.0)
+----------------------------------------------------------------------
+Traceback (most recent call last):
+  File "/home/tim/worktrees/hone/hone-hone-pilot-seeds12-1/pilot/test_verification.py", line 727, in test_completed_outer_invocation_survives_deadline_before_read_or_after_eof
+    self.assertEqual(verification.score_solution(output, ADD, "", ADD_TESTS), expected)
+                     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/tim/worktrees/hone/hone-hone-pilot-seeds12-1/pilot/verification.py", line 710, in score_solution
+    verdict = _results(_run("worker", payload), len(calls), invocations, input_hash)
+              ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/tim/worktrees/hone/hone-hone-pilot-seeds12-1/pilot/verification.py", line 688, in _results
+    _raise_infrastructure(result, invocations, input_hash)
+  File "/home/tim/worktrees/hone/hone-hone-pilot-seeds12-1/pilot/verification.py", line 182, in _raise_infrastructure
+    raise GraderInfrastructureError(record_grader_outcome(
+pilot.verification.GraderInfrastructureError: Protected grader infrastructure failure: timeout
+
+======================================================================
+ERROR: test_completed_outer_invocation_survives_deadline_before_read_or_after_eof (pilot.test_verification.DockerVerificationTests.test_completed_outer_invocation_survives_deadline_before_read_or_after_eof) (boundary='queued', expected=0.0)
+----------------------------------------------------------------------
+Traceback (most recent call last):
+  File "/home/tim/worktrees/hone/hone-hone-pilot-seeds12-1/pilot/test_verification.py", line 727, in test_completed_outer_invocation_survives_deadline_before_read_or_after_eof
+    self.assertEqual(verification.score_solution(output, ADD, "", ADD_TESTS), expected)
+                     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/tim/worktrees/hone/hone-hone-pilot-seeds12-1/pilot/verification.py", line 710, in score_solution
+    verdict = _results(_run("worker", payload), len(calls), invocations, input_hash)
+              ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/tim/worktrees/hone/hone-hone-pilot-seeds12-1/pilot/verification.py", line 688, in _results
+    _raise_infrastructure(result, invocations, input_hash)
+  File "/home/tim/worktrees/hone/hone-hone-pilot-seeds12-1/pilot/verification.py", line 182, in _raise_infrastructure
+    raise GraderInfrastructureError(record_grader_outcome(
+pilot.verification.GraderInfrastructureError: Protected grader infrastructure failure: timeout
+
+======================================================================
+ERROR: test_completed_outer_invocation_survives_deadline_before_read_or_after_eof (pilot.test_verification.DockerVerificationTests.test_completed_outer_invocation_survives_deadline_before_read_or_after_eof) (boundary='after-eof', expected=1.0)
+----------------------------------------------------------------------
+Traceback (most recent call last):
+  File "/home/tim/worktrees/hone/hone-hone-pilot-seeds12-1/pilot/test_verification.py", line 727, in test_completed_outer_invocation_survives_deadline_before_read_or_after_eof
+    self.assertEqual(verification.score_solution(output, ADD, "", ADD_TESTS), expected)
+                     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/tim/worktrees/hone/hone-hone-pilot-seeds12-1/pilot/verification.py", line 710, in score_solution
+    verdict = _results(_run("worker", payload), len(calls), invocations, input_hash)
+              ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/tim/worktrees/hone/hone-hone-pilot-seeds12-1/pilot/verification.py", line 688, in _results
+    _raise_infrastructure(result, invocations, input_hash)
+  File "/home/tim/worktrees/hone/hone-hone-pilot-seeds12-1/pilot/verification.py", line 182, in _raise_infrastructure
+    raise GraderInfrastructureError(record_grader_outcome(
+pilot.verification.GraderInfrastructureError: Protected grader infrastructure failure: timeout
+
+======================================================================
+ERROR: test_completed_outer_invocation_survives_deadline_before_read_or_after_eof (pilot.test_verification.DockerVerificationTests.test_completed_outer_invocation_survives_deadline_before_read_or_after_eof) (boundary='after-eof', expected=0.0)
+----------------------------------------------------------------------
+Traceback (most recent call last):
+  File "/home/tim/worktrees/hone/hone-hone-pilot-seeds12-1/pilot/test_verification.py", line 727, in test_completed_outer_invocation_survives_deadline_before_read_or_after_eof
+    self.assertEqual(verification.score_solution(output, ADD, "", ADD_TESTS), expected)
+                     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/tim/worktrees/hone/hone-hone-pilot-seeds12-1/pilot/verification.py", line 710, in score_solution
+    verdict = _results(_run("worker", payload), len(calls), invocations, input_hash)
+              ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/tim/worktrees/hone/hone-hone-pilot-seeds12-1/pilot/verification.py", line 688, in _results
+    _raise_infrastructure(result, invocations, input_hash)
+  File "/home/tim/worktrees/hone/hone-hone-pilot-seeds12-1/pilot/verification.py", line 182, in _raise_infrastructure
+    raise GraderInfrastructureError(record_grader_outcome(
+pilot.verification.GraderInfrastructureError: Protected grader infrastructure failure: timeout
+
+======================================================================
+ERROR: test_competing_reader_cannot_block_supervisor_deadline_or_exit_drain (pilot.test_verification.DockerVerificationTests.test_competing_reader_cannot_block_supervisor_deadline_or_exit_drain) (case='live')
+----------------------------------------------------------------------
+Traceback (most recent call last):
+  File "/home/tim/worktrees/hone/hone-hone-pilot-seeds12-1/pilot/test_verification.py", line 786, in test_competing_reader_cannot_block_supervisor_deadline_or_exit_drain
+    result = subprocess.run(program.docker_command(name) + ["-c", script],
+             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/usr/lib/python3.12/subprocess.py", line 550, in run
+    stdout, stderr = process.communicate(input, timeout=timeout)
+                     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/usr/lib/python3.12/subprocess.py", line 1209, in communicate
+    stdout, stderr = self._communicate(input, endtime, timeout)
+                     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/usr/lib/python3.12/subprocess.py", line 2116, in _communicate
+    self._check_timeout(endtime, orig_timeout, stdout, stderr)
+  File "/usr/lib/python3.12/subprocess.py", line 1253, in _check_timeout
+    raise TimeoutExpired(
+subprocess.TimeoutExpired: Command '['docker', 'run', '--rm', '--name', 'hone-reader-race-e00de908672541c594f99b2628e187f1', '--network', 'none', '--read-only', '--cap-drop', 'ALL', '--security-opt', 'no-new-privileges', '--pids-limit', '32', '--memory', '256m', '--memory-swap', '256m', '--cpus', '1', '--cpuset-cpus', '6', '--user', '65534:65534', '--ulimit', 'nofile=64:64', '--ulimit', 'fsize=1048576:1048576', '-i', 'python@sha256:623674a14ef93d052bb9b0de4dbf5f28eb578a35263838941cc8aa43213c1487', 'python', '-I', '-B', '-c', 'import os,select,signal,time,json\n_WIRE=262144\ncase=\'live\'\ndef _kill(child):\n    for kill in (os.killpg, os.kill):\n        try:\n            kill(child, signal.SIGKILL)\n        except ProcessLookupError:\n            pass\n\ndef _supervise(child, reader, deadline):\n    data, eof = b"", False\n    while len(data) <= _WIRE:\n        remaining = deadline - time.monotonic()\n        if os.waitid(os.P_PID, child, os.WEXITED | os.WNOHANG | os.WNOWAIT) is not None:\n            _kill(child)\n            while len(data) <= _WIRE and select.select([reader], [], [], 0)[0]:\n                chunk = os.read(reader, min(65536, _WIRE + 1 - len(data)))\n                if not chunk:\n                    break\n                data += chunk\n            return data\n        if remaining <= 0:\n            return None\n        if eof:\n            time.sleep(min(remaining, 0.01))\n        elif select.select([reader], [], [], min(remaining, 0.01))[0]:\n            chunk = os.read(reader, min(65536, _WIRE + 1 - len(data)))\n            eof, data = not chunk, data + chunk\n    return data\n\nreader, writer = os.pipe()\nthief = os.open("/proc/self/fd/" + str(writer), os.O_RDONLY | os.O_NONBLOCK)\nready_reader, ready_writer = os.pipe()\nchild = os.fork()\nif child == 0:\n    os.setpgid(0, 0)\n    os.close(reader)\n    grandchild = os.fork()\n    if grandchild == 0:\n        os.close(ready_reader)\n        os.setsid()\n        os.write(ready_writer, b"R")\n        time.sleep(30)\n        os._exit(0)\n    os.close(ready_writer)\n    assert os.read(ready_reader, 1) == b"R"\n    os.write(writer, b"x")\n    if case == "live":\n        time.sleep(30)\n    os._exit(0)\nos.close(writer)\nos.close(ready_reader)\nos.close(ready_writer)\nreal_select = select.select\nstolen = False\ndef race(*args):\n    global stolen\n    ready = real_select(*args)\n    if ready[0] and not stolen:\n        assert os.read(thief, 8192) == b"x"\n        stolen = True\n    return ready\nselect.select = race\nif case == "dead":\n    os.waitid(os.P_PID, child, os.WEXITED | os.WNOWAIT)\ncaptured = _supervise(child, reader, time.monotonic() + (0.2 if case == "live" else -1))\n_kill(child)\nos.waitpid(child, 0)\nprint(json.dumps({"stolen": stolen, "captured": captured.hex() if captured is not None else None}), flush=True)\n']' timed out after 3 seconds
+
+======================================================================
+ERROR: test_competing_reader_cannot_block_supervisor_deadline_or_exit_drain (pilot.test_verification.DockerVerificationTests.test_competing_reader_cannot_block_supervisor_deadline_or_exit_drain) (case='dead')
+----------------------------------------------------------------------
+Traceback (most recent call last):
+  File "/home/tim/worktrees/hone/hone-hone-pilot-seeds12-1/pilot/test_verification.py", line 786, in test_competing_reader_cannot_block_supervisor_deadline_or_exit_drain
+    result = subprocess.run(program.docker_command(name) + ["-c", script],
+             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/usr/lib/python3.12/subprocess.py", line 550, in run
+    stdout, stderr = process.communicate(input, timeout=timeout)
+                     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/usr/lib/python3.12/subprocess.py", line 1209, in communicate
+    stdout, stderr = self._communicate(input, endtime, timeout)
+                     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/usr/lib/python3.12/subprocess.py", line 2116, in _communicate
+    self._check_timeout(endtime, orig_timeout, stdout, stderr)
+  File "/usr/lib/python3.12/subprocess.py", line 1253, in _check_timeout
+    raise TimeoutExpired(
+subprocess.TimeoutExpired: Command '['docker', 'run', '--rm', '--name', 'hone-reader-race-b3fdaf1e744a4b389bfa6f51d6b4862c', '--network', 'none', '--read-only', '--cap-drop', 'ALL', '--security-opt', 'no-new-privileges', '--pids-limit', '32', '--memory', '256m', '--memory-swap', '256m', '--cpus', '1', '--cpuset-cpus', '6', '--user', '65534:65534', '--ulimit', 'nofile=64:64', '--ulimit', 'fsize=1048576:1048576', '-i', 'python@sha256:623674a14ef93d052bb9b0de4dbf5f28eb578a35263838941cc8aa43213c1487', 'python', '-I', '-B', '-c', 'import os,select,signal,time,json\n_WIRE=262144\ncase=\'dead\'\ndef _kill(child):\n    for kill in (os.killpg, os.kill):\n        try:\n            kill(child, signal.SIGKILL)\n        except ProcessLookupError:\n            pass\n\ndef _supervise(child, reader, deadline):\n    data, eof = b"", False\n    while len(data) <= _WIRE:\n        remaining = deadline - time.monotonic()\n        if os.waitid(os.P_PID, child, os.WEXITED | os.WNOHANG | os.WNOWAIT) is not None:\n            _kill(child)\n            while len(data) <= _WIRE and select.select([reader], [], [], 0)[0]:\n                chunk = os.read(reader, min(65536, _WIRE + 1 - len(data)))\n                if not chunk:\n                    break\n                data += chunk\n            return data\n        if remaining <= 0:\n            return None\n        if eof:\n            time.sleep(min(remaining, 0.01))\n        elif select.select([reader], [], [], min(remaining, 0.01))[0]:\n            chunk = os.read(reader, min(65536, _WIRE + 1 - len(data)))\n            eof, data = not chunk, data + chunk\n    return data\n\nreader, writer = os.pipe()\nthief = os.open("/proc/self/fd/" + str(writer), os.O_RDONLY | os.O_NONBLOCK)\nready_reader, ready_writer = os.pipe()\nchild = os.fork()\nif child == 0:\n    os.setpgid(0, 0)\n    os.close(reader)\n    grandchild = os.fork()\n    if grandchild == 0:\n        os.close(ready_reader)\n        os.setsid()\n        os.write(ready_writer, b"R")\n        time.sleep(30)\n        os._exit(0)\n    os.close(ready_writer)\n    assert os.read(ready_reader, 1) == b"R"\n    os.write(writer, b"x")\n    if case == "live":\n        time.sleep(30)\n    os._exit(0)\nos.close(writer)\nos.close(ready_reader)\nos.close(ready_writer)\nreal_select = select.select\nstolen = False\ndef race(*args):\n    global stolen\n    ready = real_select(*args)\n    if ready[0] and not stolen:\n        assert os.read(thief, 8192) == b"x"\n        stolen = True\n    return ready\nselect.select = race\nif case == "dead":\n    os.waitid(os.P_PID, child, os.WEXITED | os.WNOWAIT)\ncaptured = _supervise(child, reader, time.monotonic() + (0.2 if case == "live" else -1))\n_kill(child)\nos.waitpid(child, 0)\nprint(json.dumps({"stolen": stolen, "captured": captured.hex() if captured is not None else None}), flush=True)\n']' timed out after 3 seconds
+
+======================================================================
+FAIL: test_completed_queued_frame_is_drained_after_deadline (pilot.test_verification.DockerVerificationTests.test_completed_queued_frame_is_drained_after_deadline) (frame={'results': [{'t': 'int', 'v': '0x3'}, {'t': 'int', 'v': '0x4'}]}, hidden_exit=True)
+----------------------------------------------------------------------
+Traceback (most recent call last):
+  File "/home/tim/worktrees/hone/hone-hone-pilot-seeds12-1/pilot/test_verification.py", line 693, in test_completed_queued_frame_is_drained_after_deadline
+    self.assertIsNotNone(row["captured"])
+AssertionError: unexpectedly None
+
+======================================================================
+FAIL: test_completed_queued_frame_is_drained_after_deadline (pilot.test_verification.DockerVerificationTests.test_completed_queued_frame_is_drained_after_deadline) (frame={'failure': {'reason': 'call 0 raised TypeError'}}, hidden_exit=True)
+----------------------------------------------------------------------
+Traceback (most recent call last):
+  File "/home/tim/worktrees/hone/hone-hone-pilot-seeds12-1/pilot/test_verification.py", line 693, in test_completed_queued_frame_is_drained_after_deadline
+    self.assertIsNotNone(row["captured"])
+AssertionError: unexpectedly None
+
+----------------------------------------------------------------------
+Ran 3 tests in 9.048s
+
+FAILED (failures=2, errors=6)

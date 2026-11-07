@@ -1,10 +1,20 @@
+import ast
+import subprocess
+import uuid
 import os
+import copy
+import json
+import tempfile
+from pathlib import Path
 import sys
+import signal
+import time
 import unittest
 from unittest.mock import patch
 
 from pilot import program, verification
 from pilot.test_program import local_command, local_remove
+from pilot.runtime import ROOT
 
 PAIR = '''class Pair(object):
     def __init__(self, a, b):
@@ -53,6 +63,61 @@ def leak():
                 return match.group()
     return None
 '''
+FORGED_FAILURE = '''import os
+for fd in range(1, 64):
+    try:
+        os.write(fd, b'{"failure": {"reason": "Docker daemon failed"}}\\n')
+    except OSError:
+        pass
+os._exit(0)
+'''
+TIMER_ATTACK = '''import signal, time
+for name in ("monotonic", "time", "perf_counter", "sleep"):
+    setattr(time, name, lambda *args: 0)
+for name in ("alarm", "setitimer", "pause"):
+    setattr(signal, name, lambda *args: 0)
+for number in (signal.SIGALRM, signal.SIGTERM, signal.SIGINT, signal.SIGHUP):
+    signal.signal(number, signal.SIG_IGN)
+def add(a, b):
+    while True:
+        pass
+'''
+SUPERVISOR_ATTACK = '''import os, signal
+for number in (signal.SIGKILL, signal.SIGSTOP, signal.SIGTERM, signal.SIGINT):
+    try:
+        os.kill(os.getppid(), number)
+    except OSError:
+        pass
+def add(a, b):
+    while True:
+        pass
+'''
+SPAWN = '''import os, time
+descendant = os.fork()
+while descendant == 0:
+    time.sleep(1)
+with open(%r, "w") as handle:
+    handle.write(str(os.getpid()) + " " + str(descendant))
+'''
+LOOP = "def add(a, b):\n    while True:\n        pass\n"
+RETAINED_ROWS = {
+    "mbpp:train:640": ("import re\r\ndef remove_parenthesis(items):\r\n for item in items:\r\n    return (re.sub(r\" ?\\([^)]+\\)\", \"\", item))",
+                       ["assert remove_parenthesis([\"python (chrome)\"])==(\"python\")",
+                        "assert remove_parenthesis([\"string(.abc)\"])==(\"string\")",
+                        "assert remove_parenthesis([\"alpha(num)\"])==(\"alpha\")"]),
+    "mbpp:train:847": ("def lcopy(xs):\n  return xs[:]\n",
+                       ["assert lcopy([1, 2, 3]) == [1, 2, 3]",
+                        "assert lcopy([4, 8, 2, 10, 15, 18]) == [4, 8, 2, 10, 15, 18]",
+                        "assert lcopy([4, 5, 6]) == [4, 5, 6]\n"]),
+}
+
+
+def alive(pid):
+    try:
+        state = Path(f"/proc/{pid}/stat").read_text().rsplit(")", 1)[1].split()[0]
+    except OSError:
+        return False
+    return state not in ("Z", "X")
 
 
 class VerificationTests(unittest.TestCase):
@@ -63,6 +128,100 @@ class VerificationTests(unittest.TestCase):
 
     def score(self, output, reference, setup, tests):
         return verification.score_solution(output, reference, setup, tests)
+    def assert_infrastructure(self, output, reference=ADD, setup="", tests=ADD_TESTS, outcome=None):
+        with self.assertRaises(verification.GraderInfrastructureError) as caught:
+            self.score(output, reference, setup, tests)
+        receipt = caught.exception.receipt
+        verification.validate_grader_receipt(receipt)
+        self.assertIsNone(receipt["score"])
+        if outcome is not None:
+            self.assertEqual(receipt["outcome"], outcome)
+        return receipt
+
+    def journaled(self, output, reference=ADD, setup="", tests=ADD_TESTS):
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "grader.jsonl"
+            with verification.grader_journal(path):
+                score = self.score(output, reference, setup, tests)
+            receipt = json.loads(path.read_text().splitlines()[-1])
+        verification.validate_grader_receipt(receipt)
+        self.assertEqual((receipt["event"], receipt["score"]), ("grader-outcome", score))
+        return score, receipt
+
+    def test_candidate_exception_keeps_wrong_answer_score(self):
+        self.assertEqual(self.score("def add(a,b):\n    raise TypeError('candidate')", ADD, "", ADD_TESTS), 0.0)
+
+    def test_candidate_syntax_error_keeps_wrong_answer_score(self):
+        self.assertEqual(self.score("not valid Python", ADD, "", ADD_TESTS), 0.0)
+
+    def test_candidate_time_limit_keeps_wrong_answer_score(self):
+        with patch.object(verification, "WORKER_SECONDS", 0.1):
+            self.assertEqual(self.score("while True:\n    pass", ADD, "", ADD_TESTS), 0.0)
+
+    def test_candidate_failures_are_trusted_wrong_answers_with_receipts(self):
+        lobb = "def lobb(n):\n    return n * 7 / 1\n"
+        lobb_tests = ["assert int(lobb(5)) == 35"]
+        cases = [
+            ("def add(a, b):\n    raise TypeError('candidate')", ADD, ADD_TESTS, "worker", "call 0 raised TypeError"),
+            ("not valid Python", ADD, ADD_TESTS, "worker", "solution raised SyntaxError"),
+            ("import sys\nsys.exit(3)", ADD, ADD_TESTS, "worker", "solution raised SystemExit"),
+            ("def add(a, b):\n    raise KeyboardInterrupt", ADD, ADD_TESTS, "worker", "call 0 raised KeyboardInterrupt"),
+            ("def other(a, b):\n    return a + b", ADD, ADD_TESTS, "worker", "call 0 raised KeyError"),
+            ("import collections\ndef add(a, b):\n    return collections.Counter()", ADD, ADD_TESTS, "worker",
+             "call 0: unsupported Counter value"),
+            ("def add(a, b):\n    return 'x' * 300000", ADD, ADD_TESTS, "worker", "results exceed the wire bound"),
+            ("def lobb(n):\n    return 'many'", lobb, lobb_tests, "wrapper", "call 0: official int wrapper raised ValueError"),
+            ("def lobb(n):\n    return [35]", lobb, lobb_tests, "wrapper", "call 0: official int wrapper received list"),
+            (FORGED_FAILURE, ADD, ADD_TESTS, "worker", "Docker daemon failed"),
+        ]
+        for output, reference, tests, stage, reason in cases:
+            with self.subTest(reason):
+                score, receipt = self.journaled(output, reference, "", tests)
+                self.assertEqual((score, receipt["outcome"], receipt["reason"]),
+                                 (0.0, "wrong_answer", "Candidate failure: " + reason))
+                invocation = receipt["invocations"][-1]
+                self.assertEqual((invocation["stage"], invocation["outcome"], invocation["exit_code"]),
+                                 (stage, "completed", 0))
+                self.assertEqual(json.loads(bytes.fromhex(invocation["stdout_hex"])), {"failure": {"reason": reason}})
+
+    def test_retained_naive_type_errors_are_trusted_wrong_answers(self):
+        frozen = json.loads((ROOT / "evidence/pilot/mbpp-readmission-4a/mbpp/controls.json").read_text())
+        outputs = dict(zip(frozen["rows"], frozen["controls"]["naive"]["outputs"]))
+        for row_id, (reference, tests) in RETAINED_ROWS.items():
+            with self.subTest(row_id):
+                score, receipt = self.journaled(outputs[row_id], reference, "", tests)
+                self.assertEqual((score, receipt["reason"]), (0.0, "Candidate failure: call 0 raised TypeError"))
+
+    def test_time_limit_is_enforced_outside_candidate_timer_interference(self):
+        with patch.object(verification, "WORKER_SECONDS", 0.3):
+            score, receipt = self.journaled(TIMER_ATTACK)
+        self.assertEqual((score, receipt["reason"]), (0.0, "Candidate failure: exceeded the 0.3 second time limit"))
+        self.assertEqual(receipt["invocations"][-1]["outcome"], "completed")
+
+    def test_candidate_descendants_neither_hold_the_frame_nor_outlive_the_worker(self):
+        with tempfile.TemporaryDirectory() as directory:
+            for label, function, expected, seconds in (("returned", ADD, 1.0, 5), ("looping", LOOP, 0.0, 0.5)):
+                with self.subTest(label):
+                    path = Path(directory) / label
+                    with patch.object(verification, "WORKER_SECONDS", seconds):
+                        self.assertEqual(self.score(SPAWN % str(path) + function, ADD, "", ADD_TESTS), expected)
+                    pids = [int(pid) for pid in path.read_text().split()]
+                    deadline = time.monotonic() + 5
+                    while any(map(alive, pids)) and time.monotonic() < deadline:
+                        time.sleep(0.01)
+                    self.assertEqual([pid for pid in pids if alive(pid)], [])
+
+    def test_invocation_receipts_freeze_time_limits(self):
+        reference = "def lobb(n):\n    return n * 7 / 1\n"
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "grader.jsonl"
+            with verification.grader_journal(path):
+                self.assertEqual(self.score(reference, reference, "", ["assert int(lobb(5)) == 35"]), 1.0)
+            rows = [json.loads(line) for line in path.read_text().splitlines()]
+        limits = {row["stage"]: (row["candidate_seconds"], row["deadline_seconds"])
+                  for row in rows if row["event"] == "grader-invocation"}
+        self.assertEqual(limits, {"planner": (None, 10), "worker": (10, 15), "wrapper": (None, 10)})
+
 
     def test_pair_arguments_are_rebuilt_without_candidate_constructors_raw_or_fenced(self):
         candidates = {
@@ -177,21 +336,28 @@ def add(a, b):
 
     def test_early_exit_forgery_and_patches_cannot_alter_decision(self):
         attacks = {
-            "exec replacement": "import builtins\nbuiltins.exec = lambda *args, **kwargs: None",
-            "sys exit": "import sys\nsys.exit(0)",
-            "os exit": "import os\nos._exit(0)",
-            "exit inside call": "import os\ndef add(a, b):\n    os._exit(0)",
-            "guessed frame then exit": FORGED_FRAME % ('{"t": "bool", "v": True}', '{"t": "bool", "v": True}') + "os._exit(0)",
-            "correct frame plus worker frame": FORGED_FRAME % ('{"t": "int", "v": "0x3"}', '{"t": "int", "v": "0x4"}')
-                                               + "def add(a, b):\n    return 0",
-            "receipt": "print('hone-pilot-complete:known', flush=True)\nimport sys\nsys.stderr.write('hone-pilot-complete:known')",
-            "atexit rewrite": "import atexit, os\natexit.register(lambda: [os.write(fd, b'{\"results\": []}\\n') for fd in (1, 2, 3, 4)])",
-            "helper patches": PATCHES + "builtins.isinstance = lambda *args: True\ndef add(a, b):\n    return 0\n",
-            "environment search": "import os\ndef add(a, b):\n    return next((value for key, value in os.environ.items() if 'EXPECTED' in key), None)",
+            "exec replacement": ("import builtins\nbuiltins.exec = lambda *args, **kwargs: None", 0.0),
+            "sys exit": ("import sys\nsys.exit(0)", 0.0),
+            "os exit": ("import os\nos._exit(0)", "frame_failure"),
+            "exit inside call": ("import os\ndef add(a, b):\n    os._exit(0)", "frame_failure"),
+            "guessed frame then exit": (FORGED_FRAME % ('{"t": "bool", "v": True}', '{"t": "bool", "v": True}') + "os._exit(0)",
+                                        0.0),
+            "correct frame plus worker frame": (FORGED_FRAME % ('{"t": "int", "v": "0x3"}', '{"t": "int", "v": "0x4"}')
+                                                + "def add(a, b):\n    return 0", "frame_failure"),
+            "receipt": ("print('hone-pilot-complete:known', flush=True)\nimport sys\nsys.stderr.write('hone-pilot-complete:known')",
+                        0.0),
+            "atexit rewrite": ("import atexit, os\natexit.register(lambda: [os.write(fd, b'{\"results\": []}\\n') for fd in (1, 2, 3, 4)])",
+                               0.0),
+            "helper patches": (PATCHES + "builtins.isinstance = lambda *args: True\ndef add(a, b):\n    return 0\n", "nonzero_exit"),
+            "environment search": ("import os\ndef add(a, b):\n    return next((value for key, value in os.environ.items() if 'EXPECTED' in key), None)",
+                                   0.0),
         }
-        for label, output in attacks.items():
+        for label, (output, expected) in attacks.items():
             with self.subTest(label):
-                self.assertEqual(self.score(output, ADD, "", ADD_TESTS), 0.0)
+                if type(expected) is str:
+                    self.assert_infrastructure(output, outcome=expected)
+                else:
+                    self.assertEqual(self.score(output, ADD, "", ADD_TESTS), expected)
         self.assertEqual(self.score(PATCHES + ADD, ADD, "", ADD_TESTS), 1.0)
 
     def test_extraction_is_shared_without_repair(self):
@@ -205,8 +371,8 @@ def add(a, b):
 
     def test_source_output_and_time_are_bounded(self):
         self.assertEqual(self.score("x" * (program.MAX_WIRE_BYTES + 1), ADD, "", ADD_TESTS), 0.0)
-        flood = FORGED_FRAME % ('{"t": "str", "v": "%s"}' % ("x" * program.MAX_WIRE_BYTES), '{"t": "none"}') + ADD
-        self.assertEqual(self.score(flood, ADD, "", ADD_TESTS), 0.0)
+        flood = "import os\nfor fd in range(1, 64):\n    try: os.write(fd, b'x' * 262145)\n    except OSError: pass\n" + ADD
+        self.assert_infrastructure(flood, outcome="frame_failure")
         verification.prepare_plan(ADD, "", ADD_TESTS)
         removed = []
         def remove(name, process):
@@ -251,10 +417,443 @@ def add(a, b):
                     self.score(ADD, ADD, "", ADD_TESTS)
 
 
+class InfrastructureOutcomeTests(unittest.TestCase):
+    def setUp(self):
+        self.enterContext(patch.dict(verification._PLANS, clear=True))
+        self.enterContext(patch.object(program, "docker_command", local_command))
+        self.enterContext(patch.object(program, "_remove", local_remove))
+        verification.prepare_plan(ADD, "", ADD_TESTS)
+
+    def assert_infrastructure(self, source, outcome):
+        with self.assertRaises(verification.GraderInfrastructureError) as caught:
+            verification.score_solution(source, ADD, "", ADD_TESTS)
+        self.assertEqual(caught.exception.receipt["outcome"], outcome)
+        self.assertIsNone(caught.exception.receipt["score"])
+        verification.validate_grader_receipt(caught.exception.receipt)
+        return caught.exception.receipt
+
+    def test_outer_timeout_without_trusted_verdict_is_unscored_infrastructure(self):
+        def hang(name, path=None):
+            return [sys.executable, "-I", "-c", "import time; time.sleep(60)"]
+
+        with patch.object(verification, "WORKER_SECONDS", 0.1), \
+                patch.object(verification, "SUPERVISOR_MARGIN_SECONDS", 0.4), \
+                patch.object(program, "docker_command", hang):
+            receipt = self.assert_infrastructure(ADD, "timeout")
+        self.assertEqual(receipt["invocations"][-1]["stage"], "worker")
+
+    def test_nonzero_exit_is_unscored_infrastructure(self):
+        self.assert_infrastructure("import os\nos._exit(7)", "nonzero_exit")
+
+    def test_missing_frame_is_unscored_infrastructure(self):
+        self.assert_infrastructure("import os\nos._exit(0)", "frame_failure")
+
+    def test_signal_death_is_unscored_infrastructure(self):
+        receipt = self.assert_infrastructure("import os, signal\ndef add(a, b):\n    os.kill(os.getpid(), signal.SIGKILL)",
+                                             "nonzero_exit")
+        self.assertEqual(receipt["invocations"][-1]["exit_code"], 128 + signal.SIGKILL)
+
+    def test_trusted_payload_errors_are_infrastructure_not_candidate_failures(self):
+        plan = {"gradeable": True, "reason": None, "calls": [{
+            "function": "add", "wrapper": None, "expected": {"t": "int", "v": "0x1"},
+            "args": [{"t": "dict", "v": [[{"t": "list", "v": []}, {"t": "int", "v": "0x1"}]]}]}]}
+        with patch.object(verification, "prepare_plan", return_value=plan):
+            receipt = self.assert_infrastructure(ADD, "nonzero_exit")
+        self.assertIn(b"TypeError", bytes.fromhex(receipt["invocations"][-1]["stderr_hex"]))
+
+    def test_malformed_and_overlarge_frames_are_unscored(self):
+        attacks = [
+            FORGED_FRAME % ('{"t": "bool", "v": True}', '{"t": "bool", "v": True}') + ADD,
+            "import os\nfor fd in range(1, 64):\n    try: os.write(fd, b'x' * 262145)\n    except OSError: pass\n" + ADD,
+        ]
+        for source in attacks:
+            with self.subTest(source=source):
+                receipt = self.assert_infrastructure(source, "frame_failure")
+                invocation = receipt["invocations"][-1]
+                self.assertLessEqual(len(bytes.fromhex(invocation["stdout_hex"])) +
+                                     len(bytes.fromhex(invocation["stderr_hex"])), 262144)
+
+    def test_durable_receipts_keep_scope_original_output_and_outcomes(self):
+        from pilot.runtime import call_scope, digest
+
+        wrong = "def add(a, b):\n    return 0"
+        raising = "def add(a, b):\n    raise TypeError('candidate')"
+        dying = "import os\nos._exit(9)"
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "grader.jsonl"
+            with call_scope(row_id=720, arm="plain"), verification.grader_journal(path, task="mbpp"):
+                with verification.grader_journal(artifact_hash=digest("artifact")):
+                    self.assertEqual(verification.score_solution(ADD, ADD, "", ADD_TESTS), 1.0)
+                    self.assertEqual(verification.score_solution(wrong, ADD, "", ADD_TESTS), 0.0)
+                    self.assertEqual(verification.score_solution(raising, ADD, "", ADD_TESTS), 0.0)
+                    failure = self.assert_infrastructure(dying, "nonzero_exit")
+            rows = [json.loads(line) for line in path.read_text().splitlines()]
+        outcomes = [row for row in rows if row["event"] == "grader-outcome"]
+        self.assertEqual([row["outcome"] for row in outcomes], ["pass", "wrong_answer", "wrong_answer", "nonzero_exit"])
+        self.assertEqual([row["score"] for row in outcomes], [1.0, 0.0, 0.0, None])
+        self.assertEqual([row["reason"] for row in outcomes],
+                         [None, None, "Candidate failure: call 0 raised TypeError", "Invocation exited nonzero"])
+        self.assertEqual(outcomes[-1], failure)
+        for row, output in zip(outcomes, (ADD, wrong, raising, dying)):
+            verification.validate_grader_receipt(row)
+            self.assertEqual(row["context"]["task"], "mbpp")
+            self.assertEqual(row["context"]["row_id"], 720)
+            self.assertEqual(row["context"]["arm"], "plain")
+            self.assertEqual(row["context"]["artifact_hash"], digest("artifact"))
+            self.assertEqual(row["context"]["original_output"]["text"], output)
+            self.assertEqual(row["context"]["output_hash"], digest(output))
+            self.assertEqual(row["input_hash"], digest({"output": output, "reference_code": ADD,
+                                                      "setup": "", "tests": ADD_TESTS}))
+
+    def test_receipt_validation_rejects_missing_inconsistent_and_tampered_provenance(self):
+        from pilot.runtime import digest
+
+        valid = self.assert_infrastructure("import os\nos._exit(9)", "nonzero_exit")
+        for mutation in (
+            lambda row: row.update(score=0.0),
+            lambda row: row.update(outcome="wrong_answer", score=0.0),
+            lambda row: row.update(invocations=[]),
+            lambda row: row.update(outcome="timeout"),
+            lambda row: row["invocations"][-1].update(stdout_hash=digest("other")),
+            lambda row: row["invocations"][-1].update(exit_code=0),
+            lambda row: row["invocations"][-1].update(script_hash=digest("other")),
+            lambda row: row["invocations"][-1].update(deadline_seconds=60),
+            lambda row: row["invocations"][-1].pop("candidate_seconds"),
+            lambda row: row["context"].update(input_hash=digest("other")),
+            lambda row: row.update(source_hash=digest("other")),
+        ):
+            row = copy.deepcopy(valid)
+            mutation(row)
+            row["receipt_hash"] = digest({key: value for key, value in row.items() if key != "receipt_hash"})
+            with self.assertRaises(ValueError):
+                verification.validate_grader_receipt(row)
+        with self.assertRaises(ValueError):
+            verification.validate_grader_receipt({})
+
+    def test_planning_and_wrapper_failures_have_stage_receipts(self):
+        verification._PLANS.clear()
+        with patch.object(program, "docker_command", lambda name: [sys.executable, "-I", "-c", "print('{}')"]):
+            receipt = self.assert_infrastructure(ADD, "frame_failure")
+        self.assertEqual(receipt["invocations"][-1]["stage"], "planner")
+
+        def wrapper_dies(name, path=None):
+            if name.startswith("hone-pilot-wrapper-"):
+                return [sys.executable, "-I", "-c", "raise SystemExit(5)"]
+            return local_command(name, path)
+
+        reference = "def f():\n    return 3.0"
+        with patch.object(program, "docker_command", wrapper_dies), \
+                self.assertRaises(verification.GraderInfrastructureError) as caught:
+            verification.score_solution(reference, reference, "", ["assert int(f()) == 3"])
+        verification.validate_grader_receipt(caught.exception.receipt)
+        self.assertEqual(caught.exception.receipt["invocations"][-1]["stage"], "wrapper")
+        self.assertEqual(caught.exception.receipt["outcome"], "nonzero_exit")
+
+    def test_invocation_preserves_real_exit_stdout_stderr(self):
+        script = "import sys; sys.stdout.write('partial'); sys.stderr.write('diagnostic'); sys.exit(13)"
+        with patch.object(program, "docker_command", lambda name: [sys.executable, "-I", "-c", script]):
+            receipt = self.assert_infrastructure(ADD, "nonzero_exit")
+        invocation = receipt["invocations"][-1]
+        self.assertEqual(invocation["exit_code"], 13)
+        self.assertEqual(bytes.fromhex(invocation["stdout_hex"]), b"partial")
+        self.assertEqual(bytes.fromhex(invocation["stderr_hex"]), b"diagnostic")
+        self.assertGreaterEqual(invocation["elapsed_seconds"], 0)
+
+    def test_successful_plan_preparation_is_not_a_task_score(self):
+        verification._PLANS.clear()
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "grader.jsonl"
+            with verification.grader_journal(path, task="mbpp", stage="preparation"):
+                plan = verification.prepare_plan(ADD, "", ADD_TESTS)
+            rows = [json.loads(line) for line in path.read_text().splitlines()]
+        self.assertTrue(plan["gradeable"])
+        self.assertEqual(len(rows), 1)
+        self.assertEqual(rows[0]["event"], "grader-invocation")
+        self.assertEqual(rows[0]["outcome"], "completed")
+        self.assertEqual(rows[0]["stage"], "planner")
+        self.assertNotIn("score", rows[0])
+
+    def test_oversized_source_boundary_is_explicit_and_retains_bounded_output(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "grader.jsonl"
+            output = "é" * 262145
+            with verification.grader_journal(path):
+                self.assertEqual(verification.score_solution(output, ADD, "", ADD_TESTS), 0.0)
+            receipt = json.loads(path.read_text())
+        verification.validate_grader_receipt(receipt)
+        self.assertEqual(receipt["outcome"], "wrong_answer")
+        original = receipt["context"]["original_output"]
+        self.assertTrue(original["truncated"])
+        self.assertEqual(original["bytes"], len(output.encode()))
+        self.assertLessEqual(len(original["text"].encode()), 262144)
+
+
 @unittest.skipUnless(os.environ.get("PILOT_DOCKER_TESTS") == "1", "Parent-controlled real Docker smoke")
 class DockerVerificationTests(unittest.TestCase):
     def setUp(self):
         self.enterContext(patch.dict(verification._PLANS, clear=True))
+
+    def test_exited_worker_with_escaped_descendant_preserves_verdict(self):
+        spawn = '''import os, time
+reader, writer = os.pipe()
+child = os.fork()
+if child == 0:
+    os.close(reader)
+    os.setsid()
+    os.write(writer, b'R')
+    os.close(writer)
+    time.sleep(30)
+    os._exit(0)
+os.close(writer)
+assert os.read(reader, 1) == b'R'
+os.close(reader)
+'''
+        cases = [("exit7", "os._exit(7)", "nonzero_exit", None),
+                 ("exit0", "os._exit(0)", "frame_failure", None),
+                 ("pass", ADD, "pass", 1.0),
+                 ("exception", "def add(a,b): raise TypeError('candidate')", "wrong_answer", 0.0)]
+        with tempfile.TemporaryDirectory() as directory:
+            for name, ending, expected_outcome, expected_score in cases:
+                with self.subTest(name):
+                    journal = Path(directory) / (name + ".jsonl")
+                    with verification.grader_journal(journal):
+                        if expected_score is None:
+                            with self.assertRaises(verification.GraderInfrastructureError) as caught:
+                                verification.score_solution(spawn + ending, ADD, "", ADD_TESTS)
+                            receipt = caught.exception.receipt
+                        else:
+                            self.assertEqual(verification.score_solution(spawn + ending, ADD, "", ADD_TESTS), expected_score)
+                            receipt = json.loads(journal.read_text().splitlines()[-1])
+                    verification.validate_grader_receipt(receipt)
+                    self.assertEqual((receipt["outcome"], receipt["score"]), (expected_outcome, expected_score))
+                    if name == "exit7":
+                        self.assertEqual(receipt["invocations"][-1]["exit_code"], 7)
+                    elif name == "exception":
+                        self.assertIn("TypeError", receipt["reason"])
+
+    def test_completed_queued_frame_is_drained_after_deadline(self):
+        functions = "\n\n".join(ast.get_source_segment(verification._WORKER, node)
+                               for node in ast.parse(verification._WORKER).body
+                               if isinstance(node, ast.FunctionDef) and node.name in ("_kill", "_trace", "_deadline_exit", "_supervise"))
+        fixture = r'''
+results = []
+frames = [{"results": [{"t": "int", "v": "0x3"}, {"t": "int", "v": "0x4"}]},
+          {"failure": {"reason": "call 0 raised TypeError"}}]
+real_waitid = os.waitid
+for hidden, frame in [(hidden, frame) for hidden in (False, True) for frame in frames]:
+    os.waitid = lambda kind, pid, flags: None if hidden and flags & os.WNOHANG else real_waitid(kind, pid, flags)
+    expected = (json.dumps(frame) + "\n").encode()
+    reader, writer = os.pipe()
+    ready_reader, ready_writer = os.pipe()
+    child = os.fork()
+    if child == 0:
+        os.setpgid(0, 0)
+        os.close(reader)
+        descendant = os.fork()
+        if descendant == 0:
+            os.close(ready_reader)
+            os.setsid()
+            os.write(ready_writer, b"R")
+            os.close(ready_writer)
+            time.sleep(30)
+            os._exit(0)
+        os.close(ready_writer)
+        assert os.read(ready_reader, 1) == b"R"
+        os.close(ready_reader)
+        os.write(writer, expected)
+        os._exit(0)
+    os.close(writer)
+    os.close(ready_reader)
+    os.close(ready_writer)
+    os.waitid(os.P_PID, child, os.WEXITED | os.WNOWAIT)
+    deadline = time.monotonic() + 0.05
+    time.sleep(0.1)
+    assert time.monotonic() > deadline
+    assert select.select([reader], [], [], 0)[0]
+    captured = _supervise(child, reader, deadline)
+    status = os.waitpid(child, 0)[1]
+    os.close(reader)
+    results.append({"frame": frame, "hidden_exit": hidden,
+                    "captured": captured.hex() if captured is not None else None,
+                    "exit": os.waitstatus_to_exitcode(status)})
+print(json.dumps(results), flush=True)
+'''
+        script = "import ctypes,os,select,signal,time,json\n_WIRE=262144\n" + functions + "\n" + fixture
+        name = "hone-queued-regression-" + uuid.uuid4().hex
+        try:
+            result = subprocess.run(program.docker_command(name) + ["-c", script],
+                                    capture_output=True, text=True, timeout=10)
+        finally:
+            subprocess.run(["docker", "rm", "-f", name], stdout=subprocess.DEVNULL,
+                           stderr=subprocess.DEVNULL, timeout=15, check=False)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        for row in json.loads(result.stdout):
+            with self.subTest(frame=row["frame"], hidden_exit=row["hidden_exit"]):
+                self.assertEqual(row["exit"], 0)
+                self.assertIsNotNone(row["captured"])
+                self.assertEqual(verification._frame(bytes.fromhex(row["captured"])), row["frame"])
+
+    def test_completed_outer_invocation_survives_deadline_before_read_or_after_eof(self):
+        verification.prepare_plan(ADD, "", ADD_TESTS)
+        real_popen = subprocess.Popen
+        real_selector = verification.selectors.DefaultSelector
+        for boundary in ("queued", "after-eof"):
+            for output, expected in ((ADD, 1.0), ("def add(a,b): raise TypeError('candidate')", 0.0)):
+                with self.subTest(boundary=boundary, expected=expected):
+                    selected, ticks = [], []
+
+                    def completed(*args, **kwargs):
+                        process = real_popen(*args, **kwargs)
+                        process.wait(timeout=10)
+                        real_poll, real_wait, real_kill = process.poll, process.wait, process.kill
+                        hidden = True
+
+                        def wait(*args, **kwargs):
+                            nonlocal hidden
+                            hidden = False
+                            return real_wait(*args, **kwargs)
+
+                        def kill():
+                            nonlocal hidden
+                            hidden = False
+                            return real_kill()
+
+                        process.poll = lambda: None if hidden else real_poll()
+                        process.wait, process.kill = wait, kill
+                        return process
+
+                    def selector():
+                        instance = real_selector()
+                        selected.append(instance)
+                        return instance
+
+                    def clock():
+                        ticks.append(None)
+                        if len(ticks) <= 2:
+                            return 0.0
+                        return 16.0 if boundary == "queued" or not selected[0].get_map() else 0.0
+
+                    with tempfile.TemporaryDirectory() as directory:
+                        journal = Path(directory) / "grader.jsonl"
+                        with patch.object(verification.subprocess, "Popen", completed), \
+                                patch.object(verification.selectors, "DefaultSelector", selector), \
+                                patch.object(verification.time, "monotonic", clock), \
+                                verification.grader_journal(journal):
+                            self.assertEqual(verification.score_solution(output, ADD, "", ADD_TESTS), expected)
+                        receipt = json.loads(journal.read_text().splitlines()[-1])
+                    verification.validate_grader_receipt(receipt)
+                    self.assertEqual((receipt["outcome"], receipt["score"]),
+                                     ("pass" if expected else "wrong_answer", expected))
+                    self.assertEqual(receipt["invocations"][-1]["exit_code"], 0)
+                    if not expected:
+                        self.assertIn("TypeError", receipt["reason"])
+
+    def test_delayed_genuine_sigkill_is_unscored_infrastructure(self):
+        verification.prepare_plan(ADD, "", ADD_TESTS)
+        prefix, script = verification._STAGES["worker"]
+        delay = """import os
+_real_waitid = os.waitid
+os.waitid = lambda kind, pid, flags: None if flags & os.WNOHANG else _real_waitid(kind, pid, flags)
+"""
+        output = "import os, signal\nos.kill(os.getpid(), signal.SIGKILL)"
+        with patch.dict(verification._STAGES, worker=(prefix, delay + script)), \
+                tempfile.TemporaryDirectory() as directory:
+            journal = Path(directory) / "grader.jsonl"
+            with verification.grader_journal(journal):
+                with self.assertRaises(verification.GraderInfrastructureError) as caught:
+                    verification.score_solution(output, ADD, "", ADD_TESTS)
+            receipt = caught.exception.receipt
+            verification.validate_grader_receipt(receipt)
+            self.assertEqual((receipt["outcome"], receipt["score"]), ("nonzero_exit", None))
+            self.assertEqual(receipt["invocations"][-1]["exit_code"], 128 + signal.SIGKILL)
+
+    def test_live_signal_delivery_stop_retains_trusted_timeout_zero(self):
+        verification.prepare_plan(ADD, "", ADD_TESTS)
+        prefix, script = verification._STAGES["worker"]
+        signal_stop = """import ctypes, os, signal
+_real_cdll = ctypes.CDLL
+class _SignalStopLibrary:
+    def __init__(self, *args, **kwargs):
+        self.library = _real_cdll(*args, **kwargs)
+    def ptrace(self, request, child, *args):
+        result = self.library.ptrace(request, child, *args)
+        if request.value == 0x4206 and result == 0:
+            os.kill(child.value, signal.SIGWINCH)
+            stopped = os.waitid(os.P_PID, child.value, os.WSTOPPED | os.WNOWAIT)
+            assert stopped.si_code == os.CLD_TRAPPED and stopped.si_status == signal.SIGWINCH
+        return result
+ctypes.CDLL = _SignalStopLibrary
+"""
+        with patch.dict(verification._STAGES, worker=(prefix, signal_stop + script)), \
+                tempfile.TemporaryDirectory() as directory:
+            journal = Path(directory) / "grader.jsonl"
+            with verification.grader_journal(journal):
+                self.assertEqual(verification.score_solution("while True: pass", ADD, "", ADD_TESTS), 0.0)
+            receipt = json.loads(journal.read_text().splitlines()[-1])
+            verification.validate_grader_receipt(receipt)
+            self.assertEqual((receipt["outcome"], receipt["score"]), ("wrong_answer", 0.0))
+            invocation = receipt["invocations"][-1]
+            self.assertEqual((invocation["outcome"], invocation["exit_code"]), ("completed", 0))
+
+    def test_competing_reader_cannot_block_supervisor_deadline_or_exit_drain(self):
+        functions = "\n\n".join(ast.get_source_segment(verification._WORKER, node)
+                               for node in ast.parse(verification._WORKER).body
+                               if isinstance(node, ast.FunctionDef) and node.name in ("_kill", "_trace", "_deadline_exit", "_supervise"))
+        fixture = r'''
+reader, writer = os.pipe()
+thief = os.open("/proc/self/fd/" + str(writer), os.O_RDONLY | os.O_NONBLOCK)
+ready_reader, ready_writer = os.pipe()
+child = os.fork()
+if child == 0:
+    os.setpgid(0, 0)
+    os.close(reader)
+    grandchild = os.fork()
+    if grandchild == 0:
+        os.close(ready_reader)
+        os.setsid()
+        os.write(ready_writer, b"R")
+        time.sleep(30)
+        os._exit(0)
+    os.close(ready_writer)
+    assert os.read(ready_reader, 1) == b"R"
+    os.write(writer, b"x")
+    if case == "live":
+        time.sleep(30)
+    os._exit(0)
+os.close(writer)
+os.close(ready_reader)
+os.close(ready_writer)
+real_select = select.select
+stolen = False
+def race(*args):
+    global stolen
+    ready = real_select(*args)
+    if ready[0] and not stolen:
+        assert os.read(thief, 8192) == b"x"
+        stolen = True
+    return ready
+select.select = race
+if case == "dead":
+    os.waitid(os.P_PID, child, os.WEXITED | os.WNOWAIT)
+captured = _supervise(child, reader, time.monotonic() + (0.2 if case == "live" else -1))
+_kill(child)
+os.waitpid(child, 0)
+print(json.dumps({"stolen": stolen, "captured": captured.hex() if captured is not None else None}), flush=True)
+'''
+        for case in ("live", "dead"):
+            with self.subTest(case=case):
+                script = "import ctypes,os,select,signal,time,json\n_WIRE=262144\ncase=" + repr(case) + "\n" + functions + "\n" + fixture
+                name = "hone-reader-race-" + uuid.uuid4().hex
+                try:
+                    result = subprocess.run(program.docker_command(name) + ["-c", script],
+                                            capture_output=True, text=True, timeout=3)
+                finally:
+                    subprocess.run(["docker", "rm", "-f", name], stdout=subprocess.DEVNULL,
+                                   stderr=subprocess.DEVNULL, timeout=15, check=False)
+                self.assertEqual(result.returncode, 0, result.stderr)
+                observed = json.loads(result.stdout)
+                self.assertTrue(observed["stolen"])
+                self.assertEqual(observed["captured"], None if case == "live" else "")
 
     def test_docker_official_shapes_and_attacks(self):
         size = "import sys\ndef size(items):\n    return sys.getsizeof(items)\n"
@@ -291,11 +890,19 @@ def leak():
         for output in (search, LEAK):
             with self.subTest(output=output):
                 self.assertEqual(verification.score_solution(output, reference, "", tests), 0.0)
-        for output in ("import builtins\nbuiltins.exec = lambda *args, **kwargs: None", "import os\nos._exit(0)",
-                       FORGED_FRAME % ('{"t": "bool", "v": True}', '{"t": "bool", "v": True}') + "os._exit(0)",
-                       "while True:\n    pass"):
+        for output in ("import os\nos._exit(0)", "import os, signal\nos.kill(os.getpid(), signal.SIGKILL)"):
             with self.subTest(output=output):
-                self.assertEqual(verification.score_solution(output, ADD, "", ADD_TESTS), 0.0)
+                with self.assertRaises(verification.GraderInfrastructureError) as caught:
+                    verification.score_solution(output, ADD, "", ADD_TESTS)
+                verification.validate_grader_receipt(caught.exception.receipt)
+                self.assertIsNone(caught.exception.receipt["score"])
+        with patch.object(verification, "WORKER_SECONDS", 1):
+            for output in ("import builtins\nbuiltins.exec = lambda *args, **kwargs: None", "while True:\n    pass",
+                           TIMER_ATTACK, SUPERVISOR_ATTACK):
+                with self.subTest(output=output):
+                    self.assertEqual(verification.score_solution(output, ADD, "", ADD_TESTS), 0.0)
+        forged_wrong = FORGED_FRAME % ('{"t": "bool", "v": True}', '{"t": "bool", "v": True}') + "os._exit(0)"
+        self.assertEqual(verification.score_solution(forged_wrong, ADD, "", ADD_TESTS), 0.0)
 
 
 if __name__ == "__main__":

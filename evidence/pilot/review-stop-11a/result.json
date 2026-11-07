@@ -1,0 +1,115 @@
+{
+  "finding_reproduced": true,
+  "grader_or_engine_changes": false,
+  "model_calls": 0,
+  "real_pinned_docker": true,
+  "results": [
+    {
+      "case": "direct-worker-exit-7",
+      "code": "import os\nos._exit(7)",
+      "code_hash": "sha256:210f10edc31bda2c713e165fb97241218752a84e7d44a835875f556601792e03",
+      "elapsed_seconds": 0.7470841880422086,
+      "expected_outcome": "nonzero_exit",
+      "expected_score": null,
+      "outcome": "nonzero_exit",
+      "receipt": {
+        "context": {
+          "case": "direct-worker-exit-7",
+          "input_hash": "sha256:f12d76b84bac383ed50bb4a04662f4d342bafa216fb4e237a338c7a604909359",
+          "original_output": {
+            "bytes": 21,
+            "hash": "sha256:210f10edc31bda2c713e165fb97241218752a84e7d44a835875f556601792e03",
+            "text": "import os\nos._exit(7)",
+            "truncated": false
+          },
+          "output_hash": "sha256:210f10edc31bda2c713e165fb97241218752a84e7d44a835875f556601792e03",
+          "purpose": "review-counterexample",
+          "row_id": "synthetic-add",
+          "task": "mbpp"
+        },
+        "event": "grader-outcome",
+        "image": "python@sha256:623674a14ef93d052bb9b0de4dbf5f28eb578a35263838941cc8aa43213c1487",
+        "input_hash": "sha256:f12d76b84bac383ed50bb4a04662f4d342bafa216fb4e237a338c7a604909359",
+        "invocations": [
+          {
+            "candidate_seconds": 10,
+            "deadline_seconds": 15,
+            "elapsed_seconds": 0.3616185700520873,
+            "error": "Invocation exited nonzero",
+            "exit_code": 7,
+            "input_hash": "sha256:8603140c1301dc6ff0c55447f07c91b62e10493e4db8a091310f53711275c8a0",
+            "outcome": "nonzero_exit",
+            "script_hash": "sha256:4a70a2368143c624ea55c7f91dcd9ede4a314563aad8fb7f8273d76bb620a139",
+            "stage": "worker",
+            "stderr_hash": "sha256:12ae32cb1ec02d01eda3581b127c1fee3b0dc53572ed6baf239721a03d82e126",
+            "stderr_hex": "",
+            "stdout_hash": "sha256:12ae32cb1ec02d01eda3581b127c1fee3b0dc53572ed6baf239721a03d82e126",
+            "stdout_hex": ""
+          }
+        ],
+        "outcome": "nonzero_exit",
+        "reason": "Invocation exited nonzero",
+        "receipt_hash": "sha256:5790bc99478c190b7880c300a1d234aad4e7e4b3f6126713e0bb057341d3a21f",
+        "score": null,
+        "source_hash": "sha256:f41d864644475a8f0acb8f6dc35a7fc5397af9839313b179317aa91336a37863",
+        "version": 1
+      },
+      "receipt_hash": "sha256:5790bc99478c190b7880c300a1d234aad4e7e4b3f6126713e0bb057341d3a21f",
+      "score": null
+    },
+    {
+      "case": "exited-worker-escaped-descendant-holds-pipe",
+      "code": "import os, time\nreader, writer = os.pipe()\nchild = os.fork()\nif child == 0:\n    os.close(reader)\n    os.setsid()\n    os.write(writer, b'R')\n    os.close(writer)\n    time.sleep(30)\n    os._exit(0)\nos.close(writer)\nassert os.read(reader, 1) == b'R'\nos.close(reader)\nos._exit(7)\n",
+      "code_hash": "sha256:d5692ebf92f4d67627f9f0e457d099e4274a57b3f945d6e3550e967bf30db152",
+      "elapsed_seconds": 10.348240497987717,
+      "expected_outcome": "nonzero_exit",
+      "expected_score": null,
+      "outcome": "wrong_answer",
+      "receipt": {
+        "context": {
+          "case": "exited-worker-escaped-descendant-holds-pipe",
+          "input_hash": "sha256:c4a8d79dd4cf072cfde171a56cd065d0cec42b7b804ecfced482ab249c3c0422",
+          "original_output": {
+            "bytes": 276,
+            "hash": "sha256:d5692ebf92f4d67627f9f0e457d099e4274a57b3f945d6e3550e967bf30db152",
+            "text": "import os, time\nreader, writer = os.pipe()\nchild = os.fork()\nif child == 0:\n    os.close(reader)\n    os.setsid()\n    os.write(writer, b'R')\n    os.close(writer)\n    time.sleep(30)\n    os._exit(0)\nos.close(writer)\nassert os.read(reader, 1) == b'R'\nos.close(reader)\nos._exit(7)\n",
+            "truncated": false
+          },
+          "output_hash": "sha256:d5692ebf92f4d67627f9f0e457d099e4274a57b3f945d6e3550e967bf30db152",
+          "purpose": "review-counterexample",
+          "row_id": "synthetic-add",
+          "task": "mbpp"
+        },
+        "event": "grader-outcome",
+        "image": "python@sha256:623674a14ef93d052bb9b0de4dbf5f28eb578a35263838941cc8aa43213c1487",
+        "input_hash": "sha256:c4a8d79dd4cf072cfde171a56cd065d0cec42b7b804ecfced482ab249c3c0422",
+        "invocations": [
+          {
+            "candidate_seconds": 10,
+            "deadline_seconds": 15,
+            "elapsed_seconds": 10.337977597024292,
+            "error": null,
+            "exit_code": 0,
+            "input_hash": "sha256:ca2e018ae998fc13f51b12e0df3995446bbc71921bbdad75d00653c37fd01052",
+            "outcome": "completed",
+            "script_hash": "sha256:4a70a2368143c624ea55c7f91dcd9ede4a314563aad8fb7f8273d76bb620a139",
+            "stage": "worker",
+            "stderr_hash": "sha256:12ae32cb1ec02d01eda3581b127c1fee3b0dc53572ed6baf239721a03d82e126",
+            "stderr_hex": "",
+            "stdout_hash": "sha256:ca3c585c44bbe0f87847af64f4b2ca8da9d3f16dfd06eaaf5cfaa732e2f49216",
+            "stdout_hex": "7b226661696c757265223a207b22726561736f6e223a2022657863656564656420746865203130207365636f6e642074696d65206c696d6974227d7d0a"
+          }
+        ],
+        "outcome": "wrong_answer",
+        "reason": "Candidate failure: exceeded the 10 second time limit",
+        "receipt_hash": "sha256:16d99665c2d217bb1b4f1af7e7c354c6ab754398abe1e5d890ac8a632cafaa09",
+        "score": 0.0,
+        "source_hash": "sha256:f41d864644475a8f0acb8f6dc35a7fc5397af9839313b179317aa91336a37863",
+        "version": 1
+      },
+      "receipt_hash": "sha256:16d99665c2d217bb1b4f1af7e7c354c6ab754398abe1e5d890ac8a632cafaa09",
+      "score": 0.0
+    }
+  ],
+  "reviewed_head": "f3b00bbedf9f0b3045a30c5f362731945abbc310"
+}
