@@ -1,0 +1,28 @@
+{
+  "timeouts_are_pilot_failures": false,
+  "minimum_retry_backoff_seconds": 120,
+  "observed_commands": [
+    {
+      "purpose": "PR body update",
+      "initial_connection_failure": true,
+      "retry_wait_seconds": 120,
+      "eventual_success": true
+    },
+    {
+      "purpose": "Admission phase comment",
+      "initial_connection_failure": true,
+      "retry_wait_seconds": 120,
+      "eventual_success": true,
+      "url": "https://github.com/twaldin/hone/pull/38#issuecomment-6707763890"
+    },
+    {
+      "purpose": "Exact-head CI lookup",
+      "initial_connection_failure": true,
+      "retry_wait_seconds": 120,
+      "eventual_success": true,
+      "run_id": 42378473693
+    }
+  ],
+  "pilot_model_calls": 0,
+  "pilot_infrastructure_failures_added": 0
+}

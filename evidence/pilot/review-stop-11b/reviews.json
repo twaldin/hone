@@ -1,0 +1,32 @@
+{
+  "head": "7040004e6c51b1960cc83750320424731fb3f20a",
+  "overall_ready": false,
+  "full_cross_family_review": {
+    "model": "anthropic/claude-opus-5-5",
+    "verdict": "READY",
+    "acknowledged_edge": "Queued frame can be lost at the deadline; classified nice-to-have based on inferred rarity",
+    "ci_checked_by_reviewer": false,
+    "owner_disposition": "Not accepted as aggregate launch clearance: the independent audit and deterministic Docker premise test verify completed-frame loss. Natural occurrence frequency is unknown; the trusted-verdict requirement and substantive-review stop remain binding."
+  },
+  "worker_audit": {
+    "model": "openai-codex/gpt-6-astra",
+    "verdict": "NOT_READY",
+    "scope": "Independent process/frame/deadline/receipt audit",
+    "finding": "Queued completed worker frame discarded when supervisor observes an expired deadline",
+    "locations": [
+      "pilot/verification.py:424-438",
+      "pilot/verification.py:665-684"
+    ],
+    "source_derived_at_review": true,
+    "parent_verification": "Two deterministic real-Docker function-boundary cases reproduce empty capture with valid complete queued frame; actual unchanged frame decoder rejects capture and accepts queued bytes."
+  },
+  "parent_verification_limits": {
+    "end_to_end_model_evaluation": false,
+    "natural_frequency": "unknown",
+    "downstream_campaign_abort": "source-traced, not executed"
+  },
+  "model_calls": 0,
+  "measured_cells_started": 0,
+  "grader_or_engine_changes_after_finding": false,
+  "live_unit_or_pid": null
+}
