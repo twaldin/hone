@@ -35,3 +35,11 @@ The active launcher, admission and run driver preserve 11c behavior with only ru
 Only after green CI and full exact-head cross-family READY may `.pilot-state/launch-11.json` admit the measured unit. Infrastructure rerun 2 uses a fresh `.pilot-runs/pilot-seeds12-11-rerun2` root. Order is seed 1 then 2; each MBPP then HoVer; each Hone, official GEPA, plain. Preserve original per-cell caps and joined safety history. Enforce the 35,000-call hard cap and before-cell completion projection, plus the 100 GB free-disk floor. No per-row retry, partial-cell restart, third campaign, final-test labels, seeds beyond 2, global runtime/broker/config changes, home GUI, Deadlock or merge.
 
 Further worker-I/O exit/deadline findings are corrected within this authorization. GitHub timeouts back off at least 120 seconds and never count as pilot failures. Only a policy question or different defect class requires review handback; declared operational safety stops remain binding.
+
+## Observed proof
+
+All 343 native tests passed in 340.727 seconds, including the active runner and frozen MBPP 640/847 ranking/noise admission. The thirteen-case standalone real-container smoke passed with retained receipts.
+
+Fresh unit `hone-predecl11d-admit-20261107T145310Z.service`, historical PID 1739807, passed in 477.486 seconds on implementation commit `c97db9d6cdf76c84236212ba9e37c473a3ecc988`. Actual inherited affinity was CPU 6 and nice 10. Frozen omp 18.16.0, OAuth route/pool, admitted HoVer index hashes and retained admission gates matched. The original journal contains 1,808 pass and 2,650 wrong-answer outcomes. Model calls and gateway requests were zero.
+
+The original admission and journal bytes are retained. The unit exited and was collected; its `not-found` terminal defaults are not the success proof. `admission.json` records `passed=true` only after all checks pass. No measured cell has started. Final exact-head CI and full cross-family READY remain required.

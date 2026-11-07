@@ -1,0 +1,51 @@
+{
+  "schema": "pilot-nonblocking-io-verification-v11d",
+  "implementation_commit": "c97db9d6cdf76c84236212ba9e37c473a3ecc988",
+  "verification_hash": "sha256:0c12bfcf15793d3df76f4b84196b0714e7adf3f8750c42465781b46cd0b38d17",
+  "policy_changed": false,
+  "official_gepa_unchanged": true,
+  "before": {
+    "failures": 2,
+    "errors": 6,
+    "proof": "before.txt"
+  },
+  "after_regression": {
+    "tests": 3,
+    "passed": true,
+    "proof": "after-regression.txt"
+  },
+  "native_suite": {
+    "tests": 343,
+    "seconds": 340.727,
+    "passed": true,
+    "real_docker_and_official_metrics": true,
+    "proof": "full-suite.txt",
+    "frozen_mbpp_rows": [
+      640,
+      847
+    ]
+  },
+  "sandbox_smoke": {
+    "cases": 13,
+    "passed": true,
+    "proof": "smoke-result.json",
+    "receipts": "smoke-grader-outcomes.jsonl"
+  },
+  "fresh_admission": {
+    "passed": true,
+    "proof": "admission.json",
+    "receipts": "admission-grader-outcomes.jsonl",
+    "elapsed_seconds": 477.48616911284626,
+    "pass": 1808,
+    "wrong_answer": 2650,
+    "model_calls": 0,
+    "gateway_requests": 0,
+    "unit": "hone-predecl11d-admit-20261107T145310Z.service",
+    "historical_pid": 1739807,
+    "cpu_affinity": [6],
+    "nice": 10
+  },
+  "model_calls": 0,
+  "review_rule": "Further same-class worker I/O exit/deadline findings are fixed without handback",
+  "gate": "Fresh zero-call admission and final exact-head CI/READY before search"
+}
