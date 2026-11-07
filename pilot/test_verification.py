@@ -1,3 +1,6 @@
+import ast
+import subprocess
+import uuid
 import os
 import copy
 import json
@@ -627,6 +630,65 @@ os.close(reader)
                         self.assertEqual(receipt["invocations"][-1]["exit_code"], 7)
                     elif name == "exception":
                         self.assertIn("TypeError", receipt["reason"])
+
+    def test_completed_queued_frame_is_drained_after_deadline(self):
+        functions = "\n\n".join(ast.get_source_segment(verification._WORKER, node)
+                               for node in ast.parse(verification._WORKER).body
+                               if isinstance(node, ast.FunctionDef) and node.name in ("_kill", "_supervise"))
+        fixture = r'''
+results = []
+frames = [{"results": [{"t": "int", "v": "0x3"}, {"t": "int", "v": "0x4"}]},
+          {"failure": {"reason": "call 0 raised TypeError"}}]
+for frame in frames:
+    expected = (json.dumps(frame) + "\n").encode()
+    reader, writer = os.pipe()
+    ready_reader, ready_writer = os.pipe()
+    child = os.fork()
+    if child == 0:
+        os.setpgid(0, 0)
+        os.close(reader)
+        descendant = os.fork()
+        if descendant == 0:
+            os.close(ready_reader)
+            os.setsid()
+            os.write(ready_writer, b"R")
+            os.close(ready_writer)
+            time.sleep(30)
+            os._exit(0)
+        os.close(ready_writer)
+        assert os.read(ready_reader, 1) == b"R"
+        os.close(ready_reader)
+        os.write(writer, expected)
+        os._exit(0)
+    os.close(writer)
+    os.close(ready_reader)
+    os.close(ready_writer)
+    os.waitid(os.P_PID, child, os.WEXITED | os.WNOWAIT)
+    deadline = time.monotonic() + 0.05
+    time.sleep(0.1)
+    assert time.monotonic() > deadline
+    assert select.select([reader], [], [], 0)[0]
+    captured = _supervise(child, reader, deadline)
+    status = os.waitpid(child, 0)[1]
+    os.close(reader)
+    results.append({"frame": frame, "captured": captured.hex() if captured is not None else None,
+                    "exit": os.waitstatus_to_exitcode(status)})
+print(json.dumps(results), flush=True)
+'''
+        script = "import os,select,signal,time,json\n_WIRE=262144\n" + functions + "\n" + fixture
+        name = "hone-queued-regression-" + uuid.uuid4().hex
+        try:
+            result = subprocess.run(program.docker_command(name) + ["-c", script],
+                                    capture_output=True, text=True, timeout=10)
+        finally:
+            subprocess.run(["docker", "rm", "-f", name], stdout=subprocess.DEVNULL,
+                           stderr=subprocess.DEVNULL, timeout=15, check=False)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        for row in json.loads(result.stdout):
+            with self.subTest(frame=row["frame"]):
+                self.assertEqual(row["exit"], 0)
+                self.assertIsNotNone(row["captured"])
+                self.assertEqual(verification._frame(bytes.fromhex(row["captured"])), row["frame"])
 
     def test_docker_official_shapes_and_attacks(self):
         size = "import sys\ndef size(items):\n    return sys.getsizeof(items)\n"

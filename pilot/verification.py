@@ -422,19 +422,23 @@ def _kill(child):
 
 
 def _supervise(child, reader, deadline):
-    data, eof, exited = b"", False, False
-    while not (eof and exited) and len(data) <= _WIRE:
+    data, eof = b"", False
+    while len(data) <= _WIRE:
         remaining = deadline - time.monotonic()
-        if not exited and os.waitid(os.P_PID, child, os.WEXITED | os.WNOHANG | os.WNOWAIT) is not None:
-            exited = True
-            # Stray descendants must not hold the frame open.
+        if os.waitid(os.P_PID, child, os.WEXITED | os.WNOHANG | os.WNOWAIT) is not None:
             _kill(child)
+            while len(data) <= _WIRE and select.select([reader], [], [], 0)[0]:
+                chunk = os.read(reader, min(65536, _WIRE + 1 - len(data)))
+                if not chunk:
+                    break
+                data += chunk
+            return data
         if remaining <= 0:
-            return data if exited else None
+            return None
         if eof:
             time.sleep(min(remaining, 0.01))
         elif select.select([reader], [], [], min(remaining, 0.01))[0]:
-            chunk = os.read(reader, 65536)
+            chunk = os.read(reader, min(65536, _WIRE + 1 - len(data)))
             eof, data = not chunk, data + chunk
     return data
 

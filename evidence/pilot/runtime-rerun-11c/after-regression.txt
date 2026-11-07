@@ -1,0 +1,7 @@
+test_completed_queued_frame_is_drained_after_deadline (pilot.test_verification.DockerVerificationTests.test_completed_queued_frame_is_drained_after_deadline) ... ok
+test_exited_worker_with_escaped_descendant_preserves_verdict (pilot.test_verification.DockerVerificationTests.test_exited_worker_with_escaped_descendant_preserves_verdict) ... ok
+
+----------------------------------------------------------------------
+Ran 2 tests in 1.533s
+
+OK
