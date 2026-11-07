@@ -1,0 +1,28 @@
+{
+  "head": "f3b00bbedf9f0b3045a30c5f362731945abbc310",
+  "overall_ready": false,
+  "trust_review": {
+    "model": "openai-codex/gpt-6-astra",
+    "verdict": "NOT_READY",
+    "finding": "P1: an exited worker with an escaped descendant retaining its result pipe is converted to candidate timeout/wrong_answer 0",
+    "locations": [
+      "pilot/verification.py:424-439",
+      "pilot/verification.py:454-459"
+    ],
+    "verification": "result.json: direct-worker-exit-7 => nonzero_exit/null; escaped-descendant case => wrong_answer/0 after 10.348240497987717 seconds"
+  },
+  "launch_review": {
+    "model": "anthropic/claude-opus-5-5",
+    "verdict": "READY for launch/admission/resource/budget scope only",
+    "full_trust_review_performed": false,
+    "nonblocking_findings": [
+      "Named nonexistent unit can satisfy inherited Restart=no guard; normal launch path is correct.",
+      "pilot/test_rerun11.py imports immutable prior runtime-rerun-11/run.py rather than active runtime-rerun-11a/run.py."
+    ]
+  },
+  "stop_rule": "Substantive measurement-validity finding: no infrastructure-to-wrong-answer conversion permitted",
+  "new_pilot_model_calls": 0,
+  "measured_cells_started": 0,
+  "grader_or_engine_changes_after_review": false,
+  "live_unit_or_pid": null
+}
