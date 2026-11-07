@@ -507,12 +507,14 @@ class ModelCalls:
         self.gateway, self.ledger, self.throttle = gateway, ledger, throttle
 
     def __call__(self, role: str, messages: list[dict], max_tokens: int) -> str:
+        from .campaign import before_model_call
         healthy_failures = 0
         while True:
             self.throttle.wait()
             self.ledger.admit(role, messages, max_tokens, self.throttle.accounted_seconds)
             system = [message["content"] for message in messages if message["role"] == "system"]
             body = {"model": MODEL, "context": {"systemPrompt": system, "messages": [{**message, "timestamp": 0} for message in messages if message["role"] != "system"]}, "options": {"maxTokens": max_tokens, "temperature": 0, "forceReasoningOff": True, "cacheRetention": "none", "preferWebsockets": False}, "stream": False}
+            before_model_call(self.ledger)
             started = time.monotonic()
             try:
                 frame = self.gateway.request(body)

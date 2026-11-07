@@ -133,7 +133,7 @@ def _seeds_bootstrap(task_pairs: Mapping[str, Mapping[int, tuple[Mapping[str, fl
 def _selection_diagnostics(loaded: dict, method: str, issues: list[dict]) -> dict:
     evaluations = loaded.get("evaluations.jsonl")
     manifest = loaded.get("manifest.json")
-    ids = manifest["identity"]["task"]["selection_ids"] if manifest else None
+    ids = manifest["identity"]["task"]["selection_ids"] if manifest and "identity" in manifest else None
     if ids is not None:
         align_scores(ids, [0] * len(ids), ids)
     complete, repeated, incomplete = {}, [], []
@@ -330,7 +330,8 @@ def _method_totals(selected: list[dict]) -> dict:
             "accounting": _sum_available([{key: value for key, value in cell["accounting"].items() if value is not None} for cell in selected])}
 
 
-def _report_seed(runs: Path, seed: int, *, diagnostics: bool = False) -> tuple[dict, dict, dict]:
+def _report_seed(runs: Path, seed: int, *, diagnostics: bool = False, predeclaration: int = 10) -> tuple[dict, dict, dict]:
+    label = SEEDS12_LABEL.replace("predeclaration 10", f"predeclaration {predeclaration}") if seed else LABEL
     runs = Path(runs)
     if not runs.is_dir():
         raise ValueError("runs directory does not exist")
@@ -343,14 +344,17 @@ def _report_seed(runs: Path, seed: int, *, diagnostics: bool = False) -> tuple[d
         for method in METHODS:
             root = runs / task / str(seed) / method
             loaded, hashes, issues = {}, {}, []
-            for name in ("manifest.json", "search.json", "result.json", "spend.json", "evaluations.jsonl", "calls.jsonl"):
+            filenames = ("manifest.json", "search.json", "result.json", "spend.json", "evaluations.jsonl", "calls.jsonl")
+            if predeclaration == 11:
+                filenames += ("grader-outcomes.jsonl",)
+            for name in filenames:
                 path = root / name
                 if not path.exists():
                     issues.append({"file": name, "reason": "missing_file"})
                     continue
                 raw = path.read_bytes()
                 hashes[name] = _hash(raw)
-                if name in ("evaluations.jsonl", "calls.jsonl"):
+                if name.endswith(".jsonl"):
                     if name == "calls.jsonl" and not diagnostics:
                         continue
                     records = []
@@ -369,7 +373,9 @@ def _report_seed(runs: Path, seed: int, *, diagnostics: bool = False) -> tuple[d
             if diagnostics and search and (search.get("seed"), search.get("method"), search.get("contract", {}).get("task")) != (seed, method, task):
                 raise ValueError(f"{root}: search/path identity mismatch")
             manifest = loaded.get("manifest.json")
-            if manifest:
+            if manifest and predeclaration == 11 and manifest.get("grader_policy") != "predeclaration-11":
+                raise ValueError(f"{root}: cannot pool a different grader policy into predeclaration 11")
+            if manifest and "identity" in manifest:
                 identity = manifest["identity"]
                 if diagnostics and (identity["task"]["task"] != task or manifest.get("identity_hash", _digest(identity)) != _digest(identity)):
                     raise ValueError(f"{root}: invalid manifest identity")
@@ -399,10 +405,21 @@ def _report_seed(runs: Path, seed: int, *, diagnostics: bool = False) -> tuple[d
                           "accounting": {key: spend.get(key, result.get(key)) if spend else result.get(key) for key in COUNTERS},
                           "unknown_usage": "Internal failed-attempt tokens and unreported failed-call usage remain unknown; conservative estimates are not reported usage.",
                           "input_hashes": hashes, "issues": issues})
+            if predeclaration == 11:
+                from .verification import validate_grader_receipt
+                outcomes = {}
+                for receipt in loaded.get("grader-outcomes.jsonl", []):
+                    if receipt.get("event") != "grader-outcome":
+                        continue
+                    validate_grader_receipt(receipt)
+                    purpose = receipt["context"].get("purpose", "unspecified")
+                    counts = outcomes.setdefault(purpose, {})
+                    counts[receipt["outcome"]] = counts.get(receipt["outcome"], 0) + 1
+                cells[-1]["grader_outcomes"] = outcomes
             if diagnostics:
                 cells[-1]["diagnostics"] = _selection_diagnostics(loaded, method, issues)
                 if cells[-1]["inference"]:
-                    cells[-1]["inference"]["label"] = SEEDS12_LABEL if seed else LABEL
+                    cells[-1]["inference"]["label"] = label
     aggregates = {}
     for method in METHODS:
         selected = [cell for cell in cells if cell["method"] == method]
@@ -410,8 +427,8 @@ def _report_seed(runs: Path, seed: int, *, diagnostics: bool = False) -> tuple[d
         aggregates[method] = {"inference": hierarchical_bootstrap(complete_pairs) if len(complete_pairs) == 2 else None,
                               "paired_tasks": list(complete_pairs), **_method_totals(selected)}
         if seed and aggregates[method]["inference"]:
-            aggregates[method]["inference"]["label"] = SEEDS12_LABEL
-    report = {"schema": "pilot-results-v1", "seed": seed, "label": SEEDS12_LABEL if seed else LABEL,
+            aggregates[method]["inference"]["label"] = label
+    report = {"schema": "pilot-results-v1", "seed": seed, "label": label,
               "matrix_status": "complete" if len(pairs) == 6 and all(cell["status"] == "completed" for cell in cells) else "partial_or_stopped",
               "reporter_sha256": _hash(Path(__file__).read_bytes()), "cells": cells, "methods": aggregates}
     if diagnostics and seed == 0:
@@ -424,11 +441,14 @@ def report_results(runs: Path) -> dict:
     return _report_seed(runs, 0)[0]
 
 
-def report_seeds12(seed1_runs: Path, seed2_runs: Path, *, seed0_runs: Path | None = None) -> dict:
+def report_seeds12(seed1_runs: Path, seed2_runs: Path, *, seed0_runs: Path | None = None, predeclaration: int = 10) -> dict:
     """Report the fixed seeds-1–2 matrix without pooling historical seed 0."""
+    if predeclaration not in (10, 11):
+        raise ValueError("Seeds 1–2 require predeclaration 10 or 11")
+    label = SEEDS12_LABEL.replace("predeclaration 10", f"predeclaration {predeclaration}")
     reports, pairs, identities = {}, {}, {}
     for seed, root in ((1, seed1_runs), (2, seed2_runs)):
-        reports[seed], pairs[seed], current = _report_seed(root, seed, diagnostics=True)
+        reports[seed], pairs[seed], current = _report_seed(root, seed, diagnostics=True, predeclaration=predeclaration)
         for task, identity in current.items():
             if task in identities and identities[task] != identity:
                 raise ValueError(f"{task}: seed evaluator identities differ")
@@ -444,7 +464,10 @@ def report_seeds12(seed1_runs: Path, seed2_runs: Path, *, seed0_runs: Path | Non
                              "paired_seeds": list(task_pairs[task])} for task in TASKS},
             "paired_cells": [{"task": task, "seed": seed} for task in TASKS for seed in task_pairs[task]],
             **_method_totals(selected)}
-    return {"schema": "pilot-results-v2", "seeds": [1, 2], "label": SEEDS12_LABEL,
+        for interval in [methods[method]["inference"], *[entry["inference"] for entry in methods[method]["tasks"].values()]]:
+            if interval:
+                interval["label"] = label
+    return {"schema": "pilot-results-v2", "seeds": [1, 2], "label": label,
             "matrix_status": "complete" if all(reports[seed]["matrix_status"] == "complete" for seed in (1, 2)) else "partial_or_stopped",
             "reporter_sha256": _hash(Path(__file__).read_bytes()), "cells": cells, "methods": methods,
             "per_seed": {str(seed): reports[seed] for seed in (1, 2)},
@@ -457,12 +480,13 @@ def main(argv: list[str] | None = None) -> None:
     parser.add_argument("--runs", type=Path, help="Historical seed-0 root, reported separately when seeds 1–2 are supplied")
     parser.add_argument("--runs-seed1", type=Path)
     parser.add_argument("--runs-seed2", type=Path)
+    parser.add_argument("--predeclaration", type=int, choices=(10, 11), default=10)
     parser.add_argument("--out", type=Path, required=True)
     args = parser.parse_args(argv)
     if args.runs_seed1 is not None or args.runs_seed2 is not None:
         if args.runs_seed1 is None or args.runs_seed2 is None:
             parser.error("--runs-seed1 and --runs-seed2 must be supplied together")
-        report = report_seeds12(args.runs_seed1, args.runs_seed2, seed0_runs=args.runs)
+        report = report_seeds12(args.runs_seed1, args.runs_seed2, seed0_runs=args.runs, predeclaration=args.predeclaration)
     elif args.runs is not None:
         report = report_results(args.runs)
     else:

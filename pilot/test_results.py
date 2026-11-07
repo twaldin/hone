@@ -513,6 +513,33 @@ class ReportTests(unittest.TestCase):
         self.assertEqual(diagnostics["gate_passing_candidates_without_complete_selection"], 0)
         self.assertEqual(diagnostics["selection_evaluations_of_already_scored_artifacts"], 0)
 
+    def test_predeclaration11_refuses_pooling_policy10_cells(self):
+        roots = self.seed_roots()
+        self.write_cell(seed=1, runs=roots[0])
+        with self.assertRaisesRegex(ValueError, "cannot pool a different grader policy"):
+            report_seeds12(*roots, predeclaration=11)
+
+    def test_unscored_infrastructure_is_reported_separately_not_as_a_pair(self):
+        from unittest.mock import patch
+        from pilot import program, verification
+        from pilot.test_program import local_command, local_remove
+        roots = self.seed_roots()
+        cell = roots[0] / "mbpp/1/hone"
+        cell.mkdir(parents=True)
+        (cell / "manifest.json").write_text(json.dumps({"grader_policy": "predeclaration-11", "failure": True}))
+        (cell / "result.json").write_text(json.dumps({"task": "mbpp", "seed": 1, "method": "hone",
+                                                     "status": "infrastructure_failure"}))
+        with patch.dict(verification._PLANS, clear=True), \
+             patch.object(program, "docker_command", local_command), \
+             patch.object(program, "_remove", local_remove), \
+             verification.grader_journal(cell / "grader-outcomes.jsonl", purpose="search", task="mbpp", row_id="a"):
+            with self.assertRaises(verification.GraderInfrastructureError):
+                verification.score_solution("import os\nos._exit(7)", "def add(a,b): return a+b", "", ["assert add(1,2)==3"])
+        report = report_seeds12(*roots, predeclaration=11)
+        observed = report["cells"][0]
+        self.assertEqual(observed["grader_outcomes"], {"search": {"nonzero_exit": 1}})
+        self.assertIsNone(observed["inference"])
+        self.assertIsNone(report["methods"]["hone"]["inference"])
 
 if __name__ == "__main__":
     unittest.main()

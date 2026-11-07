@@ -7,10 +7,112 @@ import unittest
 from unittest.mock import patch
 
 from pilot.admission import text_admission
-from pilot.controls import (CONTROL_SEED, P_CONTROL_ROWS, PREVIOUS_MBPP_ROWS,
+from pilot.controls import (CONTROL_SEED, NEGATIVE_PROBE, P_CONTROL_ROWS, PREVIOUS_MBPP_ROWS, SHORTCUT_CODE,
                             ControlsFailed, measure, representative_rows)
+from pilot.runtime import current_call_scope
 from pilot.tasks import Task
-from pilot import tasks
+from pilot.test_adversarial import admission_fixture, fixture_tasks, grader_failure
+from pilot.verification import GraderInfrastructureError
+from pilot import adversarial, tasks
+
+
+class MbppControlTests(unittest.TestCase):
+    def setUp(self):
+        rows = [{"id": f"mbpp:train:{index}", "input": f"Implement {index}.\ndef target(value):",
+                 "reference_code": "def target(value): return value + 1", "test_setup_code": "",
+                 "test_list": ["assert target(1) == 2"]} for index in range(100, 140)]
+        self.task = Task("mbpp", rows, [], {"task": "mbpp"}, {"prompt": "answer", "program": "seed"})
+        self.proof = admission_fixture([self.task, *fixture_tasks()[1:]])
+        self.identity = self.proof["identities"]["mbpp"]
+        self.rows = representative_rows(self.task)
+        self.fails = lambda row, output: output == SHORTCUT_CODE
+        self.failure = grader_failure
+        self.directory = tempfile.TemporaryDirectory()
+        self.addCleanup(self.directory.cleanup)
+        self.out = Path(self.directory.name)
+        self.enterContext(patch("pilot.tasks.run_program", side_effect=self.program))
+        self.enterContext(patch("pilot.tasks.score_output", side_effect=self.score))
+        self.enterContext(patch("pilot.controls.score_output", side_effect=self.score))
+
+    def program(self, candidate, text, call):
+        if "AlwaysEqual" in candidate["program"]:
+            return SHORTCUT_CODE, []
+        return ("good" if int(text.split()[1].rstrip(".")) % 2 else "bad"), []
+
+    def score(self, task, row, output):
+        if self.fails(row, output):
+            raise self.failure(row, output)
+        return float(output in ("good", row["reference_code"]))
+
+    def measure(self):
+        return measure(self.task, lambda *args: self.fail("model call"), self.out, self.identity,
+                       rows=self.rows, adversarial=self.proof)
+
+    def evaluations(self):
+        path = self.out / "evaluations.jsonl"
+        return [json.loads(line) for line in path.read_text().splitlines()] if path.exists() else []
+
+    def test_receipted_shortcut_infrastructure_is_rejected_unscored_without_a_task_mean(self):
+        result = self.measure()
+        ids = [row["id"] for row in self.rows]
+        shortcut = result["controls"]["shortcut"]
+        self.assertEqual(shortcut["scores"], [None] * len(ids))
+        self.assertEqual(shortcut["outputs"], [SHORTCUT_CODE] * len(ids))
+        self.assertIsNone(shortcut["mean"])
+        self.assertEqual(list(shortcut["unscored_receipts"]), ids)
+        for row_id, receipt in shortcut["unscored_receipts"].items():
+            self.assertEqual((receipt["outcome"], receipt["score"]), ("frame_failure", None))
+            self.assertEqual({key: receipt["context"][key] for key in ("stage", "arm", "row_id")},
+                             {"stage": NEGATIVE_PROBE, "arm": "shortcut", "row_id": row_id})
+        self.assertEqual(result["controls"]["broken"]["scores"], [0.0] * len(ids))
+        self.assertEqual(result["controls"]["known-improved"]["mean"], 1.0)
+        self.assertGreater(result["controls"]["naive"]["mean"], 0)
+        self.assertTrue(result["ranking_passed"])
+        self.assertTrue(result["noise_passed"])
+        self.assertEqual(result["calibration"]["noiseEnvelope"], 0)
+        record = next(record for record in self.evaluations() if record["control"] == "shortcut")
+        self.assertEqual((record["row_ids"], record["scores"], record["unscored_receipts"]),
+                         (ids, shortcut["scores"], shortcut["unscored_receipts"]))
+
+    def test_positive_and_noise_infrastructure_abort_instead_of_scoring(self):
+        reference = self.rows[0]["reference_code"]
+        cases = (("known-improved", lambda row, output: output == reference, []),
+                 ("naive", lambda row, output: output == "good", ["known-improved"]),
+                 ("unchanged:3:second", lambda row, output: current_call_scope().get("arm") == "unchanged:3:second",
+                  ["known-improved", "naive", "broken", "shortcut"] + ["unchanged"] * 6))
+        for arm, fails, recorded in cases:
+            with self.subTest(arm=arm):
+                self.out = Path(self.directory.name) / arm
+                self.fails = fails
+                with self.assertRaises(GraderInfrastructureError) as caught:
+                    self.measure()
+                self.assertEqual(caught.exception.receipt["context"]["arm"], arm)
+                self.assertNotIn("stage", caught.exception.receipt["context"])
+                self.assertEqual([record["control"] for record in self.evaluations()], recorded)
+                self.assertNotIn("noise_passed", json.loads((self.out / "controls.json").read_text())
+                                 if (self.out / "controls.json").exists() else {})
+
+    def test_unrelated_receipts_positive_shortcuts_and_legacy_proofs_are_not_rejections(self):
+        other = self.rows[1]
+        for name, failure in (("row", lambda row, output: grader_failure(other, output)),
+                              ("output", lambda row, output: grader_failure(row, "unrelated"))):
+            with self.subTest(defect=name):
+                self.out = Path(self.directory.name) / name
+                self.failure = failure
+                with self.assertRaises(ValueError):
+                    self.measure()
+                self.assertNotIn("shortcut", [record["control"] for record in self.evaluations()])
+        self.out = Path(self.directory.name) / "positive"
+        with patch("pilot.tasks.score_output", side_effect=lambda task, row, output: float(output != "bad")):
+            with self.assertRaises(ControlsFailed):
+                self.measure()
+        positive = json.loads((self.out / "controls.json").read_text())
+        self.assertEqual((positive["controls"]["shortcut"]["mean"], positive["ranking_passed"]), (1.0, False))
+        self.out = Path(self.directory.name) / "legacy"
+        self.proof["version"] = adversarial.LEGACY_VERSION
+        with self.assertRaises(ValueError):
+            self.measure()
+        self.assertEqual(self.evaluations(), [])
 
 
 class ControlTests(unittest.TestCase):

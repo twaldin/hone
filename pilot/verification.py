@@ -8,9 +8,13 @@ import subprocess
 import tempfile
 import time
 import uuid
+from contextlib import contextmanager
+from contextvars import ContextVar
+from dataclasses import dataclass
+from pathlib import Path
 
 from . import program
-from .runtime import digest
+from .runtime import IMAGE, append_json, current_call_scope, digest
 
 PLAN_SECONDS = 10
 WORKER_SECONDS = 10
@@ -18,6 +22,150 @@ MAX_DEPTH = 64
 TYPE_NAMES = frozenset(("bool", "int", "float", "complex", "str", "bytes", "list", "tuple", "dict", "set", "frozenset"))
 _INT = re.compile(r"-?0x[0-9a-f]+")
 _PLANS: dict[str, str] = {}
+_JOURNAL: ContextVar[tuple[Path | None, dict]] = ContextVar("grader_journal", default=(None, {}))
+_INFRASTRUCTURE = frozenset(("timeout", "nonzero_exit", "frame_failure"))
+_SOURCE_HASH = digest({"verification": Path(__file__).read_text(), "program": Path(program.__file__).read_text()})
+
+
+class GraderInfrastructureError(RuntimeError):
+    def __init__(self, receipt: dict):
+        self.receipt = receipt
+        super().__init__("Protected grader infrastructure failure: " + receipt["outcome"])
+
+
+@contextmanager
+def grader_journal(path: Path | None = None, **context):
+    inherited_path, inherited = _JOURNAL.get()
+    token = _JOURNAL.set((Path(path) if path is not None else inherited_path, {**inherited, **context}))
+    try:
+        yield
+    finally:
+        _JOURNAL.reset(token)
+
+
+def grader_input_hash(output: str, reference_code: str, setup: str, tests: list[str]) -> str:
+    return digest({"output": output, "reference_code": reference_code, "setup": setup, "tests": tests})
+
+
+def _source_hash() -> str:
+    return _SOURCE_HASH
+
+
+def record_grader_outcome(outcome: str, score: float | None, *, invocations: list | None = None,
+                          reason: str | None = None, input_hash: str | None = None) -> dict:
+    path, context = _JOURNAL.get()
+    receipt = {"event": "grader-outcome", "version": 1, "context": {**current_call_scope(), **context},
+               "outcome": outcome, "score": score, "reason": reason, "invocations": invocations or [],
+               "source_hash": _source_hash(), "image": os.environ.get("PILOT_PYTHON_IMAGE", IMAGE),
+               "input_hash": input_hash or context.get("input_hash") or digest(current_call_scope())}
+    receipt["receipt_hash"] = digest(receipt)
+    validate_grader_receipt(receipt)
+    if path is not None:
+        append_json(path, receipt)
+    return receipt
+
+
+def validate_grader_receipt(receipt: dict) -> None:
+    def hashed(value):
+        return type(value) is str and re.fullmatch(r"sha256:[0-9a-f]{64}", value) is not None
+
+    if type(receipt) is not dict:
+        raise ValueError("Missing grader receipt")
+    outcomes = {"pass": 1.0, "wrong_answer": 0.0, **dict.fromkeys(_INFRASTRUCTURE)}
+    outcome = receipt.get("outcome")
+    if (type(outcome) is not str or outcome not in outcomes or receipt.get("score") != outcomes[outcome]
+            or type(receipt.get("score")) is bool or "score" not in receipt):
+        raise ValueError("Inconsistent grader outcome/score")
+    if (receipt.get("event") != "grader-outcome" or receipt.get("version") != 1
+            or type(receipt.get("context")) is not dict
+            or (receipt.get("reason") is not None and type(receipt["reason"]) is not str)
+            or receipt.get("source_hash") != _source_hash() or not hashed(receipt.get("input_hash"))
+            or type(receipt.get("image")) is not str
+            or not re.fullmatch(r"[a-zA-Z0-9./:_-]+@sha256:[0-9a-f]{64}", receipt["image"])
+            or receipt["image"] != os.environ.get("PILOT_PYTHON_IMAGE", IMAGE)
+            or receipt.get("receipt_hash") != digest({k: v for k, v in receipt.items() if k != "receipt_hash"})):
+        raise ValueError("Invalid grader provenance")
+    context = receipt["context"]
+    if "input_hash" in context and context["input_hash"] != receipt["input_hash"]:
+        raise ValueError("Mismatched row input hash")
+    if "original_output" in context:
+        original = context["original_output"]
+        if (type(original) is not dict or type(original.get("text")) is not str
+                or type(original.get("bytes")) is not int or original["bytes"] < 0
+                or type(original.get("truncated")) is not bool
+                or len(original["text"].encode()) > program.MAX_WIRE_BYTES
+                or original.get("hash") != context.get("output_hash")
+                or not hashed(original.get("hash"))
+                or original["truncated"] != (original["bytes"] > program.MAX_WIRE_BYTES)
+                or (not original["truncated"] and (len(original["text"].encode()) != original["bytes"]
+                                                  or digest(original["text"]) != original["hash"]))):
+            raise ValueError("Invalid original output provenance")
+    invocations = receipt.get("invocations")
+    if type(invocations) is not list:
+        raise ValueError("Missing grader invocations")
+    for invocation in invocations:
+        if type(invocation) is not dict:
+            raise ValueError("Invalid invocation")
+        try:
+            if (type(invocation["stdout_hex"]) is not str or type(invocation["stderr_hex"]) is not str
+                    or len(invocation["stdout_hex"]) + len(invocation["stderr_hex"]) > 2 * program.MAX_WIRE_BYTES):
+                raise ValueError("Overlarge invocation receipt")
+            stdout, stderr = bytes.fromhex(invocation["stdout_hex"]), bytes.fromhex(invocation["stderr_hex"])
+            elapsed = invocation["elapsed_seconds"]
+            valid = (type(elapsed) in (int, float) and 0 <= elapsed < float("inf")
+                     and len(stdout) + len(stderr) <= program.MAX_WIRE_BYTES
+                     and invocation["stdout_hash"] == digest(stdout.hex())
+                     and invocation["stderr_hash"] == digest(stderr.hex())
+                     and hashed(invocation["input_hash"]) and hashed(invocation["script_hash"])
+                     and invocation["stage"] in ("planner", "worker", "wrapper")
+                     and invocation["outcome"] in ("completed", *_INFRASTRUCTURE)
+                     and (invocation["exit_code"] is None or type(invocation["exit_code"]) is int)
+                     and (invocation["error"] is None or type(invocation["error"]) is str))
+        except (KeyError, ValueError, TypeError):
+            raise ValueError("Malformed invocation receipt") from None
+        if not valid:
+            raise ValueError("Invalid invocation provenance")
+        scripts = {"planner": _PLANNER, "worker": _WORKER, "wrapper": _WRAPPER}
+        if invocation["script_hash"] != digest(_CODEC + scripts[invocation["stage"]]):
+            raise ValueError("Mismatched invocation source")
+        status, exit_code = invocation["outcome"], invocation["exit_code"]
+        if ((status == "completed" and (exit_code != 0 or invocation["error"] is not None))
+                or (status == "nonzero_exit" and (exit_code is None or exit_code == 0))
+                or (status in _INFRASTRUCTURE and not invocation["error"])):
+            raise ValueError("Inconsistent invocation outcome")
+    failures = [item for item in invocations if item["outcome"] in _INFRASTRUCTURE]
+    if outcome in _INFRASTRUCTURE:
+        if (len(failures) != 1 or invocations[-1] != failures[0]
+                or failures[0]["outcome"] != outcome or receipt.get("reason") != failures[0]["error"]):
+            raise ValueError("Missing infrastructure invocation")
+    elif failures:
+        raise ValueError("Scored infrastructure invocation")
+
+
+@dataclass
+class InvocationResult:
+    stage: str
+    outcome: str
+    exit_code: int | None
+    stdout: bytes
+    stderr: bytes
+    elapsed_seconds: float
+    error: str | None
+    input_hash: str
+    script_hash: str
+
+    def receipt(self) -> dict:
+        return {"stage": self.stage, "outcome": self.outcome, "exit_code": self.exit_code,
+                "stdout_hex": self.stdout.hex(), "stderr_hex": self.stderr.hex(),
+                "stdout_hash": digest(self.stdout.hex()), "stderr_hash": digest(self.stderr.hex()),
+                "elapsed_seconds": self.elapsed_seconds, "error": self.error,
+                "input_hash": self.input_hash, "script_hash": self.script_hash}
+
+
+def _raise_infrastructure(result: InvocationResult, invocations: list, input_hash: str):
+    raise GraderInfrastructureError(record_grader_outcome(
+        result.outcome, None, invocations=invocations, reason=result.error,
+        input_hash=_JOURNAL.get()[1].get("input_hash", input_hash)))
 
 _CODEC = f"_DEPTH = {MAX_DEPTH}\n" + r'''import json, os, sys
 _type, _id, _object, _isinstance, _all, _any, _set = type, id, object, isinstance, all, any, set
@@ -238,47 +386,83 @@ _emit(_out, {"results": _results})
 '''
 
 
-def _run(prefix: str, script: str, payload: bytes, seconds: float) -> tuple[int, bytes] | None:
+def _run(prefix: str, script: str, payload: bytes, seconds: float) -> InvocationResult:
+    from .campaign import check_disk
+
+    check_disk()
     name = prefix + uuid.uuid4().hex
-    with tempfile.TemporaryFile() as inputs:
-        inputs.write(payload)
-        inputs.seek(0)
-        process = subprocess.Popen(program.docker_command(name) + ["-c", script], stdin=inputs,
-                                   stdout=subprocess.PIPE, stderr=subprocess.PIPE)
-        selector = selectors.DefaultSelector()
+    stage = {"hone-pilot-plan-": "planner", "hone-pilot-score-": "worker",
+             "hone-pilot-wrapper-": "wrapper"}[prefix]
+    started = time.monotonic()
+    process = None
+    selector = selectors.DefaultSelector()
+    stdout, stderr = bytearray(), bytearray()
+    outcome, error, exit_code = "completed", None, None
+    try:
+        with tempfile.TemporaryFile() as inputs:
+            inputs.write(payload)
+            inputs.seek(0)
+            process = subprocess.Popen(program.docker_command(name) + ["-c", script], stdin=inputs,
+                                       stdout=subprocess.PIPE, stderr=subprocess.PIPE)
         assert process.stdout is not None and process.stderr is not None
         selector.register(process.stdout, selectors.EVENT_READ)
         selector.register(process.stderr, selectors.EVENT_READ)
         deadline = time.monotonic() + seconds
-        received = 0
-        stdout = bytearray()
-        try:
-            while selector.get_map():
-                remaining = deadline - time.monotonic()
-                if remaining <= 0:
-                    return None
-                events = selector.select(remaining)
-                if not events:
-                    return None
-                for key, _ in events:
-                    chunk = os.read(key.fd, 8192)
-                    if not chunk:
-                        selector.unregister(key.fileobj)
-                        continue
-                    received += len(chunk)
-                    if received > program.MAX_WIRE_BYTES:
-                        return None
-                    if key.fileobj is process.stdout:
-                        stdout.extend(chunk)
+        while selector.get_map():
             remaining = deadline - time.monotonic()
             if remaining <= 0:
-                return None
-            return process.wait(timeout=remaining), bytes(stdout)
-        except (OSError, subprocess.TimeoutExpired):
-            return None
-        finally:
-            selector.close()
-            program._remove(name, process)
+                raise subprocess.TimeoutExpired("protected grader", seconds)
+            events = selector.select(remaining)
+            if not events:
+                raise subprocess.TimeoutExpired("protected grader", seconds)
+            for key, _ in events:
+                chunk = os.read(key.fd, 8192)
+                if not chunk:
+                    selector.unregister(key.fileobj)
+                    continue
+                available = program.MAX_WIRE_BYTES - len(stdout) - len(stderr)
+                target = stdout if key.fileobj is process.stdout else stderr
+                target.extend(chunk[:available])
+                if len(chunk) > available:
+                    outcome, error = "frame_failure", "Combined output exceeded wire bound"
+                    break
+            if error:
+                break
+        if error is None:
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                raise subprocess.TimeoutExpired("protected grader", seconds)
+            exit_code = process.wait(timeout=remaining)
+            if exit_code != 0:
+                outcome, error = "nonzero_exit", "Invocation exited nonzero"
+    except subprocess.TimeoutExpired:
+        outcome, error = "timeout", "Invocation exceeded deadline"
+    except (OSError, RuntimeError) as exception:
+        outcome, error = "frame_failure", "Invocation failed before a complete frame: " + type(exception).__name__
+    finally:
+        selector.close()
+        if process is not None:
+            try:
+                program._remove(name, process)
+            except (OSError, subprocess.TimeoutExpired) as exception:
+                cleanup_error = "Owned invocation cleanup failed: " + type(exception).__name__
+                if outcome == "completed":
+                    outcome, error = "frame_failure", cleanup_error
+                else:
+                    error = str(error) + "; " + cleanup_error
+            exit_code = process.returncode
+            if process.stdout is not None:
+                process.stdout.close()
+            if process.stderr is not None:
+                process.stderr.close()
+    result = InvocationResult(stage, outcome, exit_code, bytes(stdout), bytes(stderr),
+                              time.monotonic() - started, error, digest(payload.hex()), digest(script))
+    path, context = _JOURNAL.get()
+    if path is not None:
+        append_json(path, {"event": "grader-invocation", "context": {**current_call_scope(), **context},
+                          "source_hash": _source_hash(), "image": os.environ.get("PILOT_PYTHON_IMAGE", IMAGE),
+                          **result.receipt()})
+    return result
 
 
 def _frame(stdout: bytes) -> dict:
@@ -369,47 +553,60 @@ def prepare_plan(reference_code: str, setup: str, tests: list[str]) -> dict:
     key = digest(row)
     if key not in _PLANS:
         finished = _run("hone-pilot-plan-", _CODEC + _PLANNER, json.dumps(row).encode(), PLAN_SECONDS)
-        if finished is None or finished[0] != 0:
-            raise RuntimeError("Trusted MBPP planning invocation failed")
+        if finished.outcome != "completed":
+            _raise_infrastructure(finished, [finished.receipt()], key)
         try:
-            plan = _plan(finished[1], len(tests))
-        except (ValueError, TypeError, OverflowError, RecursionError) as error:
-            raise RuntimeError("Trusted MBPP planning returned an invalid plan") from error
+            plan = _plan(finished.stdout, len(tests))
+        except (ValueError, TypeError, OverflowError, RecursionError):
+            finished.outcome, finished.error = "frame_failure", "Planner returned an invalid plan"
+            _raise_infrastructure(finished, [finished.receipt()], key)
         _PLANS[key] = json.dumps(plan)
     return json.loads(_PLANS[key])
 
 
+def _results(result: InvocationResult, count: int, invocations: list, input_hash: str) -> list:
+    if result.outcome == "completed":
+        try:
+            frame = _frame(result.stdout)
+            if set(frame) != {"results"} or type(frame["results"]) is not list or len(frame["results"]) != count:
+                raise ValueError("Malformed results")
+            for value in frame["results"]:
+                _canonical(value)
+        except (ValueError, TypeError, OverflowError, RecursionError):
+            result.outcome, result.error = "frame_failure", "Invocation returned an invalid result frame"
+    invocations.append(result.receipt())
+    if result.outcome != "completed":
+        _raise_infrastructure(result, invocations, input_hash)
+    return frame["results"]
+
+
 def score_solution(output: str, reference_code: str, setup: str, tests: list[str]) -> float:
-    if len(output.encode()) > program.MAX_WIRE_BYTES:
-        return 0.0
-    plan = prepare_plan(reference_code, setup, tests)
-    if not plan["gradeable"]:
-        return 0.0
-    calls = plan["calls"]
-    payload = {"code": program.extract_solution(output),
-               "calls": [{"function": call["function"], "args": call["args"]} for call in calls]}
-    finished = _run("hone-pilot-score-", _CODEC + _WORKER, json.dumps(payload).encode(), WORKER_SECONDS)
-    if finished is None or finished[0] != 0:
-        return 0.0
-    try:
-        frame = _frame(finished[1])
-        if set(frame) != {"results"} or type(frame["results"]) is not list or len(frame["results"]) != len(calls):
+    input_hash = grader_input_hash(output, reference_code, setup, tests)
+    invocations = []
+    encoded = output.encode()
+    original_output = {"text": encoded[:program.MAX_WIRE_BYTES].decode("utf-8", errors="ignore"),
+                       "bytes": len(encoded), "hash": digest(output),
+                       "truncated": len(encoded) > program.MAX_WIRE_BYTES}
+    with grader_journal(input_hash=input_hash, output_hash=digest(output), original_output=original_output):
+        if len(output.encode()) > program.MAX_WIRE_BYTES:
+            record_grader_outcome("wrong_answer", 0.0, reason="Source exceeded wire bound", input_hash=input_hash)
             return 0.0
-        for result in frame["results"]:
-            _canonical(result)
+        plan = prepare_plan(reference_code, setup, tests)
+        if not plan["gradeable"]:
+            record_grader_outcome("wrong_answer", 0.0, reason=plan["reason"], input_hash=input_hash)
+            return 0.0
+        calls = plan["calls"]
+        payload = {"code": program.extract_solution(output),
+                   "calls": [{"function": call["function"], "args": call["args"]} for call in calls]}
+        finished = _run("hone-pilot-score-", _CODEC + _WORKER, json.dumps(payload).encode(), WORKER_SECONDS)
+        results = _results(finished, len(calls), invocations, input_hash)
         if any(call["wrapper"] for call in calls):
             wrapped = _run("hone-pilot-wrapper-", _CODEC + _WRAPPER,
-                           json.dumps({"results": frame["results"], "wrappers": [call["wrapper"] for call in calls]}).encode(),
+                           json.dumps({"results": results, "wrappers": [call["wrapper"] for call in calls]}).encode(),
                            PLAN_SECONDS)
-            if wrapped is None or wrapped[0] != 0:
-                return 0.0
-            frame = _frame(wrapped[1])
-            if set(frame) != {"results"} or type(frame["results"]) is not list or len(frame["results"]) != len(calls):
-                return 0.0
-        for call, result in zip(calls, frame["results"]):
-            actual = _canonical(result)
-            if actual != _canonical(call["expected"]):
-                return 0.0
-    except (ValueError, TypeError, OverflowError, RecursionError):
-        return 0.0
-    return 1.0
+            results = _results(wrapped, len(calls), invocations, input_hash)
+        matched = all(_canonical(result) == _canonical(call["expected"]) for call, result in zip(calls, results))
+        score = 1.0 if matched else 0.0
+        record_grader_outcome("pass" if matched else "wrong_answer", score,
+                              invocations=invocations, input_hash=input_hash)
+        return score

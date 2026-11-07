@@ -5,7 +5,7 @@ import tempfile
 import unittest
 from unittest.mock import patch
 
-from pilot.admission import TRANSITION_9_HEAD, TRANSITION_10_HEAD, identity_source_hash, retained_transport_proof, transition9_baseline, transition_source
+from pilot.admission import TRANSITION_9_HEAD, TRANSITION_10_HEAD, TRANSITION_11_HEAD, identity_source_hash, retained_transport_proof, transition9_baseline, transition11_baseline, transition_source
 
 
 def sha(data):
@@ -245,6 +245,10 @@ class TransitionTests(unittest.TestCase):
             "files": {name: {"before": hashes["after"], "after": sha((self.root / name).read_bytes())}
                       for name, hashes in self.receipt9["files"].items()},
         }
+        snapshot["files"] = {name: text for name, text in snapshot["files"].items()
+                             if self.receipt10["files"][name]["before"] != self.receipt10["files"][name]["after"]}
+        self.snapshot10.write_text(json.dumps(snapshot))
+        self.receipt10["source_snapshot_hash"] = sha(self.snapshot10.read_bytes())
         (self.evidence / "source-transition-10.json").write_text(json.dumps(self.receipt10))
 
     def test_selection_transition_preserves_authenticated_admission_identity(self):
@@ -272,6 +276,73 @@ class TransitionTests(unittest.TestCase):
         (self.evidence / "source-transition-10.json").write_text(json.dumps(self.receipt10))
         with self.assertRaises(ValueError):
             identity_source_hash(self.root, "pilot/runtime.py")
+
+    def install_transition11(self):
+        grader = self.root / "pilot/verification.py"
+        grader.write_text("grader = 'legacy-zero'\n")
+        self.receipt["files"]["pilot/verification.py"] = {"before": None, "after": sha(grader.read_bytes())}
+        self.save()
+        self.install_transition10()
+        snapshot = {"source_head": TRANSITION_11_HEAD,
+                    "files": {name: (self.root / name).read_text() for name in self.receipt10["files"]}}
+        self.snapshot11 = self.evidence / "source-snapshot-11.json"
+        self.snapshot11.write_text(json.dumps(snapshot))
+        (self.evidence / "predeclaration-11.md").write_text("unscored infrastructure; final campaign rerun\n")
+        grader.write_text("grader = 'receipted-infrastructure'\n")
+        (self.root / "pilot/campaign.py").write_text("cap = 35000\n")
+        pin = patch("pilot.admission.TRANSITION_11_VERIFICATION_HASH", sha(grader.read_bytes()))
+        pin.start()
+        self.addCleanup(pin.stop)
+        self.receipt11 = {
+            "version": "pilot-grader-transition-v11", "source_head": TRANSITION_11_HEAD,
+            "prior_source_transition_hash": sha((self.evidence / "source-transition-10.json").read_bytes()),
+            "source_snapshot_hash": sha(self.snapshot11.read_bytes()),
+            "predeclaration_hash": sha((self.evidence / "predeclaration-11.md").read_bytes()),
+            "files": {name: {"before": hashes["after"], "after": sha((self.root / name).read_bytes())}
+                      for name, hashes in self.receipt10["files"].items()},
+        }
+        self.receipt11["files"]["pilot/campaign.py"] = {"before": None, "after": sha((self.root / "pilot/campaign.py").read_bytes())}
+        self.save11()
+
+    def save11(self):
+        (self.evidence / "source-transition-11.json").write_text(json.dumps(self.receipt11))
+
+    def test_grader_transition_preserves_admitted_identity_through_older_grants(self):
+        self.install_transition11()
+        self.assertEqual(transition_source(self.root, "pilot/runtime.py"), "old = 'answered'\n")
+        self.assertEqual(identity_source_hash(self.root, "pilot/runtime.py"), sha(b"new = 'refusal-aware'\n"))
+        self.assertEqual(transition11_baseline(self.root)["pilot/verification.py"], "grader = 'legacy-zero'\n")
+
+    def test_grader_transition_rejects_changed_live_source_and_campaign_cap(self):
+        self.install_transition11()
+        for name in ("pilot/verification.py", "pilot/campaign.py"):
+            with self.subTest(name=name):
+                path = self.root / name
+                original = path.read_bytes()
+                path.write_bytes(original + b" ")
+                with self.assertRaises(ValueError):
+                    transition_source(self.root, "pilot/runtime.py")
+                path.write_bytes(original)
+
+    def test_grader_transition_rejects_coordinated_core_and_receipt_change(self):
+        self.install_transition11()
+        grader = self.root / "pilot/verification.py"
+        grader.write_text("grader = 'infrastructure-is-zero'\n")
+        self.receipt11["files"]["pilot/verification.py"]["after"] = sha(grader.read_bytes())
+        self.save11()
+        with self.assertRaises(ValueError):
+            transition_source(self.root, "pilot/runtime.py")
+
+    def test_grader_transition_cannot_reseal_an_unadmitted_baseline(self):
+        self.install_transition11()
+        snapshot = json.loads(self.snapshot11.read_text())
+        snapshot["files"]["pilot/verification.py"] = "unadmitted baseline\n"
+        self.snapshot11.write_text(json.dumps(snapshot))
+        self.receipt11["source_snapshot_hash"] = sha(self.snapshot11.read_bytes())
+        self.receipt11["files"]["pilot/verification.py"]["before"] = sha(b"unadmitted baseline\n")
+        self.save11()
+        with self.assertRaises(ValueError):
+            transition_source(self.root, "pilot/runtime.py")
 
 
 if __name__ == "__main__":

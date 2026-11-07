@@ -16,7 +16,7 @@ import urllib.request
 
 from .program import MAX_WIRE_BYTES, ProgramError, SEED_PROGRAM, run_program
 from .runtime import BudgetExhausted, CallFailed, ProviderRefusal, call_scope, digest
-from .verification import PLAN_SECONDS, WORKER_SECONDS, plan_digest, prepare_plan, score_solution
+from .verification import PLAN_SECONDS, WORKER_SECONDS, grader_journal, plan_digest, prepare_plan, score_solution
 
 ARTIFACT_REV = "cbefbc1aa0f43dd39874ec4bf42211365dbda42e"
 ARTIFACT = f"https://raw.githubusercontent.com/gepa-ai/gepa-artifact/{ARTIFACT_REV}/gepa_artifact/benchmarks/IFBench/"
@@ -274,7 +274,8 @@ def score_output(task: Task, row: dict, output: str) -> float:
         return aime_score(output, row["answer"])
     if task.name == "ifbench":
         return float(_ifbench_result(task, row, output).score)
-    return score_solution(output, row["reference_code"], row["test_setup_code"], row["test_list"])
+    with grader_journal(task=task.name, row_id=row["id"], output_hash=digest(output)):
+        return score_solution(output, row["reference_code"], row["test_setup_code"], row["test_list"])
 
 def _response(call: Callable, messages: list[dict], field: str, traces: list[dict]) -> str:
     protocol = (
