@@ -25,3 +25,11 @@ The earlier `runtime-rerun-11a` proof stays immutable. This successor uses the s
 The launcher applies `Restart=no`, explicit CPU6 affinity, nice10, one-thread settings, `NLTK_DATA` and lane-local omp18.16.0. Admission checks the frozen OAuth-only Gmail x2 plus Purdue x1 route and existing admitted HoVer index without rebuilding. Wait for an owned unit using the unchanged `../runtime-rerun-11a/wait-unit.py` helper.
 
 Infrastructure rerun2 uses a fresh `.pilot-runs/pilot-seeds12-11-rerun2` root. Order is seed1 then seed2; each MBPP then HoVer; each Hone, official GEPA, plain. The 35,000-call hard cap and before-cell projection, 100GB free-disk floor, original per-cell caps and joined safety history remain enforced. No per-row retry, partial-cell restart, third campaign, final-test evaluation, seed beyond2 or merge is authorized. GitHub API failures are launch-gate communication failures, never pilot failures; retries wait at least two minutes.
+
+## Observed proof
+
+The native suite passed all 340 tests in 633.873 seconds. The thirteen-case standalone Docker smoke passed, including both unscored escaped-worker exits and the trusted pass and TypeError-zero results. `full-suite.txt`, `smoke-result.json` and `smoke-grader-outcomes.jsonl` retain the observations.
+
+Fresh unit `hone-predecl11b-admit-20261107T133114Z.service`, historical PID 1062246, passed in 442.631 seconds on implementation commit `9a0d6e5c4cf4934a92c8749863a70f49632d9ac2`. Its observed CPU affinity was 6 and nice 10. Frozen omp 18.16.0, the OAuth-only pool and route, all existing HoVer index hashes and the original ranking/noise admission matched. The original journal contains 1,808 pass and 2,650 wrong-answer outcomes. Model calls and gateway requests were zero.
+
+`admission.json` and `admission-grader-outcomes.jsonl` preserve the original bytes. The transient unit exited and was collected; its terminal `not-found` status is not the success proof. The admission's `passed=true` is written only after every check succeeds. No measured cell has started. CI and full exact-head cross-family READY remain required.
