@@ -1,0 +1,7 @@
+test_dispatch_executes_twelve_fresh_cells_and_keeps_old_safety_usage (pilot.test_rerun11.RerunTests.test_dispatch_executes_twelve_fresh_cells_and_keeps_old_safety_usage) ... ok
+test_historical_streak_stops_without_a_new_call (pilot.test_rerun11.RerunTests.test_historical_streak_stops_without_a_new_call) ... ok
+
+----------------------------------------------------------------------
+Ran 2 tests in 0.040s
+
+OK

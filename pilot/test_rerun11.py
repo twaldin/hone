@@ -8,7 +8,7 @@ from unittest.mock import patch
 
 from pilot.campaign import CampaignGuard, MATRIX, before_model_call
 
-RUNNER = Path(__file__).resolve().parents[1] / "evidence/pilot/runtime-rerun-11/run.py"
+RUNNER = Path(__file__).resolve().parents[1] / "evidence/pilot/runtime-rerun-11b/run.py"
 spec = importlib.util.spec_from_file_location("rerun11", RUNNER)
 runner = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(runner)
