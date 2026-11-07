@@ -639,7 +639,9 @@ os.close(reader)
 results = []
 frames = [{"results": [{"t": "int", "v": "0x3"}, {"t": "int", "v": "0x4"}]},
           {"failure": {"reason": "call 0 raised TypeError"}}]
-for frame in frames:
+real_waitid = os.waitid
+for hidden, frame in [(hidden, frame) for hidden in (False, True) for frame in frames]:
+    os.waitid = lambda kind, pid, flags: None if hidden and flags & os.WNOHANG else real_waitid(kind, pid, flags)
     expected = (json.dumps(frame) + "\n").encode()
     reader, writer = os.pipe()
     ready_reader, ready_writer = os.pipe()
@@ -671,7 +673,8 @@ for frame in frames:
     captured = _supervise(child, reader, deadline)
     status = os.waitpid(child, 0)[1]
     os.close(reader)
-    results.append({"frame": frame, "captured": captured.hex() if captured is not None else None,
+    results.append({"frame": frame, "hidden_exit": hidden,
+                    "captured": captured.hex() if captured is not None else None,
                     "exit": os.waitstatus_to_exitcode(status)})
 print(json.dumps(results), flush=True)
 '''
@@ -685,10 +688,110 @@ print(json.dumps(results), flush=True)
                            stderr=subprocess.DEVNULL, timeout=15, check=False)
         self.assertEqual(result.returncode, 0, result.stderr)
         for row in json.loads(result.stdout):
-            with self.subTest(frame=row["frame"]):
+            with self.subTest(frame=row["frame"], hidden_exit=row["hidden_exit"]):
                 self.assertEqual(row["exit"], 0)
                 self.assertIsNotNone(row["captured"])
                 self.assertEqual(verification._frame(bytes.fromhex(row["captured"])), row["frame"])
+
+    def test_completed_outer_invocation_survives_deadline_before_read_or_after_eof(self):
+        verification.prepare_plan(ADD, "", ADD_TESTS)
+        real_popen = subprocess.Popen
+        real_selector = verification.selectors.DefaultSelector
+        for boundary in ("queued", "after-eof"):
+            for output, expected in ((ADD, 1.0), ("def add(a,b): raise TypeError('candidate')", 0.0)):
+                with self.subTest(boundary=boundary, expected=expected):
+                    selected, ticks = [], []
+
+                    def completed(*args, **kwargs):
+                        process = real_popen(*args, **kwargs)
+                        process.wait(timeout=10)
+                        return process
+
+                    def selector():
+                        instance = real_selector()
+                        selected.append(instance)
+                        return instance
+
+                    def clock():
+                        ticks.append(None)
+                        if len(ticks) <= 2:
+                            return 0.0
+                        return 16.0 if boundary == "queued" or not selected[0].get_map() else 0.0
+
+                    with tempfile.TemporaryDirectory() as directory:
+                        journal = Path(directory) / "grader.jsonl"
+                        with patch.object(verification.subprocess, "Popen", completed), \
+                                patch.object(verification.selectors, "DefaultSelector", selector), \
+                                patch.object(verification.time, "monotonic", clock), \
+                                verification.grader_journal(journal):
+                            self.assertEqual(verification.score_solution(output, ADD, "", ADD_TESTS), expected)
+                        receipt = json.loads(journal.read_text().splitlines()[-1])
+                    verification.validate_grader_receipt(receipt)
+                    self.assertEqual((receipt["outcome"], receipt["score"]),
+                                     ("pass" if expected else "wrong_answer", expected))
+                    self.assertEqual(receipt["invocations"][-1]["exit_code"], 0)
+                    if not expected:
+                        self.assertIn("TypeError", receipt["reason"])
+
+    def test_competing_reader_cannot_block_supervisor_deadline_or_exit_drain(self):
+        functions = "\n\n".join(ast.get_source_segment(verification._WORKER, node)
+                               for node in ast.parse(verification._WORKER).body
+                               if isinstance(node, ast.FunctionDef) and node.name in ("_kill", "_supervise"))
+        fixture = r'''
+reader, writer = os.pipe()
+thief = os.open("/proc/self/fd/" + str(writer), os.O_RDONLY | os.O_NONBLOCK)
+ready_reader, ready_writer = os.pipe()
+child = os.fork()
+if child == 0:
+    os.setpgid(0, 0)
+    os.close(reader)
+    grandchild = os.fork()
+    if grandchild == 0:
+        os.close(ready_reader)
+        os.setsid()
+        os.write(ready_writer, b"R")
+        time.sleep(30)
+        os._exit(0)
+    os.close(ready_writer)
+    assert os.read(ready_reader, 1) == b"R"
+    os.write(writer, b"x")
+    if case == "live":
+        time.sleep(30)
+    os._exit(0)
+os.close(writer)
+os.close(ready_reader)
+os.close(ready_writer)
+real_select = select.select
+stolen = False
+def race(*args):
+    global stolen
+    ready = real_select(*args)
+    if ready[0] and not stolen:
+        assert os.read(thief, 8192) == b"x"
+        stolen = True
+    return ready
+select.select = race
+if case == "dead":
+    os.waitid(os.P_PID, child, os.WEXITED | os.WNOWAIT)
+captured = _supervise(child, reader, time.monotonic() + (0.2 if case == "live" else -1))
+_kill(child)
+os.waitpid(child, 0)
+print(json.dumps({"stolen": stolen, "captured": captured.hex() if captured is not None else None}), flush=True)
+'''
+        for case in ("live", "dead"):
+            with self.subTest(case=case):
+                script = "import os,select,signal,time,json\n_WIRE=262144\ncase=" + repr(case) + "\n" + functions + "\n" + fixture
+                name = "hone-reader-race-" + uuid.uuid4().hex
+                try:
+                    result = subprocess.run(program.docker_command(name) + ["-c", script],
+                                            capture_output=True, text=True, timeout=3)
+                finally:
+                    subprocess.run(["docker", "rm", "-f", name], stdout=subprocess.DEVNULL,
+                                   stderr=subprocess.DEVNULL, timeout=15, check=False)
+                self.assertEqual(result.returncode, 0, result.stderr)
+                observed = json.loads(result.stdout)
+                self.assertTrue(observed["stolen"])
+                self.assertEqual(observed["captured"], None if case == "live" else "")
 
     def test_docker_official_shapes_and_attacks(self):
         size = "import sys\ndef size(items):\n    return sys.getsizeof(items)\n"

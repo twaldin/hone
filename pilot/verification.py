@@ -422,23 +422,34 @@ def _kill(child):
 
 
 def _supervise(child, reader, deadline):
+    os.set_blocking(reader, False)
     data, eof = b"", False
     while len(data) <= _WIRE:
         remaining = deadline - time.monotonic()
-        if os.waitid(os.P_PID, child, os.WEXITED | os.WNOHANG | os.WNOWAIT) is not None:
+        finished = os.waitid(os.P_PID, child, os.WEXITED | os.WNOHANG | os.WNOWAIT)
+        if finished is None and remaining <= 0:
+            _kill(child)
+            finished = os.waitid(os.P_PID, child, os.WEXITED | os.WNOWAIT)
+            if finished.si_code == os.CLD_KILLED and finished.si_status == signal.SIGKILL:
+                return None
+        if finished is not None:
             _kill(child)
             while len(data) <= _WIRE and select.select([reader], [], [], 0)[0]:
-                chunk = os.read(reader, min(65536, _WIRE + 1 - len(data)))
+                try:
+                    chunk = os.read(reader, min(65536, _WIRE + 1 - len(data)))
+                except BlockingIOError:
+                    break
                 if not chunk:
                     break
                 data += chunk
             return data
-        if remaining <= 0:
-            return None
         if eof:
             time.sleep(min(remaining, 0.01))
         elif select.select([reader], [], [], min(remaining, 0.01))[0]:
-            chunk = os.read(reader, min(65536, _WIRE + 1 - len(data)))
+            try:
+                chunk = os.read(reader, min(65536, _WIRE + 1 - len(data)))
+            except BlockingIOError:
+                continue
             eof, data = not chunk, data + chunk
     return data
 
@@ -507,18 +518,28 @@ def _run(stage: str, payload: dict) -> InvocationResult:
             process = subprocess.Popen(program.docker_command(name) + ["-c", script], stdin=inputs,
                                        stdout=subprocess.PIPE, stderr=subprocess.PIPE)
         assert process.stdout is not None and process.stderr is not None
+        os.set_blocking(process.stdout.fileno(), False)
+        os.set_blocking(process.stderr.fileno(), False)
         selector.register(process.stdout, selectors.EVENT_READ)
         selector.register(process.stderr, selectors.EVENT_READ)
         deadline = time.monotonic() + seconds
         while selector.get_map():
             remaining = deadline - time.monotonic()
-            if remaining <= 0:
+            exit_code = process.poll()
+            if exit_code is None and remaining <= 0:
                 raise subprocess.TimeoutExpired("protected grader", seconds)
-            events = selector.select(remaining)
+            events = selector.select(0 if exit_code is not None else remaining)
             if not events:
+                if exit_code is not None:
+                    break
+                if process.poll() is not None:
+                    continue
                 raise subprocess.TimeoutExpired("protected grader", seconds)
             for key, _ in events:
-                chunk = os.read(key.fd, 8192)
+                try:
+                    chunk = os.read(key.fd, 8192)
+                except BlockingIOError:
+                    continue
                 if not chunk:
                     selector.unregister(key.fileobj)
                     continue
@@ -531,10 +552,12 @@ def _run(stage: str, payload: dict) -> InvocationResult:
             if error:
                 break
         if error is None:
-            remaining = deadline - time.monotonic()
-            if remaining <= 0:
-                raise subprocess.TimeoutExpired("protected grader", seconds)
-            exit_code = process.wait(timeout=remaining)
+            exit_code = process.poll()
+            if exit_code is None:
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    raise subprocess.TimeoutExpired("protected grader", seconds)
+                exit_code = process.wait(timeout=remaining)
             if exit_code != 0:
                 outcome, error = "nonzero_exit", "Invocation exited nonzero"
     except subprocess.TimeoutExpired:
