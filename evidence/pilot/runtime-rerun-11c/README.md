@@ -22,8 +22,16 @@ nice -n 10 taskset -c 6 env PYTHONPATH="$PWD" pilot/.venv/bin/python evidence/pi
 
 The three active scripts preserve the previous launcher, admission and driver, changing only runtime-directory references. Earlier evidence remains immutable. Fresh admission must bind the current source pins, lane-local omp 18.16.0, frozen OAuth-only Gmail x2/Purdue x1 pool and route, and the existing admitted HoVer index without rebuilding.
 
-Use `launch.py admit --unit UNIQUE_NAME --out FRESH_DIRECTORY`, then the unchanged `../runtime-rerun-11a/wait-unit.py` to wait for that owned unit without polling. The launch applies Restart=no, actual CPU6 affinity, nice10, one-thread settings and explicit NLTK_DATA. The admission's passed=true, not defaults returned after transient-unit collection, is the success proof.
+Use `launch.py admit --unit UNIQUE_NAME --out FRESH_DIRECTORY`, then the unchanged `../runtime-rerun-11a/wait-unit.py` to wait for that owned unit without polling. The launch applies `Restart=no`, actual CPU 6 affinity, nice 10, one-thread settings and explicit `NLTK_DATA`. The admission's `passed=true`, not defaults returned after transient-unit collection, is the success proof.
 
-After green CI and full exact-head cross-family READY, `.pilot-state/launch-11.json` binds this admission and final head. `launch.py run --unit UNIQUE_NAME` executes a fresh `.pilot-runs/pilot-seeds12-11-rerun2` matrix: seed1 then2, each MBPP then HoVer, each Hone, official GEPA, plain. The original safety history and caps stay joined; no per-row retry, partial-cell restart or third campaign is allowed. Enforce 35000 logical calls and before-cell completion projection, and at least100GB free disk. Final-test evaluation, seeds beyond2, global runtime/broker/config changes, home GUI, Deadlock and merge remain forbidden.
+After green CI and full exact-head cross-family READY, `.pilot-state/launch-11.json` binds this admission and final head. `launch.py run --unit UNIQUE_NAME` executes a fresh `.pilot-runs/pilot-seeds12-11-rerun2` matrix: seed 1 then 2, each MBPP then HoVer, each Hone, official GEPA, plain. The original safety history and caps stay joined; no per-row retry, partial-cell restart or third campaign is allowed. Enforce 35,000 logical calls and before-cell completion projection, and at least 100 GB free disk. Final-test evaluation, seeds beyond 2, global runtime/broker/config changes, home GUI, Deadlock and merge remain forbidden.
 
-GitHub communication timeouts use at least120-second exponential backoff and never enter pilot failure history. They cannot bypass the before-search gates.
+GitHub communication timeouts use at least 120-second exponential backoff and never enter pilot failure history. They cannot bypass the before-search gates.
+
+## Observed proof
+
+All 341 native tests passed in 310.675 seconds. The thirteen-case standalone Docker smoke passed, including live timeout zero, real exited-worker infrastructure and trusted escaped-worker pass/error outcomes. `full-suite.txt`, `smoke-result.json` and `smoke-grader-outcomes.jsonl` retain the observations.
+
+Fresh unit `hone-predecl11c-admit-20261107T142050Z.service`, historical PID 1420511, passed in 512.572 seconds on implementation commit `b21f535b78e697c428a07a924795c395825153cf`. Actual affinity was CPU 6 and nice 10. Frozen omp 18.16.0, the OAuth-only pool and route, existing HoVer index hashes and retained ranking/noise admission matched. The original journal contains 1,808 pass and 2,650 wrong-answer outcomes. Model calls and gateway requests were zero.
+
+`admission.json` and `admission-grader-outcomes.jsonl` preserve the original bytes. The unit exited and was collected. Its terminal `not-found` defaults are not the success proof; the admission's `passed=true` is written only after all checks succeed. No measured cell has started. Final-head CI and full cross-family READY remain required.
