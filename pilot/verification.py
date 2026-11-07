@@ -427,10 +427,10 @@ def _trace(request, child, call=ctypes.CDLL(None).ptrace):
 
 
 def _deadline_exit(child):
-    seize, interrupt, event_stop = 0x4206, 0x4207, 128
+    seize, interrupt = 0x4206, 0x4207
     if _trace(seize, child) == 0 and _trace(interrupt, child) == 0:
         finished = os.waitid(os.P_PID, child, os.WEXITED | os.WSTOPPED | os.WNOWAIT)
-        if finished.si_code == os.CLD_TRAPPED and finished.si_status >> 8 == event_stop:
+        if finished.si_code == os.CLD_TRAPPED:
             _kill(child)
             return None
         if finished.si_code in (os.CLD_EXITED, os.CLD_KILLED, os.CLD_DUMPED):

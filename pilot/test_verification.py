@@ -767,6 +767,34 @@ os.waitid = lambda kind, pid, flags: None if flags & os.WNOHANG else _real_waiti
             self.assertEqual((receipt["outcome"], receipt["score"]), ("nonzero_exit", None))
             self.assertEqual(receipt["invocations"][-1]["exit_code"], 128 + signal.SIGKILL)
 
+    def test_live_signal_delivery_stop_retains_trusted_timeout_zero(self):
+        verification.prepare_plan(ADD, "", ADD_TESTS)
+        prefix, script = verification._STAGES["worker"]
+        signal_stop = """import ctypes, os, signal
+_real_cdll = ctypes.CDLL
+class _SignalStopLibrary:
+    def __init__(self, *args, **kwargs):
+        self.library = _real_cdll(*args, **kwargs)
+    def ptrace(self, request, child, *args):
+        result = self.library.ptrace(request, child, *args)
+        if request.value == 0x4206 and result == 0:
+            os.kill(child.value, signal.SIGWINCH)
+            stopped = os.waitid(os.P_PID, child.value, os.WSTOPPED | os.WNOWAIT)
+            assert stopped.si_code == os.CLD_TRAPPED and stopped.si_status == signal.SIGWINCH
+        return result
+ctypes.CDLL = _SignalStopLibrary
+"""
+        with patch.dict(verification._STAGES, worker=(prefix, signal_stop + script)), \
+                tempfile.TemporaryDirectory() as directory:
+            journal = Path(directory) / "grader.jsonl"
+            with verification.grader_journal(journal):
+                self.assertEqual(verification.score_solution("while True: pass", ADD, "", ADD_TESTS), 0.0)
+            receipt = json.loads(journal.read_text().splitlines()[-1])
+            verification.validate_grader_receipt(receipt)
+            self.assertEqual((receipt["outcome"], receipt["score"]), ("wrong_answer", 0.0))
+            invocation = receipt["invocations"][-1]
+            self.assertEqual((invocation["outcome"], invocation["exit_code"]), ("completed", 0))
+
     def test_competing_reader_cannot_block_supervisor_deadline_or_exit_drain(self):
         functions = "\n\n".join(ast.get_source_segment(verification._WORKER, node)
                                for node in ast.parse(verification._WORKER).body

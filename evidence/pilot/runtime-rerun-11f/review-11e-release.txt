@@ -1,0 +1,64 @@
+I'm withholding READY on `99a6881`: one grading-boundary bug and one missing piece of evidence must be fixed before the first measured search call.
+
+**Verdict: NOT_READY**
+
+- **Resolved model:** `anthropic/claude-opus-5-5`. The author model is `openai-codex/gpt-6.1-sol`, so this is a cross-family review.
+- **Exact head:** `99a6881883aa31cc90993a922e05bfdd2fdbeb49`.
+- **Mode:** read-only. I ran no tests, builds or containers, made no edits and posted nothing.
+- **Defect class:** finding 1 is in the same authorized worker-I/O exit/deadline class, so it is a fix, not a handback. Finding 2 is evidence retention only. Neither one is a policy question or a new defect class.
+
+**What this change does:** When a candidate program runs past its 10-second limit, the trusted supervisor inside the container no longer decides "timeout" just because the program later died from SIGKILL. It now pauses its own child with Linux `ptrace` (seize, then interrupt) to see whether the child is still alive. On the host side, the code that runs `docker run` (the outer invocation) now kills it at the deadline, then waits for its real exit status before deciding. It reports a timeout only if that status shows the kill ended it. The head also adds a fresh 11e source pin, a zero-call admission and the evidence bundle.
+
+## Must fix
+
+1. **A candidate that is still running can be scored as unscored infrastructure instead of a timeout zero** (`pilot/verification.py:433`)
+   - **What this is:** At the deadline, `_deadline_exit` attaches to the child and asks it to stop. If the child reports a stop (`CLD_TRAPPED`), it is alive and gets the trusted own-overrun zero.
+   - **Problem:** The code only accepts one kind of stop: `si_status >> 8 == 128` (the interrupt stop, `PTRACE_EVENT_STOP`). Linux says the first stop after an interrupt "might not be PTRACE_EVENT_STOP" (kernel v6.8 `kernel/ptrace.c:1114-1138`).
+     - If a signal arrives between the seize and the interrupt, the child first stops for that signal instead. Examples: a candidate timer (`setitimer` plus a handler), a child process exiting (SIGCHLD), or an ignored signal such as SIGWINCH, because a traced child stops even for ignored signals.
+     - The code then falls through to kill the child, which yields exit 137 and `nonzero_exit` with score None.
+     - Any stop seen after the seize proves the candidate was alive after its deadline, so this is a candidate's own overrun. Tim's direction says that is WRONG ANSWER (0), not infrastructure.
+     - Stakes: MBPP/Hone is cell 1, and the joined history ends with the ENOSPC infrastructure-failure row. One false infrastructure result there trips `consecutive-infrastructure-failures` (`pilot/__main__.py:974`) and ends rerun 2, which is the last allowed rerun.
+   - **Fix:** On line 433, use `if finished.si_code == os.CLD_TRAPPED:`, then delete the unused `event_stop` constant.
+     - Add a Docker regression in the style of the existing fixtures. Wrap `_trace` so that after the seize it sends SIGWINCH or SIGUSR1 to a looping child and pauses briefly before the interrupt. Assert that `_supervise` returns None (trusted timeout). Today it returns exit 137.
+     - Update `docs/pilot.md:47` and the successor README, which say only an interrupt stop proves liveness.
+     - Refresh the verification pin (`admission.py:152`, `source-transition-11.json`), the fresh admission and the new exact-head CI and READY.
+   - **If we skip it:** Candidate behavior can turn its own timeout into an infrastructure abort that stops the final campaign.
+
+2. **The full native suite proof is not in the bundle** (`evidence/pilot/runtime-rerun-11e/full-suite.txt`, cited by `README.md:35,39` and `verification.json:39`)
+   - **What this is:** The brief requires full-native-suite evidence. The README says "All 344 native tests passed" and "Original proof … bytes are retained".
+   - **Problem:** The committed `full-suite.txt` is 407 bytes and contains only a tool error ("Unbounded raw read blocked for artifact://727"). `bundle.json` seals that error string. The original session log (`…/727.bash.log`, 112,354 B) does end `Ran 344 tests in 454.900s / OK` and includes the three new Docker tests. So the run happened, but its record was not kept.
+   - **Fix:** Commit the real transcript bytes.
+     - If finding 1 is fixed, the next runtime directory must keep the real suite output. Its README should say that 11e's `full-suite.txt` holds only a tool error, because earlier bundles stay immutable.
+     - If 11e stays active, copy the original log into `full-suite.txt` and reseal. `admission.json` does not hash this file, so it stays valid. A new head still needs fresh CI and READY, because `run.py:410` gates on the exact head.
+   - **If we skip it:** The release proof claims a retained native suite that the bundle does not contain.
+
+## Checked and consistent
+- **Source pins:**
+  - All 21 `execution_source_hashes`, the index hashes and the predeclaration, transition and journal hashes in 11e `admission.json` match the files at HEAD.
+  - The 11e `bundle.json` matches its file list and hashes.
+  - All 76 evidence bundles in the repo verify.
+  - `source-transition-11.json`: every "after" hash matches HEAD and every "before" hash matches `b453995` (`campaign.py` is new).
+  - `TRANSITION_11_VERIFICATION_HASH` equals the current `verification.py` hash.
+- **Admission:**
+  - The committed `admission.json` and journal are byte-identical to the unit output in `.pilot-state/`.
+  - `passed=true`, 0 model calls, 0 gateway requests, CPU 6, nice 10, base head `9d41f2e`.
+  - 1,808 pass and 2,650 wrong-answer outcomes with no infrastructure outcomes, the same counts as 11c/11d. The receipt source hash equals the current `verification.py`+`program.py` hash.
+- **Regression transcripts:** `before.txt` records 4 errors and 1 failure; `after-regression.txt` records 4 passing tests. The 13 smoke receipts use the current source. The candidate timeout scores 0 through the new ptrace path in 10.22 s, and exits, missing frames and escaped descendants stay unscored.
+- **Outer `expire()` (`verification.py:532-537`):** It kills, then waits. A `-9` status gives `timeout`; any earlier real exit keeps its code and is followed by a zero-wait drain.
+  - This fixes the previous host-side finding, and the regression hides `poll()` until `kill()`/`wait()` is called.
+  - The no-capability claim holds: `program.py` is unchanged and still uses `--cap-drop ALL` and `no-new-privileges`. The host has Yama `ptrace_scope=1`, and the trace probe succeeded in the frozen image.
+- **Active scripts:** 11e `launch.py`, `run.py` and `admit.py` differ from 11d only in the directory path; `smoke.py` is identical. `test_rerun11.py` points at the 11e `run.py`.
+- **Campaign rules:**
+  - Order is seed 1 then 2, MBPP then HoVer, Hone, official GEPA, plain, enforced through `MATRIX` and `before_cell`.
+  - The hard cap is 35,000 calls with a before-cell projection; the forecasts sum to 33,438.
+  - The 100 GB disk floor is checked at launch, before each cell, before each model call and before grading.
+  - Safety history is joined: 7 historical rows plus the ENOSPC row, including pause time.
+  - There is no restart: an existing root or launch receipt is refused, `Restart=no` is checked, and the exact-head gates and pins are re-checked before every cell.
+  - `.pilot-runs/pilot-seeds12-11-rerun2` does not exist, so no measured cell has started.
+- **Selection and GEPA:** Hone/plain score each artifact once per cell, and Hone gate-passers are scored first. `search.py` matches the rerun-10 pin, and official GEPA keeps `cache_evaluation=False`. The reporter keeps seed 0 separate.
+- **Predeclaration 11:** committed at `b453995` and amended at `3d9da07` before any search.
+- **CI:** "Pilot unittest and Docker" is SUCCESS on `99a6881`. The first GitHub read timed out; I retried more than 120 s later.
+
+Verdict: fix 1 and 2 first.
+Lean: about −1 line possible (delete `event_stop`).
+Not checked: real Docker timing and the natural frequency of signals at the deadline. Finding 1 rests on kernel source, not a reproduction. The parallel I/O audit (IOAudit11e) independently confirmed both findings.
