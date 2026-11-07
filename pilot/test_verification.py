@@ -590,6 +590,44 @@ class DockerVerificationTests(unittest.TestCase):
     def setUp(self):
         self.enterContext(patch.dict(verification._PLANS, clear=True))
 
+    def test_exited_worker_with_escaped_descendant_preserves_verdict(self):
+        spawn = '''import os, time
+reader, writer = os.pipe()
+child = os.fork()
+if child == 0:
+    os.close(reader)
+    os.setsid()
+    os.write(writer, b'R')
+    os.close(writer)
+    time.sleep(30)
+    os._exit(0)
+os.close(writer)
+assert os.read(reader, 1) == b'R'
+os.close(reader)
+'''
+        cases = [("exit7", "os._exit(7)", "nonzero_exit", None),
+                 ("exit0", "os._exit(0)", "frame_failure", None),
+                 ("pass", ADD, "pass", 1.0),
+                 ("exception", "def add(a,b): raise TypeError('candidate')", "wrong_answer", 0.0)]
+        with tempfile.TemporaryDirectory() as directory:
+            for name, ending, expected_outcome, expected_score in cases:
+                with self.subTest(name):
+                    journal = Path(directory) / (name + ".jsonl")
+                    with verification.grader_journal(journal):
+                        if expected_score is None:
+                            with self.assertRaises(verification.GraderInfrastructureError) as caught:
+                                verification.score_solution(spawn + ending, ADD, "", ADD_TESTS)
+                            receipt = caught.exception.receipt
+                        else:
+                            self.assertEqual(verification.score_solution(spawn + ending, ADD, "", ADD_TESTS), expected_score)
+                            receipt = json.loads(journal.read_text().splitlines()[-1])
+                    verification.validate_grader_receipt(receipt)
+                    self.assertEqual((receipt["outcome"], receipt["score"]), (expected_outcome, expected_score))
+                    if name == "exit7":
+                        self.assertEqual(receipt["invocations"][-1]["exit_code"], 7)
+                    elif name == "exception":
+                        self.assertIn("TypeError", receipt["reason"])
+
     def test_docker_official_shapes_and_attacks(self):
         size = "import sys\ndef size(items):\n    return sys.getsizeof(items)\n"
         size_tests = ["assert size((1, 'a')) == sys.getsizeof((1, 'a'))"]

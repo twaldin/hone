@@ -425,12 +425,12 @@ def _supervise(child, reader, deadline):
     data, eof, exited = b"", False, False
     while not (eof and exited) and len(data) <= _WIRE:
         remaining = deadline - time.monotonic()
-        if remaining <= 0:
-            return None
         if not exited and os.waitid(os.P_PID, child, os.WEXITED | os.WNOHANG | os.WNOWAIT) is not None:
             exited = True
             # Stray descendants must not hold the frame open.
             _kill(child)
+        if remaining <= 0:
+            return data if exited else None
         if eof:
             time.sleep(min(remaining, 0.01))
         elif select.select([reader], [], [], min(remaining, 0.01))[0]:
