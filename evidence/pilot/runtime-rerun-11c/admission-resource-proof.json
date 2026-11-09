@@ -1,0 +1,10 @@
+{
+  "unit": "hone-predecl11c-admit-20261107T142050Z.service",
+  "pid": 1420511,
+  "observed_affinity": [
+    6
+  ],
+  "observed_nice": 10,
+  "source": "Direct OS queries of the recorded owned admission main PID",
+  "model_calls": 0
+}

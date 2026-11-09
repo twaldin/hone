@@ -37,32 +37,23 @@ def _diagnose(row: dict, plan: dict) -> dict:
     calls = plan["calls"]
     payload = {"code": program.extract_solution(row["reference_code"]),
                "calls": [{"function": call["function"], "args": call["args"]} for call in calls]}
-    finished = verification._run(
-        "hone-reference-audit-", verification._CODEC + verification._WORKER,
-        json.dumps(payload).encode(), verification.WORKER_SECONDS,
-    )
-    if finished is None or finished[0] != 0:
-        return {"status": "worker_failure", "returncode": None if finished is None else finished[0]}
+    invocations = []
+    input_hash = verification.grader_input_hash(row["reference_code"], row["reference_code"],
+                                                row["test_setup_code"], row["test_list"])
     try:
-        frame = verification._frame(finished[1])
-        if set(frame) != {"results"} or type(frame["results"]) is not list or len(frame["results"]) != len(calls):
-            return {"status": "invalid_result_frame"}
-        for result in frame["results"]:
-            verification._canonical(result)
+        verdict = verification._results(verification._run("worker", payload), len(calls), invocations, input_hash)
+        if verdict.results is None:
+            return {"status": "candidate_failure", "stage": "worker", "failure": verdict.failure}
+        results = verdict.results
         if any(call["wrapper"] for call in calls):
-            wrapped = verification._run(
-                "hone-reference-audit-wrapper-", verification._CODEC + verification._WRAPPER,
-                json.dumps({"results": frame["results"],
-                            "wrappers": [call["wrapper"] for call in calls]}).encode(),
-                verification.PLAN_SECONDS,
-            )
-            if wrapped is None or wrapped[0] != 0:
-                return {"status": "wrapper_failure", "returncode": None if wrapped is None else wrapped[0]}
-            frame = verification._frame(wrapped[1])
-            if set(frame) != {"results"} or type(frame["results"]) is not list or len(frame["results"]) != len(calls):
-                return {"status": "invalid_wrapper_frame"}
+            wrapped = verification._run("wrapper", {"results": results,
+                                        "wrappers": [call["wrapper"] for call in calls]})
+            verdict = verification._results(wrapped, len(calls), invocations, input_hash)
+            if verdict.results is None:
+                return {"status": "candidate_failure", "stage": "wrapper", "failure": verdict.failure}
+            results = verdict.results
         mismatches = []
-        for index, (call, result) in enumerate(zip(calls, frame["results"], strict=True)):
+        for index, (call, result) in enumerate(zip(calls, results, strict=True)):
             actual = verification._canonical(result)
             expected = verification._canonical(call["expected"])
             if actual != expected:
@@ -144,4 +135,5 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Audit all MBPP development references with the final verifier; no model calls.")
     parser.add_argument("--out", type=Path, required=True)
     args = parser.parse_args()
-    audit(args.out)
+    with verification.grader_journal(args.out / "grader-outcomes.jsonl", purpose="reference-audit"):
+        audit(args.out)

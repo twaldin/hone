@@ -1,0 +1,22 @@
+{
+  "schema": "pilot-recorded-attempt-accounting-v10",
+  "producer_attempts_path": "raw/attempts.json",
+  "producer_attempts_file_hash": "sha256:6ce03d6b749cc0c694cc86fcb280f07c6d38a401c28a3883060ab98310305d23",
+  "producer_attempt_rows": 7,
+  "post_abort_derived_row": "report-inputs/hover/1/plain/result.json",
+  "total_attempt_rows_with_derived_failure": 8,
+  "recorded_calls": 16592,
+  "actual_model_invocations_at_least": 16593,
+  "recorded_reported_tokens": 12035285,
+  "recorded_usd_equivalent": 52.61257500000002,
+  "recorded_refusals": 0,
+  "recorded_hidden_attempts": 1,
+  "recorded_usage_missing_calls": 0,
+  "unpersisted_response_outcome_and_usage": "unknown; may be refusal; no retry",
+  "counts_and_usage_are_lower_bounds": true,
+  "known_pause_prefix_seconds": 0.0,
+  "exact_pause_total": null,
+  "original_two_startup_aborts_known_poll_seconds": 5.0951831340789795,
+  "consecutive_infrastructure_failures_at_exit": 1,
+  "automatic_restart": false
+}

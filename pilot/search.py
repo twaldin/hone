@@ -9,7 +9,7 @@ import statistics
 import subprocess
 from typing import Callable
 
-from pilot.runtime import BudgetExhausted, CallFailed, ProviderRefusal, LIMITS, append_json
+from pilot.runtime import BudgetExhausted, CallFailed, ProviderRefusal, LIMITS, append_json, digest
 from pilot.tasks import Task
 
 GEPA_COMMIT = "8c7b697a71977980afc7537dac0881e784eef99f"
@@ -174,8 +174,15 @@ def run_search(method: str, task: Task, call: Callable, evaluate: Callable,
 
 
 def _loop(method, task, call, evaluate, available, noise, seed, limit, state, retain):
-    initial = evaluate(task.seed_candidate, task.selection)
-    retain(task.seed_candidate, _mean(initial, task.selection))
+    selection_vectors: dict[str, tuple[float, ...]] = {}
+    def selection_score(candidate):
+        key = digest(candidate)
+        if key not in selection_vectors:
+            measured = evaluate(candidate, task.selection)
+            _mean(measured, task.selection)
+            selection_vectors[key] = tuple(measured["scores"])
+        return statistics.fmean(selection_vectors[key])
+    retain(task.seed_candidate, selection_score(task.seed_candidate))
     keys = set(task.seed_candidate)
     state["policy"] = {"selection": "strict aggregate improvement"}
     if method == "hone":
@@ -244,12 +251,9 @@ def _loop(method, task, call, evaluate, available, noise, seed, limit, state, re
             if not passed:
                 event["accepted"] = False
                 continue
-            refreshed = evaluate(parent, task.selection)
-            parent_score = _mean(refreshed, task.selection)
-            incumbent_score = parent_score
-            if parent != state["candidate"]:
-                incumbent_score = _mean(evaluate(state["candidate"], task.selection), task.selection)
-            child_score = _mean(evaluate(child, task.selection), task.selection)
+            child_score = selection_score(child)
+            parent_score = selection_score(parent)
+            incumbent_score = selection_score(state["candidate"])
             projected, projection = _project_noise(noise, len(task.selection))
             gate = _policy(seed, episode, parent_score, child_score, projected)["gate"]
             incumbent_gate = _policy(seed, episode, incumbent_score, child_score, projected)["gate"]
@@ -257,7 +261,7 @@ def _loop(method, task, call, evaluate, available, noise, seed, limit, state, re
                          selection_noise_projection=projection, selection_calibration=projected["calibration"])
             accepted = error is None and gate["passed"] and incumbent_gate["passed"]
         else:
-            child_score = _mean(evaluate(child, task.selection), task.selection)
+            child_score = selection_score(child)
             accepted = error is None and child_score > state["selection_score"]
         event.update(selection_score=child_score, accepted=accepted)
         if accepted:

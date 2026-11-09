@@ -1,0 +1,10 @@
+{
+  "source": "artifact://727",
+  "bytes": 112354,
+  "sha256": "bf4c1fbcef024ca5724cfe6610580946a65b236094429dadd3f9a2294a745371",
+  "same_as_original": true,
+  "tests": 344,
+  "seconds": 454.9,
+  "passed": true,
+  "recovery": "Bounded raw reads with stripped range terminators restored; full bytes authenticated against sha256sum of original artifact; no tests rerun for recovery."
+}

@@ -1,0 +1,32 @@
+What this change does: It preserves queued worker frames after observing exit, without waiting for descendants to close the pipe. The goal is to retain completed verdicts without extending candidate execution time.
+
+- SHA: `28f723739fcc39f1e509aca992454c5e73604256`
+- Model: `openai-codex/gpt-6-astra`
+- Scoped verdict: **NOT_READY**
+
+## Must fix
+
+1. **Outer deadline checks still discard completed verdicts** (`pilot/verification.py:513-519,533-541`)
+   - **What this is:** `_run` receives the trusted supervisor's output and exit status.
+   - **Problem:** [INFERENCE, code-traced] The supervisor and Docker process can finish before the deadline, then the host reader resumes afterward. The deadline check rejects queued output before reading it. Even when the complete frame and both EOFs were already consumed, the second deadline check rejects an already-exited process. `_results` consequently raises infrastructure instead of returning the completed pass or candidate-failure verdict.
+   - **Fix:** Observe exit before declaring timeout, drain immediately available output within the existing combined bound, and preserve an already-observed exit after EOF. Add consumer-level Docker regressions asserting scores and receipts for both schedules.
+   - **If we skip it:** A completed evaluation can still abort ordinary grading. The new extracted-supervisor regression does not exercise this outer boundary.
+   - **Defect class:** Same-class actionable worker-I/O exit/deadline bug. No policy handback.
+
+2. **The “nonblocking” drain still performs blocking reads** (`pilot/verification.py:430-441,448-456`)
+   - **What this is:** `os.pipe()` creates a blocking reader. Both supervisor branches call `os.read` after a separate readiness check.
+   - **Problem:** [INFERENCE, code-traced Linux interleaving] Candidate code can reopen its inherited writer through `/proc/self/fd/<writer>` as a reader because it owns the pipe. A competing descendant can consume queued bytes between `select` and `read`, leaving the supervisor blocked while a writer remains open. A live candidate can then run beyond ten seconds; if it emits its result and exits before outer timeout, the exit-first branch can accept that late result. An escaped competing reader can also block the post-exit drain.
+   - **Fix:** Make the supervisor reader genuinely nonblocking and handle `BlockingIOError` in both branches. Add a controlled competing-reader regression that asserts deadline enforcement and bounded completion.
+   - **If we skip it:** Candidate-controlled pipe activity can suspend deadline enforcement. The byte limit alone does not bound a blocking read.
+   - **Defect class:** Same-class actionable worker-I/O readiness/deadline bug. No policy handback.
+   - **Supporting semantics:** [Linux pipe implementation](https://github.com/torvalds/linux/blob/v6.8/fs/pipe.c) and [`/proc/pid/fd` documentation](https://man7.org/linux/man-pages/man5/proc_pid_fd.5.html).
+
+## Evidence assessed
+
+Read the inner supervisor, outer invocation, frame validation, scoring callers, receipt consumers, source pins, Docker regressions and retained proof. The transcripts report 341 passing tests; the smoke journal retains thirteen outcomes; admission retains passing controls and trusted TypeError zeros for MBPP 640/847. Those observations do not cover the two schedules above.
+
+“Test Behavior, Not Implementation” shaped the recommendation to assert consumer-visible scores and receipts, rather than only extracted-helper output.
+
+**Verdict: Fix 1 and 2 first.**
+
+No tests, builds or formatters were executed. No repository files were edited. Findings describe concrete interleavings, not observed campaign frequency.

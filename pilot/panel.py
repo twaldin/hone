@@ -16,10 +16,35 @@ def panel_tasks(ifbench_status: str) -> tuple[str, ...]:
     raise ValueError("IFBench requires a measured pass or gate failure; missing/infrastructure outcomes abort")
 
 
+def replay_control_record(task, rows: list[dict], record: dict, identity: dict) -> bool:
+    from functools import partial
+    from .controls import negative_probe, validate_unscored_rejection, zero_arms
+    from .tasks import score_output
+    negative = record["control"] in zero_arms(task.name)
+    unscored = record.get("unscored_receipts", {})
+    if (type(unscored) is not dict or (unscored and not negative)
+            or set(unscored) != {row["id"] for row, score in zip(rows, record["scores"], strict=True) if score is None}):
+        return False
+    for row, output, stored in zip(rows, record["outputs"], record["scores"], strict=True):
+        if not negative:
+            if score_output(task, row, output) != stored:
+                return False
+            continue
+        if stored is None:
+            validate_unscored_rejection(unscored[row["id"]], row, output, identity, arm=record["control"])
+        current, _ = negative_probe(partial(score_output, task, row, output), row, output, identity, arm=record["control"])
+        if None in (current, stored):
+            if any(value not in (None, 0) for value in (current, stored)):
+                return False
+        elif current != stored:
+            return False
+    return True
+
+
 def validate_measurement(local, task, identity, proof, *, allow_failure=False):
     from . import __main__ as cli
-    from .controls import artifacts, representative_rows, CONTROL_SEED, P_CONTROL_SEED, IFBENCH_CONTROL_SEED, PREVIOUS_MBPP_ROWS
-    from .tasks import score_output
+    from .controls import (artifacts, ranking_passed, representative_rows, task_mean, CONTROL_SEED, P_CONTROL_SEED,
+                           IFBENCH_CONTROL_SEED, PREVIOUS_MBPP_ROWS)
     load = lambda name: json.loads((local / name).read_text())
     cli.verify_bundle(local.parent)
     members = json.loads((local.parent / "bundle.json").read_text())["files"]
@@ -50,8 +75,7 @@ def validate_measurement(local, task, identity, proof, *, allow_failure=False):
     for record in evaluations:
         key = (record["trial"], record["arm"]) if record["control"] == "unchanged" else record["control"]
         if (key in records or record["row_ids"] != ids or len(record["outputs"]) != len(rows)
-                or len(record["scores"]) != len(rows)
-                or record["scores"] != [score_output(task, row, output) for row, output in zip(rows, record["outputs"], strict=True)]):
+                or len(record["scores"]) != len(rows) or not replay_control_record(task, rows, record, identity)):
             raise ValueError("Raw control outputs, scores or cohort disagree")
         records[key] = record
     if dynamic:
@@ -78,7 +102,8 @@ def validate_measurement(local, task, identity, proof, *, allow_failure=False):
     means = {}
     for name, measured in control["controls"].items():
         raw = records.get(name)
-        if raw is None or any(measured[field] != raw[field] for field in ("scores", "outputs")) or measured["mean"] != statistics.fmean(raw["scores"]):
+        if (raw is None or any(measured.get(field) != raw.get(field) for field in ("scores", "outputs", "unscored_receipts"))
+                or measured["mean"] != task_mean(raw["scores"])):
             raise ValueError("Control summary differs from raw evaluations")
         if dynamic and (measured.get("refusals") != len(raw.get("refusals", []))
                         or measured.get("refusals_by_row") != dict(Counter(raw.get("refusals", [])))):
@@ -91,8 +116,7 @@ def validate_measurement(local, task, identity, proof, *, allow_failure=False):
     names = {"known-improved", "naive", "broken", "shortcut"}
     if set(means) != names:
         raise ValueError("Four control measurements are required")
-    ranking = (means["known-improved"] > means["naive"] > max(means["broken"], means["shortcut"])
-               and means["broken"] == 0 and (task.name != "mbpp" or means["shortcut"] == 0))
+    ranking = ranking_passed(task.name, control["controls"])
     if control.get("ranking_passed") is not ranking:
         raise ValueError("Ranking flag disagrees with raw measurements")
     if not ranking:

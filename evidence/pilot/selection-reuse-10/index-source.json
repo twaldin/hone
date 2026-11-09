@@ -1,0 +1,19 @@
+{
+  "schema": "pilot-index-reuse-v10",
+  "source": "/home/tim/worktrees/hone/hone-hone-pilot-seed0-1/.pilot-cache/hover-retrieval",
+  "sha256": {
+    "bm25s_retriever/data.csc.index.npy": "66574350c13aaab3e0573d8db5331852b185970de0c1fdf2b151e38a5059da2d",
+    "bm25s_retriever/indices.csc.index.npy": "ade1a43143a12df60712e44001de789f5e8df6629c3673f988810c49bc6770a1",
+    "bm25s_retriever/indptr.csc.index.npy": "6ded75207cbfaf340339b1e8d9ddad0a1829975460df87a469e137fd672c19a5",
+    "bm25s_retriever/params.index.json": "7d61f293719da341d547cc5b6c991d200b5b58aa7890dea8f3b6401fe5c14a3c",
+    "bm25s_retriever/vocab.index.json": "788eb76beab87d1c3511485f23759582bf98f5295d22d6865d7bf85b5b447bbc",
+    "index-receipt.json": "97db00c55fe303e12c69e9941ecaa64e2b1849a5902ff28a58adfc96372e177f",
+    "wiki.abstracts.2017.jsonl": "c006527c7c600f85ed594afa36d2a34d0598996405f560474227738342463724",
+    "wiki.abstracts.2017.tar.gz": "744183e61af986bde9b25c880b59c1502618a8b673671e189cbc0ee684fceb42"
+  },
+  "expected_manifest": "evidence/pilot/index-artifact-9/source-verification.json",
+  "receipt_matches_admission": true,
+  "source_read_only": true,
+  "model_calls": 0,
+  "observed_at": "2026-11-06T00:14:15.637Z"
+}

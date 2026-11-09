@@ -1,0 +1,48 @@
+{
+  "schema": "pilot-worker-exit-verification-v11b",
+  "implementation_commit": "9a0d6e5c4cf4934a92c8749863a70f49632d9ac2",
+  "verification_hash": "sha256:629db9378daf11e46c7894a114d97bab77a0da3f861c4af3ed798977832f078f",
+  "policy_changed": false,
+  "official_gepa_unchanged": true,
+  "before": {
+    "proof": "before.txt",
+    "returncode": 1,
+    "docker_regression_cases_failed": 4
+  },
+  "after": {
+    "tests": 340,
+    "seconds": 633.873,
+    "passed": true,
+    "real_docker_and_official_metrics": true,
+    "proof": "full-suite.txt",
+    "frozen_mbpp_rows": [
+      640,
+      847
+    ]
+  },
+  "sandbox_smoke": {
+    "cases": 13,
+    "passed": true,
+    "proof": "smoke-result.json",
+    "receipts": "smoke-grader-outcomes.jsonl",
+    "escaped_worker_exits": "nonzero_exit/null and frame_failure/null",
+    "trusted_escaped_verdicts": "pass/1 and TypeError wrong_answer/0"
+  },
+  "fresh_admission": {
+    "passed": true,
+    "proof": "admission.json",
+    "receipts": "admission-grader-outcomes.jsonl",
+    "elapsed_seconds": 442.6310364010278,
+    "pass": 1808,
+    "wrong_answer": 2650,
+    "gateway_requests": 0,
+    "model_calls": 0,
+    "unit": "hone-predecl11b-admit-20261107T133114Z.service",
+    "historical_pid": 1062246,
+    "cpu_affinity": [6],
+    "nice": 10
+  },
+  "model_calls": 0,
+  "fresh_admission_required": true,
+  "exact_head_ci_and_cross_family_ready_required": true
+}

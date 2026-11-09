@@ -1,0 +1,712 @@
+test_decoder_failure_before_dispatch_cannot_masquerade_as_attack_rejection (test_admission.AdmissionTests.test_decoder_failure_before_dispatch_cannot_masquerade_as_attack_rejection) ... ok
+test_literal_worker_change_invalidates_execution_contract (test_admission.AdmissionTests.test_literal_worker_change_invalidates_execution_contract) ... ok
+test_mbpp_branch_changes_cannot_reuse_a_p_only_source_equivalence (test_admission.AdmissionTests.test_mbpp_branch_changes_cannot_reuse_a_p_only_source_equivalence) ... ok
+test_positive_attack_in_protected_pipeline_refuses_admission (test_admission.AdmissionTests.test_positive_attack_in_protected_pipeline_refuses_admission) ... ok
+test_text_admission_rejects_changed_identity_cohort_or_missing_attack (test_admission.AdmissionTests.test_text_admission_rejects_changed_identity_cohort_or_missing_attack) ... ok
+test_external_control_requires_validation_improvement_not_a_test_score (test_admission.PublishedTests.test_external_control_requires_validation_improvement_not_a_test_score) ... ok
+test_pinned_program_mismatch_is_rejected_before_parsing (test_admission.PublishedTests.test_pinned_program_mismatch_is_rejected_before_parsing) ... ok
+test_reducers_are_data_and_opaque_strings_are_not_decoded (test_admission.PublishedTests.test_reducers_are_data_and_opaque_strings_are_not_decoded) ... ok
+test_truncation_trailing_bytes_and_unsupported_protocol_fail (test_admission.PublishedTests.test_truncation_trailing_bytes_and_unsupported_protocol_fail) ... ok
+test_authorized_partition_change_preserves_retained_task_execution (test_admission.RetainedSourceTests.test_authorized_partition_change_preserves_retained_task_execution) ... ok
+test_pinned_original_sources_authenticate_both_retained_admissions (test_admission.RetainedSourceTests.test_pinned_original_sources_authenticate_both_retained_admissions) ... ok
+test_historical_proof_replays_its_own_identity_and_still_rejects_positives (test_adversarial.AdversarialTests.test_historical_proof_replays_its_own_identity_and_still_rejects_positives) ... ok
+test_manifest_covers_named_attacks_and_original_shortcut_unchanged (test_adversarial.AdversarialTests.test_manifest_covers_named_attacks_and_original_shortcut_unchanged) ... ok
+test_missing_old_positive_or_incomplete_proofs_are_rejected (test_adversarial.AdversarialTests.test_missing_old_positive_or_incomplete_proofs_are_rejected) ... ok
+test_official_text_checkers_treat_every_attack_as_data (test_adversarial.AdversarialTests.test_official_text_checkers_treat_every_attack_as_data) ... /home/tim/worktrees/hone/hone-hone-pilot-seeds12-1/pilot/.venv/lib/python3.12/site-packages/spacy/cli/_util.py:23: DeprecationWarning: Importing 'parser.split_arg_string' is deprecated, it will only be available in 'shell_completion' in Click 9.0.
+  from click.parser import split_arg_string
+/home/tim/worktrees/hone/hone-hone-pilot-seeds12-1/pilot/.venv/lib/python3.12/site-packages/syllapy/data_loader.py:3: UserWarning: pkg_resources is deprecated as an API. See https://setuptools.pypa.io/en/latest/pkg_resources.html. The pkg_resources package is slated for removal as early as 2025-11-30. Refrain from using this package or pin to Setuptools<81.
+  import pkg_resources
+ok
+test_positive_stops_immediately_retains_exact_artifact_and_no_models (test_adversarial.AdversarialTests.test_positive_stops_immediately_retains_exact_artifact_and_no_models) ... ok
+test_receipted_infrastructure_attacks_are_unscored_rejections_in_frozen_order (test_adversarial.AdversarialTests.test_receipted_infrastructure_attacks_are_unscored_rejections_in_frozen_order) ... ok
+test_replay_reports_current_infrastructure_without_relabeling_retained_zeros (test_adversarial.AdversarialTests.test_replay_reports_current_infrastructure_without_relabeling_retained_zeros) ... ok
+test_unrelated_forged_or_legacy_unscored_receipts_are_not_rejections (test_adversarial.AdversarialTests.test_unrelated_forged_or_legacy_unscored_receipts_are_not_rejections) ... ok
+test_disk_exact_floor_and_rejection (test_campaign.CampaignTests.test_disk_exact_floor_and_rejection) ... ok
+test_failed_cell_never_lowers_or_raises_forecast (test_campaign.CampaignTests.test_failed_cell_never_lowers_or_raises_forecast) ... ok
+test_full_fixed_order_and_no_partial_restart (test_campaign.CampaignTests.test_full_fixed_order_and_no_partial_restart) ... ok
+test_hard_cap_counts_dispatches_not_old_ledger (test_campaign.CampaignTests.test_hard_cap_counts_dispatches_not_old_ledger) ... ok
+test_hooks_are_scoped_and_restore (test_campaign.CampaignTests.test_hooks_are_scoped_and_restore) ... ok
+test_initial_projection_and_equality (test_campaign.CampaignTests.test_initial_projection_and_equality) ... ok
+test_projection_crossing_stops_before_next_cell (test_campaign.CampaignTests.test_projection_crossing_stops_before_next_cell) ... ok
+test_control_draw_refuses_insufficient_training_rows (test_controls.ControlTests.test_control_draw_refuses_insufficient_training_rows) ... ok
+test_existing_evidence_is_not_overwritten (test_controls.ControlTests.test_existing_evidence_is_not_overwritten) ... ok
+test_fresh_mbpp_draw_excludes_prior_rows_without_mutating_partition (test_controls.ControlTests.test_fresh_mbpp_draw_excludes_prior_rows_without_mutating_partition) ... ok
+test_fresh_p_draw_is_fixed_and_independent_of_source_order (test_controls.ControlTests.test_fresh_p_draw_is_fixed_and_independent_of_source_order) ... ok
+test_ifbench_headroom_boundary_precedes_improved_and_noise (test_controls.ControlTests.test_ifbench_headroom_boundary_precedes_improved_and_noise) ... ok
+test_measured_positive_and_paired_noise_admit_only_a_real_contrast (test_controls.ControlTests.test_measured_positive_and_paired_noise_admit_only_a_real_contrast) ... ok
+test_published_positive_is_measured_not_awarded_a_reference_answer (test_controls.ControlTests.test_published_positive_is_measured_not_awarded_a_reference_answer) ... ok
+test_refusals_are_measured_zero_and_counted_by_real_row_and_arm (test_controls.ControlTests.test_refusals_are_measured_zero_and_counted_by_real_row_and_arm) ... ok
+test_unchanged_noise_can_refuse_admission (test_controls.ControlTests.test_unchanged_noise_can_refuse_admission) ... ok
+test_positive_and_noise_infrastructure_abort_instead_of_scoring (test_controls.MbppControlTests.test_positive_and_noise_infrastructure_abort_instead_of_scoring) ... ok
+test_receipted_shortcut_infrastructure_is_rejected_unscored_without_a_task_mean (test_controls.MbppControlTests.test_receipted_shortcut_infrastructure_is_rejected_unscored_without_a_task_mean) ... ok
+test_unrelated_receipts_positive_shortcuts_and_legacy_proofs_are_not_rejections (test_controls.MbppControlTests.test_unrelated_receipts_positive_shortcuts_and_legacy_proofs_are_not_rejections) ... ok
+test_completed_cell_resets_infrastructure_failure_streak (test_dispatch.DispatchTests.test_completed_cell_resets_infrastructure_failure_streak) ... {"dispatch_stop":{"cells":[{"method":"plain","seed":0,"task":"mbpp"},{"method":"hone","seed":0,"task":"hover"}],"reason":"consecutive-infrastructure-failures"}}
+ok
+test_declared_seed_dispatches_exactly_six_cells (test_dispatch.DispatchTests.test_declared_seed_dispatches_exactly_six_cells) ... ok
+test_duplicate_seeds_are_rejected_before_startup (test_dispatch.DispatchTests.test_duplicate_seeds_are_rejected_before_startup) ... ok
+test_exactly_one_percent_does_not_stop (test_dispatch.DispatchTests.test_exactly_one_percent_does_not_stop) ... ok
+test_hidden_attempt_rate_stops_before_next_cell (test_dispatch.DispatchTests.test_hidden_attempt_rate_stops_before_next_cell) ... {"dispatch_stop":{"calls":100,"hidden_attempts":2,"reason":"hidden-attempt-rate"}}
+ok
+test_hidden_attempt_rate_uses_all_finished_calls (test_dispatch.DispatchTests.test_hidden_attempt_rate_uses_all_finished_calls) ... {"dispatch_stop":{"calls":200,"hidden_attempts":3,"reason":"hidden-attempt-rate"}}
+ok
+test_infrastructure_failure_streak_crosses_seed_boundary (test_dispatch.DispatchTests.test_infrastructure_failure_streak_crosses_seed_boundary) ... {"dispatch_stop":{"cells":[{"method":"plain","seed":1,"task":"hover"},{"method":"hone","seed":2,"task":"mbpp"}],"reason":"consecutive-infrastructure-failures"}}
+ok
+test_last_cell_can_finish_and_still_records_abort_evidence (test_dispatch.DispatchTests.test_last_cell_can_finish_and_still_records_abort_evidence) ... {"dispatch_stop":{"calls":100,"cell":{"method":"plain","seed":0,"task":"hover"},"reason":"unknown-usage-rate","unknown_usage_calls":2}}
+ok
+test_pause_allowance_is_not_reset_between_seeds (test_dispatch.DispatchTests.test_pause_allowance_is_not_reset_between_seeds) ... {"dispatch_stop":{"limit_seconds":21600,"pause_seconds":21601,"reason":"pause-limit"}}
+ok
+test_seed_pair_runs_serially_in_seed_major_order (test_dispatch.DispatchTests.test_seed_pair_runs_serially_in_seed_major_order) ... ok
+test_six_hour_pause_handback_is_run_wide (test_dispatch.DispatchTests.test_six_hour_pause_handback_is_run_wide) ... {"dispatch_stop":{"limit_seconds":21600,"pause_seconds":21601,"reason":"pause-limit"}}
+ok
+test_two_consecutive_infrastructure_failures_stop (test_dispatch.DispatchTests.test_two_consecutive_infrastructure_failures_stop) ... {"dispatch_stop":{"cells":[{"method":"hone","seed":0,"task":"mbpp"},{"method":"gepa","seed":0,"task":"mbpp"}],"reason":"consecutive-infrastructure-failures"}}
+ok
+test_unknown_usage_is_per_cell_not_diluted_by_previous_cells (test_dispatch.DispatchTests.test_unknown_usage_is_per_cell_not_diluted_by_previous_cells) ... {"dispatch_stop":{"calls":100,"cell":{"method":"gepa","seed":0,"task":"mbpp"},"reason":"unknown-usage-rate","unknown_usage_calls":2}}
+ok
+test_failed_startup_preserves_pauses_and_next_cell_remaining_allowance (test_dispatch.StartupPauseTests.test_failed_startup_preserves_pauses_and_next_cell_remaining_allowance) ... {"dispatch_stop":{"limit_seconds":21600,"pause_seconds":22500.0,"reason":"pause-limit"}}
+ok
+test_interrupted_cell_replays_closed_and_open_pause_prefixes (test_dispatch.StartupPauseTests.test_interrupted_cell_replays_closed_and_open_pause_prefixes) ... ok
+test_interrupted_pause_limit_retains_terminal_reason_without_double_counting (test_dispatch.StartupPauseTests.test_interrupted_pause_limit_retains_terminal_reason_without_double_counting) ... ok
+test_admission_finds_nlp_assets_without_launch_environment (test_environment.EnvironmentTests.test_admission_finds_nlp_assets_without_launch_environment) ... ok
+test_child_environment_never_reads_or_copies_credential_variables (test_environment.EnvironmentTests.test_child_environment_never_reads_or_copies_credential_variables) ... ok
+test_canonical_control_and_surrogate_tokens_remain_injective (test_hover.HoVerDataTests.test_canonical_control_and_surrogate_tokens_remain_injective) ... ok
+test_escaped_equivalents_and_alternate_encodings_are_rejected (test_hover.HoVerDataTests.test_escaped_equivalents_and_alternate_encodings_are_rejected) ... ok
+test_exact_small_partition_boundaries_preserve_uncapped_order (test_hover.HoVerDataTests.test_exact_small_partition_boundaries_preserve_uncapped_order) ... ok
+test_full_caps_independent_rng_and_only_development_rows_decoded (test_hover.HoVerDataTests.test_full_caps_independent_rng_and_only_development_rows_decoded) ... ok
+test_malformed_or_duplicate_membership_fails_closed (test_hover.HoVerDataTests.test_malformed_or_duplicate_membership_fails_closed) ... ok
+test_projection_uses_distinct_canonical_tokens_not_num_hops (test_hover.HoVerDataTests.test_projection_uses_distinct_canonical_tokens_not_num_hops) ... ok
+test_failure_boundary_and_no_selection_trajectories (test_hover.HoVerProgramTests.test_failure_boundary_and_no_selection_trajectories) ... ok
+test_four_protected_stages_and_ordered_retrieval_union (test_hover.HoVerProgramTests.test_four_protected_stages_and_ordered_retrieval_union) ... ok
+test_invalid_candidate_never_prepares_resources (test_hover.HoVerProgramTests.test_invalid_candidate_never_prepares_resources) ... ok
+test_official_metric_and_frozen_gold (test_hover.HoVerProgramTests.test_official_metric_and_frozen_gold) ... ok
+test_refusal_at_every_stage_ends_rollout_and_retains_zero_trace (test_hover.HoVerProgramTests.test_refusal_at_every_stage_ends_rollout_and_retains_zero_trace) ... ok
+test_selection_feedback_and_outside_rows_rejected_before_execution (test_hover.HoVerProgramTests.test_selection_feedback_and_outside_rows_rejected_before_execution) ... ok
+test_missing_or_wrong_dependencies_fail_without_download (test_hover.HoVerResourceTests.test_missing_or_wrong_dependencies_fail_without_download) ... ok
+test_only_verified_single_regular_member_extracted (test_hover.HoVerResourceTests.test_only_verified_single_regular_member_extracted) ... ok
+test_measured_calibration_gates_both_search_sizes (test_native_policy.NativePolicyTests.test_measured_calibration_gates_both_search_sizes) ... ok
+test_changed_current_identity_or_cohort_is_rejected (test_panel.PanelTests.test_changed_current_identity_or_cohort_is_rejected) ... ok
+test_current_ifbench_validates_raw_measurements (test_panel.PanelTests.test_current_ifbench_validates_raw_measurements) ... ok
+test_headroom_failure_requires_complete_naive_measurement (test_panel.PanelTests.test_headroom_failure_requires_complete_naive_measurement) ... ok
+test_invalid_ifbench_and_withdrawn_tasks_cannot_be_reused (test_panel.PanelTests.test_invalid_ifbench_and_withdrawn_tasks_cannot_be_reused) ... ok
+test_mbpp_positive_or_noise_replay_infrastructure_aborts_validation (test_panel.PanelTests.test_mbpp_positive_or_noise_replay_infrastructure_aborts_validation) ... ok
+test_mbpp_unscored_negative_rows_are_rejected_without_a_task_mean (test_panel.PanelTests.test_mbpp_unscored_negative_rows_are_rejected_without_a_task_mean) ... ok
+test_mbpp_unscored_rows_need_bound_negative_receipts_and_no_imputed_mean (test_panel.PanelTests.test_mbpp_unscored_rows_need_bound_negative_receipts_and_no_imputed_mean) ... ok
+test_noise_failure_requires_the_original_envelope_arithmetic (test_panel.PanelTests.test_noise_failure_requires_the_original_envelope_arithmetic) ... ok
+test_only_measured_ifbench_outcomes_choose_a_panel (test_panel.PanelTests.test_only_measured_ifbench_outcomes_choose_a_panel) ... ok
+test_ranking_failure_is_measured_not_a_flag (test_panel.PanelTests.test_ranking_failure_is_measured_not_a_flag) ... ok
+test_refusal_counts_bind_empty_zero_rows_to_metered_arms (test_panel.PanelTests.test_refusal_counts_bind_empty_zero_rows_to_metered_arms) ... ok
+test_retained_mbpp_zero_replayed_as_infrastructure_is_not_rewritten (test_panel.PanelTests.test_retained_mbpp_zero_replayed_as_infrastructure_is_not_rewritten) ... ok
+test_sealed_forged_measurements_cannot_pass_by_flags (test_panel.PanelTests.test_sealed_forged_measurements_cannot_pass_by_flags) ... ok
+test_frozen_candidate_faults_score_zero_and_full_retained_admission_passes (test_preflight.DockerRetainedMBPPAdmissionTests.test_frozen_candidate_faults_score_zero_and_full_retained_admission_passes) ... <unknown>:3: SyntaxWarning: invalid escape sequence '\B'
+<unknown>:2: SyntaxWarning: invalid escape sequence '\.'
+<unknown>:3: SyntaxWarning: invalid escape sequence '\W'
+<unknown>:3: SyntaxWarning: invalid escape sequence '\W'
+<unknown>:2: SyntaxWarning: invalid escape sequence '\.'
+<unknown>:15: SyntaxWarning: invalid escape sequence '\s'
+<unknown>:4: SyntaxWarning: invalid escape sequence '\A'
+<unknown>:3: SyntaxWarning: invalid escape sequence '\d'
+<unknown>:4: SyntaxWarning: invalid escape sequence '\w'
+<unknown>:3: SyntaxWarning: invalid escape sequence '\d'
+<unknown>:3: SyntaxWarning: invalid escape sequence '\.'
+ok
+test_failed_ifbench_protocol_is_retained_and_selects_only_two_tasks (test_preflight.PreflightTests.test_failed_ifbench_protocol_is_retained_and_selects_only_two_tasks) ... ok
+test_incomplete_mbpp_seal_cannot_authorize_an_injected_control (test_preflight.PreflightTests.test_incomplete_mbpp_seal_cannot_authorize_an_injected_control) ... ok
+test_machine_proof_refuses_unsafe_or_unpinned_affinity (test_preflight.PreflightTests.test_machine_proof_refuses_unsafe_or_unpinned_affinity) ... ok
+test_missing_calls_or_empty_outputs_cannot_fake_zero_mbpp_noise (test_preflight.PreflightTests.test_missing_calls_or_empty_outputs_cannot_fake_zero_mbpp_noise) ... ok
+test_offline_cli_admits_protocols_without_auth_or_model_bootstrap (test_preflight.PreflightTests.test_offline_cli_admits_protocols_without_auth_or_model_bootstrap) ... ok
+test_other_task_admission_blocks_every_search_before_transport (test_preflight.PreflightTests.test_other_task_admission_blocks_every_search_before_transport) ... ok
+test_panel_cannot_restore_aime_or_claim_fallback_after_a_hover_pass (test_preflight.PreflightTests.test_panel_cannot_restore_aime_or_claim_fallback_after_a_hover_pass) ... ok
+test_provider_outage_aborts_calibration_without_choosing_panel (test_preflight.PreflightTests.test_provider_outage_aborts_calibration_without_choosing_panel) ... {"calls":2,"task":"ifbench","usage_missing_calls":2}
+ok
+test_real_controller_startup_abort_has_unavailable_usage_and_no_panel (test_preflight.PreflightTests.test_real_controller_startup_abort_has_unavailable_usage_and_no_panel) ... ok
+test_real_headroom_measurement_seals_two_task_fallback_without_a_second_attempt (test_preflight.PreflightTests.test_real_headroom_measurement_seals_two_task_fallback_without_a_second_attempt) ... ok
+test_replacement_control_directory_is_never_authorized (test_preflight.PreflightTests.test_replacement_control_directory_is_never_authorized) ... ok
+test_replay_unencodable_output_scores_zero_without_model_calls (test_preflight.PreflightTests.test_replay_unencodable_output_scores_zero_without_model_calls) ... ok
+test_stale_or_incomplete_text_admission_blocks_all_search (test_preflight.PreflightTests.test_stale_or_incomplete_text_admission_blocks_all_search) ... ok
+test_abrupt_worker_exit_remains_unscored_infrastructure (test_preflight.ReferenceAuditDiagnosticsTests.test_abrupt_worker_exit_remains_unscored_infrastructure) ... ok
+test_reference_candidate_exception_is_not_worker_infrastructure (test_preflight.ReferenceAuditDiagnosticsTests.test_reference_candidate_exception_is_not_worker_infrastructure) ... ok
+test_reference_type_mismatch_keeps_canonical_diagnostic (test_preflight.ReferenceAuditDiagnosticsTests.test_reference_type_mismatch_keeps_canonical_diagnostic) ... ok
+test_container_control_failures_are_program_errors (test_program.ProgramTests.test_container_control_failures_are_program_errors) ... ok
+test_container_cpu_matches_explicit_process_affinity (test_program.ProgramTests.test_container_cpu_matches_explicit_process_affinity) ... ok
+test_container_denies_host_credentials_and_network (test_program.ProgramTests.test_container_denies_host_credentials_and_network) ... ok
+test_docker_candidate_is_paused_during_provider_wait_and_resumes (test_program.ProgramTests.test_docker_candidate_is_paused_during_provider_wait_and_resumes) ... ok
+test_docker_model_frame_then_exit_is_program_error_and_zero (test_program.ProgramTests.test_docker_model_frame_then_exit_is_program_error_and_zero) ... ok
+test_missing_container_runtime_is_not_a_program_error (test_program.ProgramTests.test_missing_container_runtime_is_not_a_program_error) ... ok
+test_owned_process_cannot_work_while_provider_is_waiting (test_program.ProgramTests.test_owned_process_cannot_work_while_provider_is_waiting) ... ok
+test_prompt_cap_denied_before_call (test_program.ProgramTests.test_prompt_cap_denied_before_call) ... ok
+test_provider_errors_survive_without_resuming_candidate (test_program.ProgramTests.test_provider_errors_survive_without_resuming_candidate) ... ok
+test_refusal_retains_trace_without_resuming_or_delivering_an_answer (test_program.ProgramTests.test_refusal_retains_trace_without_resuming_or_delivering_an_answer) ... ok
+test_second_stage_refusal_retains_answered_and_refused_traces (test_program.ProgramTests.test_second_stage_refusal_retains_answered_and_refused_traces) ... ok
+test_seed_program_preserves_answer_for_shared_scoring (test_program.ProgramTests.test_seed_program_preserves_answer_for_shared_scoring) ... ok
+test_shared_extraction_uses_first_eligible_block (test_program.ProgramTests.test_shared_extraction_uses_first_eligible_block) ... ok
+test_third_call_is_denied (test_program.ProgramTests.test_third_call_is_denied) ... ok
+test_token_cap_denied_before_call (test_program.ProgramTests.test_token_cap_denied_before_call) ... ok
+test_unknown_protocol_cannot_request_tools (test_program.ProgramTests.test_unknown_protocol_cannot_request_tools) ... ok
+test_unpinned_runtime_image_is_rejected (test_program.ProgramTests.test_unpinned_runtime_image_is_rejected) ... ok
+test_bundle_rejects_paths_outside_its_root_before_reading (test_replay.ReplayTests.test_bundle_rejects_paths_outside_its_root_before_reading) ... ok
+test_controls_root_replays_nested_rollouts_and_rejects_a_forged_score (test_replay.ReplayTests.test_controls_root_replays_nested_rollouts_and_rejects_a_forged_score) ... ok
+test_interrupted_cell_preserves_usage_prefix_and_last_accepted_artifact (test_replay.ReplayTests.test_interrupted_cell_preserves_usage_prefix_and_last_accepted_artifact) ... ok
+test_interrupted_refusal_preserves_estimated_charges_and_distinct_stop (test_replay.ReplayTests.test_interrupted_refusal_preserves_estimated_charges_and_distinct_stop) ... ok
+test_invalid_ifbench_cohort_is_replay_only_and_requires_exact_archived_manifest (test_replay.ReplayTests.test_invalid_ifbench_cohort_is_replay_only_and_requires_exact_archived_manifest) ... ok
+test_recomputes_scores_and_rejects_forged_success (test_replay.ReplayTests.test_recomputes_scores_and_rejects_forged_success) ... ok
+test_refused_mbpp_replay_requires_a_metered_row_and_never_executes_a_solution (test_replay.ReplayTests.test_refused_mbpp_replay_requires_a_metered_row_and_never_executes_a_solution) ... ok
+test_first_new_failure_is_third_consecutive_and_stops_dispatch (test_rerun10.InfrastructureRerunTests.test_first_new_failure_is_third_consecutive_and_stops_dispatch) ... {"dispatch_stop":{"cells":[{"method":"hone","seed":1,"task":"hover"},{"method":"plain","seed":1,"task":"mbpp"}],"consecutive_infrastructure_failures":3,"reason":"consecutive-infrastructure-failures"}}
+ok
+test_dispatch_executes_twelve_fresh_cells_and_keeps_old_safety_usage (test_rerun11.RerunTests.test_dispatch_executes_twelve_fresh_cells_and_keeps_old_safety_usage) ... ok
+test_historical_streak_stops_without_a_new_call (test_rerun11.RerunTests.test_historical_streak_stops_without_a_new_call) ... ok
+test_alignment_rejects_duplicate_missing_extra_and_nonfinite (test_results.BootstrapTests.test_alignment_rejects_duplicate_missing_extra_and_nonfinite) ... ok
+test_equal_task_weight_and_hierarchical_task_resampling (test_results.BootstrapTests.test_equal_task_weight_and_hierarchical_task_resampling) ... ok
+test_exact_zero_and_replay_determinism (test_results.BootstrapTests.test_exact_zero_and_replay_determinism) ... ok
+test_missing_task_and_mismatched_pair_rejected (test_results.BootstrapTests.test_missing_task_and_mismatched_pair_rejected) ... ok
+test_paired_not_unpaired_constant_improvement (test_results.BootstrapTests.test_paired_not_unpaired_constant_improvement) ... ok
+test_seed_bootstrap_resamples_seed_identity_before_paired_instances (test_results.BootstrapTests.test_seed_bootstrap_resamples_seed_identity_before_paired_instances) ... ok
+test_first_seed_last_matching_changed_vector_not_pooling (test_results.ExtractionTests.test_first_seed_last_matching_changed_vector_not_pooling) ... ok
+test_incomplete_evaluations_not_silently_joined (test_results.ExtractionTests.test_incomplete_evaluations_not_silently_joined) ... ok
+test_mismatched_identity_hash_seed_method_and_bad_vectors_rejected (test_results.ExtractionTests.test_mismatched_identity_hash_seed_method_and_bad_vectors_rejected) ... ok
+test_missing_baseline_or_retained_score_match_has_no_inference (test_results.ExtractionTests.test_missing_baseline_or_retained_score_match_has_no_inference) ... ok
+test_selection_row_order_is_aligned (test_results.ExtractionTests.test_selection_row_order_is_aligned) ... ok
+test_unchanged_winner_reuses_exact_baseline_despite_reevaluation (test_results.ExtractionTests.test_unchanged_winner_reuses_exact_baseline_despite_reevaluation) ... ok
+test_cli_writes_json_outside_evidence_and_retains_raw_bytes (test_results.ReportTests.test_cli_writes_json_outside_evidence_and_retains_raw_bytes) ... ok
+test_complete_matrix_can_share_one_dispatch_root (test_results.ReportTests.test_complete_matrix_can_share_one_dispatch_root) ... ok
+test_complete_method_sums_phases_and_equal_weight_task_inference (test_results.ReportTests.test_complete_method_sums_phases_and_equal_weight_task_inference) ... ok
+test_complete_selection_cache_reuse_is_not_a_missing_gate_candidate (test_results.ReportTests.test_complete_selection_cache_reuse_is_not_a_missing_gate_candidate) ... ok
+test_cross_method_identity_mismatch_is_rejected (test_results.ReportTests.test_cross_method_identity_mismatch_is_rejected) ... ok
+test_cross_seed_identity_mismatch_and_seed0_inputs_are_rejected (test_results.ReportTests.test_cross_seed_identity_mismatch_and_seed0_inputs_are_rejected) ... ok
+test_duplicate_evaluations_and_started_tail_count_for_unchanged_gepa (test_results.ReportTests.test_duplicate_evaluations_and_started_tail_count_for_unchanged_gepa) ... ok
+test_gate_passing_candidate_without_complete_selection_explains_budget_tail (test_results.ReportTests.test_gate_passing_candidate_without_complete_selection_explains_budget_tail) ... ok
+test_interrupted_pause_prefix_is_not_an_exact_aggregate_total (test_results.ReportTests.test_interrupted_pause_prefix_is_not_an_exact_aggregate_total) ... ok
+test_missing_call_context_and_truncated_evidence_do_not_claim_zero_duplicates (test_results.ReportTests.test_missing_call_context_and_truncated_evidence_do_not_claim_zero_duplicates) ... ok
+test_new_matrix_keeps_strict_vectors_even_without_result (test_results.ReportTests.test_new_matrix_keeps_strict_vectors_even_without_result) ... ok
+test_nonzero_seed_and_stale_spend_hash_are_rejected (test_results.ReportTests.test_nonzero_seed_and_stale_spend_hash_are_rejected) ... ok
+test_partial_matrix_preserves_spend_without_missing_cell_zeros (test_results.ReportTests.test_partial_matrix_preserves_spend_without_missing_cell_zeros) ... ok
+test_predeclaration11_refuses_pooling_policy10_cells (test_results.ReportTests.test_predeclaration11_refuses_pooling_policy10_cells) ... ok
+test_real_seed0_diagnostics_remain_beside_stopped_seed_matrix (test_results.ReportTests.test_real_seed0_diagnostics_remain_beside_stopped_seed_matrix) ... ok
+test_seed0_archive_replays_all_measurements_and_intervals (test_results.ReportTests.test_seed0_archive_replays_all_measurements_and_intervals) ... ok
+test_seeds12_cli_protects_all_raw_roots (test_results.ReportTests.test_seeds12_cli_protects_all_raw_roots) ... ok
+test_seeds12_equal_weight_and_historical_seed0_never_pooled (test_results.ReportTests.test_seeds12_equal_weight_and_historical_seed0_never_pooled) ... ok
+test_stopped_cell_without_search_has_null_inference_and_full_usage (test_results.ReportTests.test_stopped_cell_without_search_has_null_inference_and_full_usage) ... ok
+test_stopped_seed_matrix_never_reweights_missing_seed_or_task (test_results.ReportTests.test_stopped_seed_matrix_never_reweights_missing_seed_or_task) ... ok
+test_stopped_seeds12_archive_replays_measurements_and_missing_aggregates (test_results.ReportTests.test_stopped_seeds12_archive_replays_measurements_and_missing_aggregates) ... ok
+test_unchanged_artifact_delta_does_not_report_stochastic_remeasurement_as_gain (test_results.ReportTests.test_unchanged_artifact_delta_does_not_report_stochastic_remeasurement_as_gain) ... ok
+test_unscored_infrastructure_is_reported_separately_not_as_a_pair (test_results.ReportTests.test_unscored_infrastructure_is_reported_separately_not_as_a_pair) ... ok
+test_calibration_discloses_unknown_transport_separately_from_estimated_refusals (test_run_plan.ProjectionTests.test_calibration_discloses_unknown_transport_separately_from_estimated_refusals) ... ok
+test_current_complete_and_failed_gate_measurements_preserve_charged_usage (test_run_plan.ProjectionTests.test_current_complete_and_failed_gate_measurements_preserve_charged_usage) ... ok
+test_current_panel_requires_the_frozen_predeclaration (test_run_plan.ProjectionTests.test_current_panel_requires_the_frozen_predeclaration) ... ok
+test_current_setup_is_added_once_for_current_panels_and_terminal_manifests (test_run_plan.ProjectionTests.test_current_setup_is_added_once_for_current_panels_and_terminal_manifests) ... ok
+test_dollars_bind_before_active_time_and_zero_samples_cannot_look_free (test_run_plan.ProjectionTests.test_dollars_bind_before_active_time_and_zero_samples_cannot_look_free) ... ok
+test_estimated_refusals_bind_caps_without_becoming_reported_projection (test_run_plan.ProjectionTests.test_estimated_refusals_bind_caps_without_becoming_reported_projection) ... ok
+test_first_cap_preserves_polling_and_pause_time_outside_active_budget (test_run_plan.ProjectionTests.test_first_cap_preserves_polling_and_pause_time_outside_active_budget) ... ok
+test_historical_abort_preserves_every_available_forecast (test_run_plan.ProjectionTests.test_historical_abort_preserves_every_available_forecast) ... ok
+test_infrastructure_abort_after_partial_controls_never_supplies_a_calibration (test_run_plan.ProjectionTests.test_infrastructure_abort_after_partial_controls_never_supplies_a_calibration) ... ok
+test_infrastructure_abort_cannot_create_a_fallback_or_a_full_matrix_estimate (test_run_plan.ProjectionTests.test_infrastructure_abort_cannot_create_a_fallback_or_a_full_matrix_estimate) ... ok
+test_missing_usage_without_receipt_classification_cannot_borrow_an_estimate (test_run_plan.ProjectionTests.test_missing_usage_without_receipt_classification_cannot_borrow_an_estimate) ... ok
+test_partial_noise_and_terminal_stops_never_supply_a_full_calibration (test_run_plan.ProjectionTests.test_partial_noise_and_terminal_stops_never_supply_a_full_calibration) ... ok
+test_terminal_stop_before_first_call_has_no_panel_or_full_projection (test_run_plan.ProjectionTests.test_terminal_stop_before_first_call_has_no_panel_or_full_projection) ... ok
+test_unknown_transport_is_not_bounded_by_another_calls_refusal_estimate (test_run_plan.ProjectionTests.test_unknown_transport_is_not_bounded_by_another_calls_refusal_estimate) ... ok
+test_unsealed_panel_cannot_override_a_sealed_infrastructure_abort (test_run_plan.ProjectionTests.test_unsealed_panel_cannot_override_a_sealed_infrastructure_abort) ... ok
+test_answer_refusal_nondeterminism_charges_receipt_then_latches_all_dispatch (test_runtime.RuntimeTests.test_answer_refusal_nondeterminism_charges_receipt_then_latches_all_dispatch) ... ok
+test_arbitrary_failure_text_and_unproven_refusal_are_not_classified (test_runtime.RuntimeTests.test_arbitrary_failure_text_and_unproven_refusal_are_not_classified) ... ok
+test_bare_terminal_refusal_is_charged_without_retry_or_private_metadata (test_runtime.RuntimeTests.test_bare_terminal_refusal_is_charged_without_retry_or_private_metadata) ... ok
+test_broker_move_reconnects_even_when_new_health_is_already_good (test_runtime.RuntimeTests.test_broker_move_reconnects_even_when_new_health_is_already_good) ... ok
+test_budget_reserves_before_call_and_stops_at_each_cap (test_runtime.RuntimeTests.test_budget_reserves_before_call_and_stops_at_each_cap) ... ok
+test_complete_refusal_usage_remains_reported_without_estimated_overlap (test_runtime.RuntimeTests.test_complete_refusal_usage_remains_reported_without_estimated_overlap) ... ok
+test_dead_gateway_pipe_does_not_prevent_cleanup_or_reconnect (test_runtime.RuntimeTests.test_dead_gateway_pipe_does_not_prevent_cleanup_or_reconnect) ... ok
+test_default_history_includes_native_refusal_proof_before_any_dispatch (test_runtime.RuntimeTests.test_default_history_includes_native_refusal_proof_before_any_dispatch) ... ok
+test_durable_nondeterminism_stop_survives_reopening_with_no_history (test_runtime.RuntimeTests.test_durable_nondeterminism_stop_survives_reopening_with_no_history) ... ok
+test_every_role_prices_all_token_categories_and_preserves_failures (test_runtime.RuntimeTests.test_every_role_prices_all_token_categories_and_preserves_failures) ... ok
+test_failed_call_without_usage_is_not_invented_as_zero_cost_success (test_runtime.RuntimeTests.test_failed_call_without_usage_is_not_invented_as_zero_cost_success) ... ok
+test_missing_stale_and_wrong_org_usage_pause (test_runtime.RuntimeTests.test_missing_stale_and_wrong_org_usage_pause) ... ok
+test_missing_usage_is_counted_and_not_a_success (test_runtime.RuntimeTests.test_missing_usage_is_counted_and_not_a_success) ... ok
+test_pause_limit_counts_multiple_episodes_and_preserves_stopped_time (test_runtime.RuntimeTests.test_pause_limit_counts_multiple_episodes_and_preserves_stopped_time) ... ok
+test_poll_time_does_not_exhaust_active_work_budget (test_runtime.RuntimeTests.test_poll_time_does_not_exhaust_active_work_budget) ... ok
+test_pool_denies_work_accounts_and_all_api_keys (test_runtime.RuntimeTests.test_pool_denies_work_accounts_and_all_api_keys) ... ok
+test_private_nondeterminism_stop_blocks_a_probe_outside_the_run_root (test_runtime.RuntimeTests.test_private_nondeterminism_stop_blocks_a_probe_outside_the_run_root) ... ok
+test_provider_rejection_is_charged_then_bounded_as_call_failure (test_runtime.RuntimeTests.test_provider_rejection_is_charged_then_bounded_as_call_failure) ... ok
+test_refusal_receipts_require_nonempty_category (test_runtime.RuntimeTests.test_refusal_receipts_require_nonempty_category) ... ok
+test_refusal_upper_bound_uses_larger_reported_input_and_stops_budget (test_runtime.RuntimeTests.test_refusal_upper_bound_uses_larger_reported_input_and_stops_budget) ... ok
+test_refusal_wire_envelope_is_reserved_before_dispatch (test_runtime.RuntimeTests.test_refusal_wire_envelope_is_reserved_before_dispatch) ... ok
+test_retained_mixed_outcomes_durably_stop_before_gateway_request (test_runtime.RuntimeTests.test_retained_mixed_outcomes_durably_stop_before_gateway_request) ... ok
+test_retained_refusal_then_answer_stops_before_next_dispatch (test_runtime.RuntimeTests.test_retained_refusal_then_answer_stops_before_next_dispatch) ... ok
+test_retry_flags_use_strict_one_percent_boundary (test_runtime.RuntimeTests.test_retry_flags_use_strict_one_percent_boundary) ... ok
+test_root_marker_alone_stops_existing_and_reopened_cells (test_runtime.RuntimeTests.test_root_marker_alone_stops_existing_and_reopened_cells) ... ok
+test_run_root_siblings_share_history_and_global_stop (test_runtime.RuntimeTests.test_run_root_siblings_share_history_and_global_stop) ... ok
+test_scope_is_nested_receipt_metadata_and_never_changes_request_hash (test_runtime.RuntimeTests.test_scope_is_nested_receipt_metadata_and_never_changes_request_hash) ... ok
+test_startup_broker_outage_waits_before_reconnect (test_runtime.RuntimeTests.test_startup_broker_outage_waits_before_reconnect) ... ok
+test_terminal_refusal_is_durable_charged_and_never_redispatched_for_any_role (test_runtime.RuntimeTests.test_terminal_refusal_is_durable_charged_and_never_redispatched_for_any_role) ... ok
+test_throttle_waits_through_high_usage_and_outage (test_runtime.RuntimeTests.test_throttle_waits_through_high_usage_and_outage) ... ok
+test_artifact_rejects_wrong_keys_duplicates_empty_and_oversize (test_search.SearchTests.test_artifact_rejects_wrong_keys_duplicates_empty_and_oversize) ... ok
+test_budget_exhaustion_records_known_binding_cap (test_search.SearchTests.test_budget_exhaustion_records_known_binding_cap) ... ok
+test_budget_interrupt_retains_last_complete_candidate (test_search.SearchTests.test_budget_interrupt_retains_last_complete_candidate) ... ok
+test_complete_mapping_validation_does_not_parse_component_text (test_search.SearchTests.test_complete_mapping_validation_does_not_parse_component_text) ... ok
+test_every_method_continues_after_one_refused_proposal_without_retry (test_search.SearchTests.test_every_method_continues_after_one_refused_proposal_without_retry) ... Iteration 0: Base program full valset score: 0.0 over 3 / 3 examples
+Iteration 1: Selected program 0 score: 0.0
+Batched reflection failed (Provider refused the response); retrying per task.
+Traceback (most recent call last):
+  File "/home/tim/worktrees/hone/hone-hone-pilot-seeds12-1/pilot/.venv/lib/python3.12/site-packages/gepa/proposer/reflective_mutation/reflective_mutation.py", line 262, in _propose_texts_batch_safe
+    return list(self._propose_texts_batch(jobs, mds))
+                ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/tim/worktrees/hone/hone-hone-pilot-seeds12-1/pilot/.venv/lib/python3.12/site-packages/gepa/proposer/reflective_mutation/reflective_mutation.py", line 227, in _propose_texts_batch
+    return [self.propose_new_texts(*jobs[0], metadata=mds[0])]
+            ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/tim/worktrees/hone/hone-hone-pilot-seeds12-1/pilot/.venv/lib/python3.12/site-packages/gepa/proposer/reflective_mutation/reflective_mutation.py", line 191, in propose_new_texts
+    proposal, next_lm = self._reflection_lm.reflect(candidate, reflective_dataset, components_to_update)
+                        ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/tim/worktrees/hone/hone-hone-pilot-seeds12-1/pilot/.venv/lib/python3.12/site-packages/gepa/proposer/reflective_mutation/reflection_lm.py", line 166, in reflect
+    return self.reflect_many([(candidate, reflective_dataset, components_to_update)])[0]
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/tim/worktrees/hone/hone-hone-pilot-seeds12-1/pilot/.venv/lib/python3.12/site-packages/gepa/proposer/reflective_mutation/reflection_lm.py", line 182, in reflect_many
+    raw_outputs = self._batch_complete([r[2] for r in rendered], [r[3] for r in rendered])
+                  ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/tim/worktrees/hone/hone-hone-pilot-seeds12-1/pilot/.venv/lib/python3.12/site-packages/gepa/proposer/reflective_mutation/reflection_lm.py", line 153, in _batch_complete
+    return [self.lm(prompts[0])]
+            ^^^^^^^^^^^^^^^^^^^
+  File "/home/tim/worktrees/hone/hone-hone-pilot-seeds12-1/pilot/.venv/lib/python3.12/site-packages/gepa/lm.py", line 254, in __call__
+    result = self._fn(prompt)
+             ^^^^^^^^^^^^^^^^
+  File "/home/tim/worktrees/hone/hone-hone-pilot-seeds12-1/pilot/search.py", line 375, in reflection
+    return call("proposer", messages, 2048)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/tim/worktrees/hone/hone-hone-pilot-seeds12-1/pilot/test_search.py", line 502, in call
+    raise ProviderRefusal("Provider refused the response")
+pilot.runtime.ProviderRefusal: Provider refused the response
+
+Per-task reflection failed: Provider refused the response
+Iteration 1: Reflective mutation did not propose a new candidate
+Iteration 2: Selected program 0 score: 0.0
+Iteration 2: Proposed new text for prompt: better
+Iteration 2: Accepted candidate (subsample score 0.0 -> 8.0); running full eval.
+Iteration 2: Found a better program on the valset with score 1.0.
+Iteration 2: Valset score for new program: 1.0 (coverage 3 / 3)
+Iteration 2: Val aggregate for new program: 1.0
+Iteration 2: Individual valset scores for new program: {0: 1.0, 1: 1.0, 2: 1.0}
+Iteration 2: New valset pareto front scores: {0: 1.0, 1: 1.0, 2: 1.0}
+Iteration 2: Valset pareto front aggregate score: 1.0
+Iteration 2: Updated valset pareto front programs: {0: {1}, 1: {1}, 2: {1}}
+Iteration 2: Best valset aggregate score so far: 1.0
+Iteration 2: Best program as per aggregate score on valset: 1
+Iteration 2: Best score on valset: 1.0
+Iteration 2: Linear pareto front program index: 1
+Iteration 2: New program candidate index: 1
+ok
+test_failed_proposer_retains_seed_and_records_rejection (test_search.SearchTests.test_failed_proposer_retains_seed_and_records_rejection) ... ok
+test_gepa_all_perfect_train_stops_at_metric_cap_without_false_proposal (test_search.SearchTests.test_gepa_all_perfect_train_stops_at_metric_cap_without_false_proposal) ... Iteration 0: Base program full valset score: 1.0 over 3 / 3 examples
+Iteration 1: Selected program 0 score: 1.0
+Iteration 1: All subsample scores perfect for parent 0. Skipping.
+Iteration 1: Reflective mutation did not propose a new candidate
+Iteration 2: Selected program 0 score: 1.0
+Iteration 2: All subsample scores perfect for parent 0. Skipping.
+Iteration 2: Reflective mutation did not propose a new candidate
+Iteration 3: Selected program 0 score: 1.0
+Iteration 3: All subsample scores perfect for parent 0. Skipping.
+Iteration 3: Reflective mutation did not propose a new candidate
+Iteration 4: Selected program 0 score: 1.0
+Iteration 4: All subsample scores perfect for parent 0. Skipping.
+Iteration 4: Reflective mutation did not propose a new candidate
+ok
+test_gepa_perfect_minibatch_keeps_sampling_until_real_proposal (test_search.SearchTests.test_gepa_perfect_minibatch_keeps_sampling_until_real_proposal) ... Iteration 0: Base program full valset score: 0.0 over 3 / 3 examples
+Iteration 1: Selected program 0 score: 0.0
+Iteration 1: All subsample scores perfect for parent 0. Skipping.
+Iteration 1: Reflective mutation did not propose a new candidate
+Iteration 2: Selected program 0 score: 0.0
+Iteration 2: Proposed new text for prompt: better
+Iteration 2: New subsample score 0.0 is not better than old score 0.0, skipping
+ok
+test_hone_doubles_uncertain_train_slice_and_rejects_unresolved (test_search.SearchTests.test_hone_doubles_uncertain_train_slice_and_rejects_unresolved) ... ok
+test_hone_gate_passer_receives_remaining_selection_budget (test_search.SearchTests.test_hone_gate_passer_receives_remaining_selection_budget) ... ok
+test_hone_malformed_proposal_gets_one_repair_without_parent_gate_work (test_search.SearchTests.test_hone_malformed_proposal_gets_one_repair_without_parent_gate_work) ... ok
+test_hone_repaired_artifact_can_promote_with_projected_selection_gate (test_search.SearchTests.test_hone_repaired_artifact_can_promote_with_projected_selection_gate) ... ok
+test_hone_reuses_seed_parent_and_incumbent_vectors_on_restart (test_search.SearchTests.test_hone_reuses_seed_parent_and_incumbent_vectors_on_restart) ... ok
+test_hone_training_gate_does_not_double_count_empirical_standard_error (test_search.SearchTests.test_hone_training_gate_does_not_double_count_empirical_standard_error) ... ok
+test_incomplete_candidate_never_becomes_incumbent (test_search.SearchTests.test_incomplete_candidate_never_becomes_incumbent) ... ok
+test_malformed_artifact_cannot_replace_seed (test_search.SearchTests.test_malformed_artifact_cannot_replace_seed) ... ok
+test_mbpp_proposer_contract_does_not_expose_reference_assertions (test_search.SearchTests.test_mbpp_proposer_contract_does_not_expose_reference_assertions) ... ok
+test_native_gepa_budget_interrupt_retains_accepted_incumbent (test_search.SearchTests.test_native_gepa_budget_interrupt_retains_accepted_incumbent) ... Iteration 0: Base program full valset score: 0.0 over 3 / 3 examples
+Iteration 1: Selected program 0 score: 0.0
+Iteration 1: Proposed new text for prompt: better
+Iteration 1: Accepted candidate (subsample score 0 -> 2.0); running full eval.
+Iteration 1: Found a better program on the valset with score 0.25.
+Iteration 1: Valset score for new program: 0.25 (coverage 3 / 3)
+Iteration 1: Val aggregate for new program: 0.25
+Iteration 1: Individual valset scores for new program: {0: 0.25, 1: 0.25, 2: 0.25}
+Iteration 1: New valset pareto front scores: {0: 0.25, 1: 0.25, 2: 0.25}
+Iteration 1: Valset pareto front aggregate score: 0.25
+Iteration 1: Updated valset pareto front programs: {0: {1}, 1: {1}, 2: {1}}
+Iteration 1: Best valset aggregate score so far: 0.25
+Iteration 1: Best program as per aggregate score on valset: 1
+Iteration 1: Best score on valset: 0.25
+Iteration 1: Linear pareto front program index: 1
+Iteration 1: New program candidate index: 1
+Iteration 2: Selected program 1 score: 0.25
+Iteration 2: Proposed new text for prompt: unfinished
+Iteration 2: Exception during optimization: selection interrupted
+Traceback (most recent call last):
+  File "/home/tim/worktrees/hone/hone-hone-pilot-seeds12-1/pilot/.venv/lib/python3.12/site-packages/gepa/core/engine.py", line 1101, in run
+    proposal_accepted = self._run_reflective_batch(proposals, state)
+                        ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/tim/worktrees/hone/hone-hone-pilot-seeds12-1/pilot/.venv/lib/python3.12/site-packages/gepa/core/engine.py", line 662, in _run_reflective_batch
+    valset_evals = self._evaluate_programs_on_valset([p.candidate for p in selected], state)
+                   ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/tim/worktrees/hone/hone-hone-pilot-seeds12-1/pilot/.venv/lib/python3.12/site-packages/gepa/core/engine.py", line 332, in _evaluate_programs_on_valset
+    fresh = invoke_batch_evaluate(self.adapter, items, capture_traces=False) if items else []
+            ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/tim/worktrees/hone/hone-hone-pilot-seeds12-1/pilot/.venv/lib/python3.12/site-packages/gepa/core/adapter.py", line 274, in invoke_batch_evaluate
+    return default_batch_evaluate(adapter, items, capture_traces=capture_traces)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/tim/worktrees/hone/hone-hone-pilot-seeds12-1/pilot/.venv/lib/python3.12/site-packages/gepa/core/adapter.py", line 261, in default_batch_evaluate
+    return [adapter.evaluate(batch, candidate, capture_traces=capture_traces) for candidate, batch in items]
+            ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/tim/worktrees/hone/hone-hone-pilot-seeds12-1/pilot/search.py", line 303, in evaluate
+    result = evaluate(decoded, batch, capture_traces=capture_traces)
+             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/tim/worktrees/hone/hone-hone-pilot-seeds12-1/pilot/test_search.py", line 481, in evaluate
+    raise BudgetExhausted("selection interrupted")
+pilot.runtime.BudgetExhausted: selection interrupted
+
+ok
+test_native_gepa_edits_components_and_retains_unaffected_fields (test_search.SearchTests.test_native_gepa_edits_components_and_retains_unaffected_fields) ... Iteration 0: Base program full valset score: 0.0 over 3 / 3 examples
+Iteration 1: Selected program 0 score: 0.0
+Iteration 1: Proposed new text for prompt: better
+Iteration 1: Accepted candidate (subsample score 0.0 -> 2.0); running full eval.
+Iteration 1: Found a better program on the valset with score 0.25.
+Iteration 1: Valset score for new program: 0.25 (coverage 3 / 3)
+Iteration 1: Val aggregate for new program: 0.25
+Iteration 1: Individual valset scores for new program: {0: 0.25, 1: 0.25, 2: 0.25}
+Iteration 1: New valset pareto front scores: {0: 0.25, 1: 0.25, 2: 0.25}
+Iteration 1: Valset pareto front aggregate score: 0.25
+Iteration 1: Updated valset pareto front programs: {0: {1}, 1: {1}, 2: {1}}
+Iteration 1: Best valset aggregate score so far: 0.25
+Iteration 1: Best program as per aggregate score on valset: 1
+Iteration 1: Best score on valset: 0.25
+Iteration 1: Linear pareto front program index: 1
+Iteration 1: New program candidate index: 1
+Iteration 2: Selected program 1 score: 0.25
+Iteration 2: Proposed new text for program: print('improved program')
+Iteration 2: Accepted candidate (subsample score 2.0 -> 4.0); running full eval.
+Iteration 2: Found a better program on the valset with score 0.5.
+Iteration 2: Valset score for new program: 0.5 (coverage 3 / 3)
+Iteration 2: Val aggregate for new program: 0.5
+Iteration 2: Individual valset scores for new program: {0: 0.5, 1: 0.5, 2: 0.5}
+Iteration 2: New valset pareto front scores: {0: 0.5, 1: 0.5, 2: 0.5}
+Iteration 2: Valset pareto front aggregate score: 0.5
+Iteration 2: Updated valset pareto front programs: {0: {2}, 1: {2}, 2: {2}}
+Iteration 2: Best valset aggregate score so far: 0.5
+Iteration 2: Best program as per aggregate score on valset: 2
+Iteration 2: Best score on valset: 0.5
+Iteration 2: Linear pareto front program index: 2
+Iteration 2: New program candidate index: 2
+ok
+test_native_gepa_fatal_reflection_failure_does_not_retry_transport (test_search.SearchTests.test_native_gepa_fatal_reflection_failure_does_not_retry_transport) ... Iteration 0: Base program full valset score: 0.0 over 3 / 3 examples
+Iteration 1: Selected program 0 score: 0.0
+Batched reflection failed (proposer budget exhausted); retrying per task.
+Traceback (most recent call last):
+  File "/home/tim/worktrees/hone/hone-hone-pilot-seeds12-1/pilot/.venv/lib/python3.12/site-packages/gepa/proposer/reflective_mutation/reflective_mutation.py", line 262, in _propose_texts_batch_safe
+    return list(self._propose_texts_batch(jobs, mds))
+                ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/tim/worktrees/hone/hone-hone-pilot-seeds12-1/pilot/.venv/lib/python3.12/site-packages/gepa/proposer/reflective_mutation/reflective_mutation.py", line 227, in _propose_texts_batch
+    return [self.propose_new_texts(*jobs[0], metadata=mds[0])]
+            ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/tim/worktrees/hone/hone-hone-pilot-seeds12-1/pilot/.venv/lib/python3.12/site-packages/gepa/proposer/reflective_mutation/reflective_mutation.py", line 191, in propose_new_texts
+    proposal, next_lm = self._reflection_lm.reflect(candidate, reflective_dataset, components_to_update)
+                        ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/tim/worktrees/hone/hone-hone-pilot-seeds12-1/pilot/.venv/lib/python3.12/site-packages/gepa/proposer/reflective_mutation/reflection_lm.py", line 166, in reflect
+    return self.reflect_many([(candidate, reflective_dataset, components_to_update)])[0]
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/tim/worktrees/hone/hone-hone-pilot-seeds12-1/pilot/.venv/lib/python3.12/site-packages/gepa/proposer/reflective_mutation/reflection_lm.py", line 182, in reflect_many
+    raw_outputs = self._batch_complete([r[2] for r in rendered], [r[3] for r in rendered])
+                  ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/tim/worktrees/hone/hone-hone-pilot-seeds12-1/pilot/.venv/lib/python3.12/site-packages/gepa/proposer/reflective_mutation/reflection_lm.py", line 153, in _batch_complete
+    return [self.lm(prompts[0])]
+            ^^^^^^^^^^^^^^^^^^^
+  File "/home/tim/worktrees/hone/hone-hone-pilot-seeds12-1/pilot/.venv/lib/python3.12/site-packages/gepa/lm.py", line 254, in __call__
+    result = self._fn(prompt)
+             ^^^^^^^^^^^^^^^^
+  File "/home/tim/worktrees/hone/hone-hone-pilot-seeds12-1/pilot/search.py", line 375, in reflection
+    return call("proposer", messages, 2048)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/tim/worktrees/hone/hone-hone-pilot-seeds12-1/pilot/test_search.py", line 522, in call
+    raise failure
+pilot.runtime.BudgetExhausted: proposer budget exhausted
+
+Per-task reflection failed: proposer budget exhausted
+Iteration 1: Reflective mutation did not propose a new candidate
+Iteration 0: Base program full valset score: 0.0 over 3 / 3 examples
+Iteration 1: Selected program 0 score: 0.0
+Batched reflection failed (fatal proposer failure); retrying per task.
+Traceback (most recent call last):
+  File "/home/tim/worktrees/hone/hone-hone-pilot-seeds12-1/pilot/.venv/lib/python3.12/site-packages/gepa/proposer/reflective_mutation/reflective_mutation.py", line 262, in _propose_texts_batch_safe
+    return list(self._propose_texts_batch(jobs, mds))
+                ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/tim/worktrees/hone/hone-hone-pilot-seeds12-1/pilot/.venv/lib/python3.12/site-packages/gepa/proposer/reflective_mutation/reflective_mutation.py", line 227, in _propose_texts_batch
+    return [self.propose_new_texts(*jobs[0], metadata=mds[0])]
+            ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/tim/worktrees/hone/hone-hone-pilot-seeds12-1/pilot/.venv/lib/python3.12/site-packages/gepa/proposer/reflective_mutation/reflective_mutation.py", line 191, in propose_new_texts
+    proposal, next_lm = self._reflection_lm.reflect(candidate, reflective_dataset, components_to_update)
+                        ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/tim/worktrees/hone/hone-hone-pilot-seeds12-1/pilot/.venv/lib/python3.12/site-packages/gepa/proposer/reflective_mutation/reflection_lm.py", line 166, in reflect
+    return self.reflect_many([(candidate, reflective_dataset, components_to_update)])[0]
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/tim/worktrees/hone/hone-hone-pilot-seeds12-1/pilot/.venv/lib/python3.12/site-packages/gepa/proposer/reflective_mutation/reflection_lm.py", line 182, in reflect_many
+    raw_outputs = self._batch_complete([r[2] for r in rendered], [r[3] for r in rendered])
+                  ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/tim/worktrees/hone/hone-hone-pilot-seeds12-1/pilot/.venv/lib/python3.12/site-packages/gepa/proposer/reflective_mutation/reflection_lm.py", line 153, in _batch_complete
+    return [self.lm(prompts[0])]
+            ^^^^^^^^^^^^^^^^^^^
+  File "/home/tim/worktrees/hone/hone-hone-pilot-seeds12-1/pilot/.venv/lib/python3.12/site-packages/gepa/lm.py", line 254, in __call__
+    result = self._fn(prompt)
+             ^^^^^^^^^^^^^^^^
+  File "/home/tim/worktrees/hone/hone-hone-pilot-seeds12-1/pilot/search.py", line 375, in reflection
+    return call("proposer", messages, 2048)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/tim/worktrees/hone/hone-hone-pilot-seeds12-1/pilot/test_search.py", line 522, in call
+    raise failure
+ValueError: fatal proposer failure
+
+Per-task reflection failed: fatal proposer failure
+Iteration 1: Reflective mutation did not propose a new candidate
+ok
+test_native_gepa_invalid_proposal_cannot_count_toward_smoke (test_search.SearchTests.test_native_gepa_invalid_proposal_cannot_count_toward_smoke) ... Iteration 0: Base program full valset score: 0.0 over 3 / 3 examples
+Iteration 1: Selected program 0 score: 0.0
+Component 'prompt' produced an incomplete reflection output; skipping it (reflection output is empty).
+Iteration 1: Reflection returned no text updates; skipping proposal for this task.
+Iteration 1: Reflective mutation did not propose a new candidate
+Iteration 0: Base program full valset score: 0.0 over 3 / 3 examples
+Iteration 1: Selected program 0 score: 0.0
+Iteration 1: Proposed new text for prompt: xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx
+Iteration 1: New subsample score 0 is not better than old score 0, skipping
+ok
+test_noise_projection_preserves_identity_trials_and_equivalent_bounds (test_search.SearchTests.test_noise_projection_preserves_identity_trials_and_equivalent_bounds) ... ok
+test_plain_cache_keys_include_all_components_and_ignore_key_order (test_search.SearchTests.test_plain_cache_keys_include_all_components_and_ignore_key_order) ... ok
+test_plain_charges_seed_and_does_not_rescore_winner (test_search.SearchTests.test_plain_charges_seed_and_does_not_rescore_winner) ... ok
+test_plain_equal_scores_strictly_retain_seed (test_search.SearchTests.test_plain_equal_scores_strictly_retain_seed) ... ok
+test_plain_reproposed_artifacts_reuse_first_vector_even_if_rejected (test_search.SearchTests.test_plain_reproposed_artifacts_reuse_first_vector_even_if_rejected) ... ok
+test_real_native_gepa_does_not_swallow_evaluator_failure (test_search.SearchTests.test_real_native_gepa_does_not_swallow_evaluator_failure) ... Iteration 0: Base program full valset score: 0.0 over 3 / 3 examples
+Iteration 1: Exception during optimization: metric unavailable
+Traceback (most recent call last):
+  File "/home/tim/worktrees/hone/hone-hone-pilot-seeds12-1/pilot/.venv/lib/python3.12/site-packages/gepa/core/engine.py", line 1096, in run
+    proposals = self.reflective_proposer.propose(state)
+                ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/tim/worktrees/hone/hone-hone-pilot-seeds12-1/pilot/.venv/lib/python3.12/site-packages/gepa/proposer/reflective_mutation/reflective_mutation.py", line 353, in propose
+    parent_evals = self._batch_evaluate(items)
+                   ^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/tim/worktrees/hone/hone-hone-pilot-seeds12-1/pilot/.venv/lib/python3.12/site-packages/gepa/proposer/reflective_mutation/reflective_mutation.py", line 283, in _batch_evaluate
+    return invoke_batch_evaluate(self.adapter, items, capture_traces=True)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/tim/worktrees/hone/hone-hone-pilot-seeds12-1/pilot/.venv/lib/python3.12/site-packages/gepa/core/adapter.py", line 274, in invoke_batch_evaluate
+    return default_batch_evaluate(adapter, items, capture_traces=capture_traces)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/tim/worktrees/hone/hone-hone-pilot-seeds12-1/pilot/.venv/lib/python3.12/site-packages/gepa/core/adapter.py", line 261, in default_batch_evaluate
+    return [adapter.evaluate(batch, candidate, capture_traces=capture_traces) for candidate, batch in items]
+            ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/tim/worktrees/hone/hone-hone-pilot-seeds12-1/pilot/search.py", line 303, in evaluate
+    result = evaluate(decoded, batch, capture_traces=capture_traces)
+             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/tim/worktrees/hone/hone-hone-pilot-seeds12-1/pilot/test_search.py", line 429, in evaluate
+    raise ValueError("metric unavailable")
+ValueError: metric unavailable
+
+ok
+test_real_native_gepa_interrupt_keeps_seed (test_search.SearchTests.test_real_native_gepa_interrupt_keeps_seed) ... Iteration 0: Base program full valset score: 0.0 over 3 / 3 examples
+Iteration 1: Selected program 0 score: 0.0
+Iteration 1: Proposed new text for prompt: better
+Iteration 1: Exception during optimization: selection interrupted
+Traceback (most recent call last):
+  File "/home/tim/worktrees/hone/hone-hone-pilot-seeds12-1/pilot/.venv/lib/python3.12/site-packages/gepa/core/engine.py", line 1101, in run
+    proposal_accepted = self._run_reflective_batch(proposals, state)
+                        ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/tim/worktrees/hone/hone-hone-pilot-seeds12-1/pilot/.venv/lib/python3.12/site-packages/gepa/core/engine.py", line 662, in _run_reflective_batch
+    valset_evals = self._evaluate_programs_on_valset([p.candidate for p in selected], state)
+                   ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/tim/worktrees/hone/hone-hone-pilot-seeds12-1/pilot/.venv/lib/python3.12/site-packages/gepa/core/engine.py", line 332, in _evaluate_programs_on_valset
+    fresh = invoke_batch_evaluate(self.adapter, items, capture_traces=False) if items else []
+            ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/tim/worktrees/hone/hone-hone-pilot-seeds12-1/pilot/.venv/lib/python3.12/site-packages/gepa/core/adapter.py", line 274, in invoke_batch_evaluate
+    return default_batch_evaluate(adapter, items, capture_traces=capture_traces)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/tim/worktrees/hone/hone-hone-pilot-seeds12-1/pilot/.venv/lib/python3.12/site-packages/gepa/core/adapter.py", line 261, in default_batch_evaluate
+    return [adapter.evaluate(batch, candidate, capture_traces=capture_traces) for candidate, batch in items]
+            ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/tim/worktrees/hone/hone-hone-pilot-seeds12-1/pilot/search.py", line 303, in evaluate
+    result = evaluate(decoded, batch, capture_traces=capture_traces)
+             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/tim/worktrees/hone/hone-hone-pilot-seeds12-1/pilot/test_search.py", line 396, in evaluate
+    raise BudgetExhausted("selection interrupted")
+pilot.runtime.BudgetExhausted: selection interrupted
+
+ok
+test_real_native_gepa_reflection_and_budget_retention (test_search.SearchTests.test_real_native_gepa_reflection_and_budget_retention) ... Iteration 0: Base program full valset score: 0.0 over 3 / 3 examples
+Iteration 1: Selected program 0 score: 0.0
+Iteration 1: Proposed new text for prompt: better
+Iteration 1: Accepted candidate (subsample score 0.0 -> 8.0); running full eval.
+Iteration 1: Found a better program on the valset with score 1.0.
+Iteration 1: Valset score for new program: 1.0 (coverage 3 / 3)
+Iteration 1: Val aggregate for new program: 1.0
+Iteration 1: Individual valset scores for new program: {0: 1.0, 1: 1.0, 2: 1.0}
+Iteration 1: New valset pareto front scores: {0: 1.0, 1: 1.0, 2: 1.0}
+Iteration 1: Valset pareto front aggregate score: 1.0
+Iteration 1: Updated valset pareto front programs: {0: {1}, 1: {1}, 2: {1}}
+Iteration 1: Best valset aggregate score so far: 1.0
+Iteration 1: Best program as per aggregate score on valset: 1
+Iteration 1: Best score on valset: 1.0
+Iteration 1: Linear pareto front program index: 1
+Iteration 1: New program candidate index: 1
+ok
+test_real_native_gepa_rejects_failed_reflection_then_can_improve (test_search.SearchTests.test_real_native_gepa_rejects_failed_reflection_then_can_improve) ... Iteration 0: Base program full valset score: 0.0 over 3 / 3 examples
+Iteration 1: Selected program 0 score: 0.0
+Batched reflection failed (provider refusal); retrying per task.
+Traceback (most recent call last):
+  File "/home/tim/worktrees/hone/hone-hone-pilot-seeds12-1/pilot/.venv/lib/python3.12/site-packages/gepa/proposer/reflective_mutation/reflective_mutation.py", line 262, in _propose_texts_batch_safe
+    return list(self._propose_texts_batch(jobs, mds))
+                ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/tim/worktrees/hone/hone-hone-pilot-seeds12-1/pilot/.venv/lib/python3.12/site-packages/gepa/proposer/reflective_mutation/reflective_mutation.py", line 227, in _propose_texts_batch
+    return [self.propose_new_texts(*jobs[0], metadata=mds[0])]
+            ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/tim/worktrees/hone/hone-hone-pilot-seeds12-1/pilot/.venv/lib/python3.12/site-packages/gepa/proposer/reflective_mutation/reflective_mutation.py", line 191, in propose_new_texts
+    proposal, next_lm = self._reflection_lm.reflect(candidate, reflective_dataset, components_to_update)
+                        ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/tim/worktrees/hone/hone-hone-pilot-seeds12-1/pilot/.venv/lib/python3.12/site-packages/gepa/proposer/reflective_mutation/reflection_lm.py", line 166, in reflect
+    return self.reflect_many([(candidate, reflective_dataset, components_to_update)])[0]
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/tim/worktrees/hone/hone-hone-pilot-seeds12-1/pilot/.venv/lib/python3.12/site-packages/gepa/proposer/reflective_mutation/reflection_lm.py", line 182, in reflect_many
+    raw_outputs = self._batch_complete([r[2] for r in rendered], [r[3] for r in rendered])
+                  ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/tim/worktrees/hone/hone-hone-pilot-seeds12-1/pilot/.venv/lib/python3.12/site-packages/gepa/proposer/reflective_mutation/reflection_lm.py", line 153, in _batch_complete
+    return [self.lm(prompts[0])]
+            ^^^^^^^^^^^^^^^^^^^
+  File "/home/tim/worktrees/hone/hone-hone-pilot-seeds12-1/pilot/.venv/lib/python3.12/site-packages/gepa/lm.py", line 254, in __call__
+    result = self._fn(prompt)
+             ^^^^^^^^^^^^^^^^
+  File "/home/tim/worktrees/hone/hone-hone-pilot-seeds12-1/pilot/search.py", line 375, in reflection
+    return call("proposer", messages, 2048)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/tim/worktrees/hone/hone-hone-pilot-seeds12-1/pilot/test_search.py", line 413, in call
+    raise CallFailed("provider refusal")
+pilot.runtime.CallFailed: provider refusal
+
+Per-task reflection failed: provider refusal
+Iteration 1: Reflective mutation did not propose a new candidate
+Iteration 2: Selected program 0 score: 0.0
+Iteration 2: Proposed new text for prompt: better
+Iteration 2: Accepted candidate (subsample score 0.0 -> 8.0); running full eval.
+Iteration 2: Found a better program on the valset with score 1.0.
+Iteration 2: Valset score for new program: 1.0 (coverage 3 / 3)
+Iteration 2: Val aggregate for new program: 1.0
+Iteration 2: Individual valset scores for new program: {0: 1.0, 1: 1.0, 2: 1.0}
+Iteration 2: New valset pareto front scores: {0: 1.0, 1: 1.0, 2: 1.0}
+Iteration 2: Valset pareto front aggregate score: 1.0
+Iteration 2: Updated valset pareto front programs: {0: {1}, 1: {1}, 2: {1}}
+Iteration 2: Best valset aggregate score so far: 1.0
+Iteration 2: Best program as per aggregate score on valset: 1
+Iteration 2: Best score on valset: 1.0
+Iteration 2: Linear pareto front program index: 1
+Iteration 2: New program candidate index: 1
+ok
+test_complete_json_without_newline_keeps_reported_totals_but_marks_interruption (test_spend.SpendTests.test_complete_json_without_newline_keeps_reported_totals_but_marks_interruption) ... ok
+test_deployment_count_token_and_cost_mismatches_are_rejected (test_spend.SpendTests.test_deployment_count_token_and_cost_mismatches_are_rejected) ... ok
+test_empty_journals_and_missing_files_do_not_claim_completed_measurement (test_spend.SpendTests.test_empty_journals_and_missing_files_do_not_claim_completed_measurement) ... ok
+test_estimated_refusal_charges_reconcile_without_becoming_reported_usage (test_spend.SpendTests.test_estimated_refusal_charges_reconcile_without_becoming_reported_usage) ... ok
+test_estimates_cannot_mask_inconsistent_charges_or_evaluation_spans (test_spend.SpendTests.test_estimates_cannot_mask_inconsistent_charges_or_evaluation_spans) ... ok
+test_failed_repair_without_usage_is_still_a_proposal_call (test_spend.SpendTests.test_failed_repair_without_usage_is_still_a_proposal_call) ... ok
+test_failed_retry_and_missing_usage_stay_in_evaluation_span (test_spend.SpendTests.test_failed_retry_and_missing_usage_stay_in_evaluation_span) ... ok
+test_float_tolerance_accepts_cumulative_subtraction_roundoff_not_real_cost_difference (test_spend.SpendTests.test_float_tolerance_accepts_cumulative_subtraction_roundoff_not_real_cost_difference) ... ok
+test_interleaved_roles_multiple_partitions_and_exact_conservation (test_spend.SpendTests.test_interleaved_roles_multiple_partitions_and_exact_conservation) ... ok
+test_invalid_accounting_values_and_call_order_are_rejected (test_spend.SpendTests.test_invalid_accounting_values_and_call_order_are_rejected) ... ok
+test_invalid_terminated_or_interior_json_is_rejected (test_spend.SpendTests.test_invalid_terminated_or_interior_json_is_rejected) ... ok
+test_missing_evaluation_journal_keeps_every_call (test_spend.SpendTests.test_missing_evaluation_journal_keeps_every_call) ... ok
+test_missing_retry_observation_does_not_invent_observed_attempts (test_spend.SpendTests.test_missing_retry_observation_does_not_invent_observed_attempts) ... ok
+test_proposal_or_unknown_call_cannot_be_hidden_inside_deployment_span (test_spend.SpendTests.test_proposal_or_unknown_call_cannot_be_hidden_inside_deployment_span) ... ok
+test_reported_refusal_is_not_an_estimate_or_transport_failure (test_spend.SpendTests.test_reported_refusal_is_not_an_estimate_or_transport_failure) ... ok
+test_truncated_call_tail_marks_unobserved_usage_explicitly (test_spend.SpendTests.test_truncated_call_tail_marks_unobserved_usage_explicitly) ... ok
+test_truncated_evaluation_tail_leaves_durable_calls_unassigned (test_spend.SpendTests.test_truncated_evaluation_tail_leaves_durable_calls_unassigned) ... ok
+test_unfinished_evaluation_preserves_its_calls_without_guessing_partition (test_spend.SpendTests.test_unfinished_evaluation_preserves_its_calls_without_guessing_partition) ... ok
+test_unknown_role_is_unassigned_and_conserved (test_spend.SpendTests.test_unknown_role_is_unassigned_and_conserved) ... ok
+test_zero_call_evaluation_is_valid_and_consumes_no_ledger_call (test_spend.SpendTests.test_zero_call_evaluation_is_valid_and_consumes_no_ledger_call) ... ok
+test_aime_reasoning_is_not_part_of_official_answer_field (test_tasks.TaskTests.test_aime_reasoning_is_not_part_of_official_answer_field) ... ok
+test_budget_exhaustion_propagates (test_tasks.TaskTests.test_budget_exhaustion_propagates) ... ok
+test_call_scope_metadata_does_not_change_model_requests (test_tasks.TaskTests.test_call_scope_metadata_does_not_change_model_requests) ... ok
+test_caller_cannot_replace_protected_answer (test_tasks.TaskTests.test_caller_cannot_replace_protected_answer) ... ok
+test_download_removal_preserves_checker_logic (test_tasks.TaskTests.test_download_removal_preserves_checker_logic) ... ok
+test_explicit_development_only (test_tasks.TaskTests.test_explicit_development_only) ... ok
+test_ifbench_caller_cannot_replace_protected_query_or_checks (test_tasks.TaskTests.test_ifbench_caller_cannot_replace_protected_query_or_checks) ... ok
+test_ifbench_membership_and_capture_guards_precede_model_calls (test_tasks.TaskTests.test_ifbench_membership_and_capture_guards_precede_model_calls) ... ok
+test_ifbench_refusal_ends_either_stage_and_scores_empty_response (test_tasks.TaskTests.test_ifbench_refusal_ends_either_stage_and_scores_empty_response) ... ok
+test_ifbench_rejects_invalid_json_fields_at_either_stage (test_tasks.TaskTests.test_ifbench_rejects_invalid_json_fields_at_either_stage) ... ok
+test_ifbench_requires_exact_two_module_candidate (test_tasks.TaskTests.test_ifbench_requires_exact_two_module_candidate) ... ok
+test_ifbench_stages_isolate_editable_instructions_and_score_only_final (test_tasks.TaskTests.test_ifbench_stages_isolate_editable_instructions_and_score_only_final) ... ok
+test_invalid_candidate_never_calls_model (test_tasks.TaskTests.test_invalid_candidate_never_calls_model) ... ok
+test_invalid_ifbench_revision_discards_unscored_draft (test_tasks.TaskTests.test_invalid_ifbench_revision_discards_unscored_draft) ... ok
+test_mbpp_load_keeps_every_row_and_publishes_gradeability (test_tasks.TaskTests.test_mbpp_load_keeps_every_row_and_publishes_gradeability) ... ok
+test_mbpp_model_calls_never_receive_assertions_or_setup (test_tasks.TaskTests.test_mbpp_model_calls_never_receive_assertions_or_setup) ... ok
+test_mbpp_replay_reference_and_evaluation_share_extraction (test_tasks.TaskTests.test_mbpp_replay_reference_and_evaluation_share_extraction) ... ok
+test_no_labels_reach_model (test_tasks.TaskTests.test_no_labels_reach_model) ... ok
+test_official_integer_semantics (test_tasks.TaskTests.test_official_integer_semantics) ... ok
+test_official_loose_variants_and_instruction_fraction (test_tasks.TaskTests.test_official_loose_variants_and_instruction_fraction) ... ok
+test_official_metric_adapter_copies_mutable_kwargs (test_tasks.TaskTests.test_official_metric_adapter_copies_mutable_kwargs) ... ok
+test_provider_failure_scores_zero_but_infrastructure_error_propagates (test_tasks.TaskTests.test_provider_failure_scores_zero_but_infrastructure_error_propagates) ... ok
+test_refusal_nondeterminism_is_never_scored_as_candidate_failure (test_tasks.TaskTests.test_refusal_nondeterminism_is_never_scored_as_candidate_failure) ... ok
+test_refused_mbpp_program_is_zero_with_no_solution_worker (test_tasks.TaskTests.test_refused_mbpp_program_is_zero_with_no_solution_worker) ... ok
+test_selection_feedback_rejected_before_call (test_tasks.TaskTests.test_selection_feedback_rejected_before_call) ... ok
+test_signature_adaptation_never_exposes_body (test_tasks.TaskTests.test_signature_adaptation_never_exposes_body) ... ok
+test_changed_baseline_or_declaration_does_not_authorize_carryover (test_transition.TransitionTests.test_changed_baseline_or_declaration_does_not_authorize_carryover) ... ok
+test_dispatch_transition_cannot_exist_without_prior_grant (test_transition.TransitionTests.test_dispatch_transition_cannot_exist_without_prior_grant) ... ok
+test_dispatch_transition_rejects_changed_chain_members (test_transition.TransitionTests.test_dispatch_transition_rejects_changed_chain_members) ... ok
+test_dispatch_transition_rejects_resealed_baseline_not_matching_prior_after (test_transition.TransitionTests.test_dispatch_transition_rejects_resealed_baseline_not_matching_prior_after) ... ok
+test_dispatch_transition_rejects_resealed_prior_grant (test_transition.TransitionTests.test_dispatch_transition_rejects_resealed_prior_grant) ... ok
+test_dispatch_transition_requires_complete_inventory_and_exact_changed_snapshot (test_transition.TransitionTests.test_dispatch_transition_requires_complete_inventory_and_exact_changed_snapshot) ... ok
+test_dispatch_transition_retains_original_execution_and_reports_chain (test_transition.TransitionTests.test_dispatch_transition_retains_original_execution_and_reports_chain) ... ok
+test_encoding_policy_and_prior_grant_changes_cannot_authorize_carryover (test_transition.TransitionTests.test_encoding_policy_and_prior_grant_changes_cannot_authorize_carryover) ... ok
+test_even_resealed_refusal_or_unknown_usage_cannot_carry_a_task_admission (test_transition.TransitionTests.test_even_resealed_refusal_or_unknown_usage_cannot_carry_a_task_admission) ... ok
+test_exact_transition_accepts_answered_archive_but_rejects_unreviewed_runtime (test_transition.TransitionTests.test_exact_transition_accepts_answered_archive_but_rejects_unreviewed_runtime) ... ok
+test_grader_transition_cannot_reseal_an_unadmitted_baseline (test_transition.TransitionTests.test_grader_transition_cannot_reseal_an_unadmitted_baseline) ... ok
+test_grader_transition_preserves_admitted_identity_through_older_grants (test_transition.TransitionTests.test_grader_transition_preserves_admitted_identity_through_older_grants) ... ok
+test_grader_transition_rejects_changed_live_source_and_campaign_cap (test_transition.TransitionTests.test_grader_transition_rejects_changed_live_source_and_campaign_cap) ... ok
+test_grader_transition_rejects_coordinated_core_and_receipt_change (test_transition.TransitionTests.test_grader_transition_rejects_coordinated_core_and_receipt_change) ... ok
+test_identity_rejects_mutated_baseline_declaration_and_changed_live_source (test_transition.TransitionTests.test_identity_rejects_mutated_baseline_declaration_and_changed_live_source) ... ok
+test_identity_uses_authenticated_baseline_without_changing_archived_provenance (test_transition.TransitionTests.test_identity_uses_authenticated_baseline_without_changing_archived_provenance) ... ok
+test_selection_transition_preserves_authenticated_admission_identity (test_transition.TransitionTests.test_selection_transition_preserves_authenticated_admission_identity) ... ok
+test_selection_transition_rejects_changed_sources_and_declarations (test_transition.TransitionTests.test_selection_transition_rejects_changed_sources_and_declarations) ... ok
+test_selection_transition_rejects_coordinated_search_and_receipt_change (test_transition.TransitionTests.test_selection_transition_rejects_coordinated_search_and_receipt_change) ... ok
+test_competing_reader_cannot_block_supervisor_deadline_or_exit_drain (test_verification.DockerVerificationTests.test_competing_reader_cannot_block_supervisor_deadline_or_exit_drain) ... ok
+test_completed_outer_invocation_survives_deadline_before_read_or_after_eof (test_verification.DockerVerificationTests.test_completed_outer_invocation_survives_deadline_before_read_or_after_eof) ... ok
+test_completed_queued_frame_is_drained_after_deadline (test_verification.DockerVerificationTests.test_completed_queued_frame_is_drained_after_deadline) ... ok
+test_delayed_genuine_sigkill_is_unscored_infrastructure (test_verification.DockerVerificationTests.test_delayed_genuine_sigkill_is_unscored_infrastructure) ... ok
+test_docker_official_shapes_and_attacks (test_verification.DockerVerificationTests.test_docker_official_shapes_and_attacks) ... ok
+test_exited_worker_with_escaped_descendant_preserves_verdict (test_verification.DockerVerificationTests.test_exited_worker_with_escaped_descendant_preserves_verdict) ... ok
+test_durable_receipts_keep_scope_original_output_and_outcomes (test_verification.InfrastructureOutcomeTests.test_durable_receipts_keep_scope_original_output_and_outcomes) ... ok
+test_invocation_preserves_real_exit_stdout_stderr (test_verification.InfrastructureOutcomeTests.test_invocation_preserves_real_exit_stdout_stderr) ... ok
+test_malformed_and_overlarge_frames_are_unscored (test_verification.InfrastructureOutcomeTests.test_malformed_and_overlarge_frames_are_unscored) ... ok
+test_missing_frame_is_unscored_infrastructure (test_verification.InfrastructureOutcomeTests.test_missing_frame_is_unscored_infrastructure) ... ok
+test_nonzero_exit_is_unscored_infrastructure (test_verification.InfrastructureOutcomeTests.test_nonzero_exit_is_unscored_infrastructure) ... ok
+test_outer_timeout_without_trusted_verdict_is_unscored_infrastructure (test_verification.InfrastructureOutcomeTests.test_outer_timeout_without_trusted_verdict_is_unscored_infrastructure) ... ok
+test_oversized_source_boundary_is_explicit_and_retains_bounded_output (test_verification.InfrastructureOutcomeTests.test_oversized_source_boundary_is_explicit_and_retains_bounded_output) ... ok
+test_planning_and_wrapper_failures_have_stage_receipts (test_verification.InfrastructureOutcomeTests.test_planning_and_wrapper_failures_have_stage_receipts) ... ok
+test_receipt_validation_rejects_missing_inconsistent_and_tampered_provenance (test_verification.InfrastructureOutcomeTests.test_receipt_validation_rejects_missing_inconsistent_and_tampered_provenance) ... ok
+test_signal_death_is_unscored_infrastructure (test_verification.InfrastructureOutcomeTests.test_signal_death_is_unscored_infrastructure) ... ok
+test_successful_plan_preparation_is_not_a_task_score (test_verification.InfrastructureOutcomeTests.test_successful_plan_preparation_is_not_a_task_score) ... ok
+test_trusted_payload_errors_are_infrastructure_not_candidate_failures (test_verification.InfrastructureOutcomeTests.test_trusted_payload_errors_are_infrastructure_not_candidate_failures) ... ok
+test_always_equal_objects_cannot_pass (test_verification.VerificationTests.test_always_equal_objects_cannot_pass) ... ok
+test_candidate_descendants_neither_hold_the_frame_nor_outlive_the_worker (test_verification.VerificationTests.test_candidate_descendants_neither_hold_the_frame_nor_outlive_the_worker) ... ok
+test_candidate_exception_keeps_wrong_answer_score (test_verification.VerificationTests.test_candidate_exception_keeps_wrong_answer_score) ... ok
+test_candidate_failures_are_trusted_wrong_answers_with_receipts (test_verification.VerificationTests.test_candidate_failures_are_trusted_wrong_answers_with_receipts) ... ok
+test_candidate_syntax_error_keeps_wrong_answer_score (test_verification.VerificationTests.test_candidate_syntax_error_keeps_wrong_answer_score) ... ok
+test_candidate_time_limit_keeps_wrong_answer_score (test_verification.VerificationTests.test_candidate_time_limit_keeps_wrong_answer_score) ... ok
+test_early_exit_forgery_and_patches_cannot_alter_decision (test_verification.VerificationTests.test_early_exit_forgery_and_patches_cannot_alter_decision) ... ok
+test_every_official_assertion_runs_in_order (test_verification.VerificationTests.test_every_official_assertion_runs_in_order) ... ok
+test_exact_builtin_types_and_canonical_collections (test_verification.VerificationTests.test_exact_builtin_types_and_canonical_collections) ... ok
+test_expected_values_reference_and_setup_never_reach_candidate (test_verification.VerificationTests.test_expected_values_reference_and_setup_never_reach_candidate) ... ok
+test_extraction_is_shared_without_repair (test_verification.VerificationTests.test_extraction_is_shared_without_repair) ... ok
+test_invocation_receipts_freeze_time_limits (test_verification.VerificationTests.test_invocation_receipts_freeze_time_limits) ... ok
+test_node_trees_from_official_setup (test_verification.VerificationTests.test_node_trees_from_official_setup) ... ok
+test_official_int_wrapper_accepts_only_plain_builtin_values (test_verification.VerificationTests.test_official_int_wrapper_accepts_only_plain_builtin_values) ... ok
+test_pair_arguments_are_rebuilt_without_candidate_constructors_raw_or_fenced (test_verification.VerificationTests.test_pair_arguments_are_rebuilt_without_candidate_constructors_raw_or_fenced) ... ok
+test_plan_fingerprint_ignores_set_order_but_not_expected_values (test_verification.VerificationTests.test_plan_fingerprint_ignores_set_order_but_not_expected_values) ... ok
+test_planning_infrastructure_failures_raise_instead_of_relabeling (test_verification.VerificationTests.test_planning_infrastructure_failures_raise_instead_of_relabeling) ... ok
+test_retained_naive_type_errors_are_trusted_wrong_answers (test_verification.VerificationTests.test_retained_naive_type_errors_are_trusted_wrong_answers) ... ok
+test_source_output_and_time_are_bounded (test_verification.VerificationTests.test_source_output_and_time_are_bounded) ... ok
+test_structural_records_compare_class_name_and_exact_fields (test_verification.VerificationTests.test_structural_records_compare_class_name_and_exact_fields) ... ok
+test_time_limit_is_enforced_outside_candidate_timer_interference (test_verification.VerificationTests.test_time_limit_is_enforced_outside_candidate_timer_interference) ... ok
+test_type_arguments_and_runtime_dependent_expected_values (test_verification.VerificationTests.test_type_arguments_and_runtime_dependent_expected_values) ... ok
+test_unrepresentable_official_rows_are_explicit_and_score_zero (test_verification.VerificationTests.test_unrepresentable_official_rows_are_explicit_and_score_zero) ... ok
+
+----------------------------------------------------------------------
+Ran 344 tests in 454.900s
+
+OK

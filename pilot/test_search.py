@@ -102,22 +102,81 @@ class SearchTests(unittest.TestCase):
         self.assertIsNotNone(result["trajectory"][0]["artifact_error"])
         self.assertEqual(result["valid_proposals"], 0)
 
-    def test_hone_refreshes_full_paired_parent_before_child(self):
-        seen = []
+    def test_hone_gate_passer_receives_remaining_selection_budget(self):
+        selection = []
         def evaluate(candidate, rows, capture_traces=False):
-            seen.append((candidate["prompt"], tuple(row["id"] for row in rows)))
+            if rows[0]["id"].startswith("s"):
+                if len(selection) == 2:
+                    raise BudgetExhausted("only two selection vectors fit")
+                selection.append(candidate["prompt"])
             value = float(candidate["prompt"] == "better")
             return {"scores": [value] * len(rows), "outputs": [""] * len(rows), "trajectories": [{}] * len(rows)}
         def policy(seed, episode, parent, child, noise):
             return {"parent": "incumbent", "epsilon": 0.2, "oneRepair": True, "gate": {"passed": child > parent}}
         with tempfile.TemporaryDirectory() as directory, patch("pilot.search._policy", policy):
             result = run_search("hone", task(), lambda *args: '{"prompt":"better"}', evaluate,
-                                lambda: True, {"noiseFloor": 0, "noiseEnvelope": 0, "noise_design": {"rows_per_arm": 20}}, 0, Path(directory), 1)
+                                lambda: True, {"noiseFloor": 0, "noiseEnvelope": 0, "noise_design": {"rows_per_arm": 20}},
+                                0, Path(directory), 1)
+        self.assertEqual(selection, ["seed", "better"])
         self.assertEqual(result["candidate"], {"prompt": "better"})
-        self.assertEqual(seen[-2][0], "seed")
-        self.assertEqual(seen[-1][0], "better")
-        self.assertEqual(seen[-2][1], seen[-1][1])
-        self.assertEqual(seen[2][1], seen[3][1])
+        self.assertTrue(result["trajectory"][0]["training_gates"][0]["passed"])
+        self.assertTrue(result["trajectory"][0]["accepted"])
+
+    def test_hone_reuses_seed_parent_and_incumbent_vectors_on_restart(self):
+        selection = []
+        values = {"seed": 0.0, "better": 0.5, "best": 1.0}
+        def evaluate(candidate, rows, capture_traces=False):
+            if rows[0]["id"].startswith("s"):
+                selection.append(candidate["prompt"])
+            return {"scores": [values[candidate["prompt"]]] * len(rows),
+                    "outputs": [""] * len(rows), "trajectories": [{}] * len(rows)}
+        def policy(seed, episode, parent, child, noise):
+            return {"parent": "seed", "epsilon": 0.2, "oneRepair": True, "gate": {"passed": child > parent}}
+        proposals = iter(['{"prompt":"better"}', '{"prompt":"best"}', '{"prompt":"better"}'])
+        with tempfile.TemporaryDirectory() as directory, patch("pilot.search._policy", policy):
+            result = run_search("hone", task(), lambda *args: next(proposals), evaluate,
+                                lambda: True, {"noiseFloor": 0, "noiseEnvelope": 0, "noise_design": {"rows_per_arm": 20}},
+                                0, Path(directory), 3)
+        self.assertEqual(selection, ["seed", "better", "best"])
+        self.assertEqual(result["candidate"], {"prompt": "best"})
+        self.assertEqual([event["accepted"] for event in result["trajectory"]], [True, True, False])
+        self.assertTrue(result["trajectory"][-1]["training_gates"][0]["passed"])
+
+    def test_plain_reproposed_artifacts_reuse_first_vector_even_if_rejected(self):
+        selection = []
+        def evaluate(candidate, rows, capture_traces=False):
+            value = 0.5 if candidate["prompt"] == "seed" else 0.0
+            if rows[0]["id"].startswith("s"):
+                if candidate["prompt"] in selection:
+                    value = 1.0
+                selection.append(candidate["prompt"])
+            return {"scores": [value] * len(rows), "outputs": [""] * len(rows), "trajectories": [{}] * len(rows)}
+        proposals = iter(['{"prompt":"rejected"}', '{"prompt":"rejected"}', '{"prompt":"seed"}'])
+        with tempfile.TemporaryDirectory() as directory:
+            result = run_search("plain", task(), lambda *args: next(proposals), evaluate,
+                                lambda: True, {}, 0, Path(directory), 3)
+        self.assertEqual(selection, ["seed", "rejected"])
+        self.assertEqual(result["candidate"], {"prompt": "seed"})
+        self.assertEqual(result["selection_score"], 0.5)
+        self.assertEqual([event["selection_score"] for event in result["trajectory"]], [0, 0, 0.5])
+
+    def test_plain_cache_keys_include_all_components_and_ignore_key_order(self):
+        workload = task()
+        workload.seed_candidate = {"prompt": "same", "program": "old"}
+        selection = []
+        def evaluate(candidate, rows, capture_traces=False):
+            if rows[0]["id"].startswith("s"):
+                selection.append(dict(candidate))
+            value = float(candidate["program"] == "new")
+            return {"scores": [value] * len(rows), "outputs": [""] * len(rows), "trajectories": [{}] * len(rows)}
+        proposals = iter(['{"program":"old","prompt":"same"}', '{"prompt":"same","program":"new"}',
+                          '{"program":"new","prompt":"same"}'])
+        with tempfile.TemporaryDirectory() as directory:
+            result = run_search("plain", workload, lambda *args: next(proposals), evaluate,
+                                lambda: True, {}, 0, Path(directory), 3)
+        self.assertEqual(selection, [{"prompt": "same", "program": "old"}, {"prompt": "same", "program": "new"}])
+        self.assertEqual(result["candidate"], {"prompt": "same", "program": "new"})
+        self.assertEqual([event["accepted"] for event in result["trajectory"]], [False, True, False])
 
     def test_hone_doubles_uncertain_train_slice_and_rejects_unresolved(self):
         seen = []

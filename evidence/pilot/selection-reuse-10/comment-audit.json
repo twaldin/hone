@@ -1,0 +1,11 @@
+{
+  "head": "d60d2c2d9823c45bc0a83a99a62d8d335174b032",
+  "base": "6017e35e0b2f2f8dd72c0cdd8e2bbf94edeaf107",
+  "reviewer_model": "openai-codex/gpt-6.1-sol",
+  "findings": 0,
+  "added_or_changed_suppressions": 0,
+  "edits": 0,
+  "scope": "Added or changed code comments and docstrings, including launch check; archived source snapshots and ordinary Markdown prose excluded.",
+  "remaining_docstrings": "Public reporting contracts or CLI help.",
+  "model_calls": 0
+}

@@ -1,0 +1,11 @@
+{
+  "schema": "pilot-selection-source-pin-proof-v10",
+  "finding": "Changing pilot/search.py together with its v10 receipt after hash passed admission without editing the trusted admission code.",
+  "before": {"test": "pilot.test_transition.TransitionTests.test_selection_transition_rejects_coordinated_search_and_receipt_change", "tests": 1, "failures": 1, "observed": "ValueError not raised"},
+  "fix": "Pin the approved search SHA256 independently in pilot/admission.py, then require the receipt's search after hash to match it. Changing search plus receipt alone is rejected.",
+  "approved_search_sha256": "sha256:8bf99067e6d87a12e124b849285e623e4e631f6707e2708822b8330d3f3ef3cb",
+  "after": {"command": "nice -n 10 taskset -c 6 pilot/.venv/bin/python -m unittest pilot.test_transition", "tests": 15, "failures": 0},
+  "actual_chain_smoke": {"accepted": true, "retained_search_identity": "sha256:cd80943fe956b11c8269c37a8cd487f000489cb9496ff247218579488043f8b0"},
+  "trust_boundary": "Trusted admission code and exact approved launch revision. This is source drift detection, not protection against an attacker who can replace the admission code itself.",
+  "model_calls": 0
+}

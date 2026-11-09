@@ -1,0 +1,23 @@
+{
+  "launch": {
+    "Restart": "no",
+    "disk_available_bytes": 552930070528,
+    "mode": "admit",
+    "pid": 2107520,
+    "requested_affinity": [
+      6
+    ],
+    "requested_nice": 10,
+    "status": "started",
+    "taskset": "/usr/bin/taskset",
+    "unit": "hone-predecl11e-admit-20261107T153745Z.service"
+  },
+  "observed_process_resources": {
+    "cpu_affinity": [
+      6
+    ],
+    "nice": 10,
+    "pid": 2107520
+  },
+  "observed_systemd_properties": "Restart=no\nAllowedCPUs=6\nNice=10\n"
+}

@@ -1,0 +1,37 @@
+{
+  "schema": "pilot-post-stop-cli-version-observation-v10",
+  "observed_cli_version": "omp/18.17.0",
+  "command": "omp --version",
+  "required_by_frozen_runtime": "18.16.0",
+  "guard": "pilot/runtime.py:433-435 rejects any different ready-frame version before ModelCalls begins",
+  "observed_failures": [
+    {
+      "task": "mbpp",
+      "seed": 1,
+      "method": "plain",
+      "error_type": "TransportError",
+      "recorded_calls": 0
+    },
+    {
+      "task": "hover",
+      "seed": 1,
+      "method": "hone",
+      "error_type": "TransportError",
+      "recorded_calls": 0
+    }
+  ],
+  "attribution": "[INFERENCE] Installed CLI version drift is consistent with the two startup TransportErrors. Failure receipts retain only the error type, and Gateway stderr is discarded, so the exact per-failure cause is not proven.",
+  "broker_or_omp_changed_by_this_lane": false,
+  "reruns_or_provider_probes_after_stop": 0,
+  "observed_at": "2026-11-06T09:17:12.686Z",
+  "post_stop_file_metadata": {
+    "installed_cli_path": "/home/tim/.bun/install/global/node_modules/@oh-my-pi/pi-coding-agent/dist/cli.js",
+    "cli_birthtime": "2026-11-06T09:05:40.977Z",
+    "cli_mtime": "2026-11-06T09:05:41.348Z",
+    "cli_ctime": "2026-11-06T09:05:54.939Z",
+    "original_plain_cell_birthtime": "2026-11-06T09:06:10.475Z",
+    "original_plain_cell_mtime": "2026-11-06T09:06:14.547Z",
+    "interpretation": "[INFERENCE] The installed CLI file appeared before the first startup failure and after the last completed GEPA cell. This strengthens the version-drift explanation but does not recover the discarded per-failure exception.",
+    "provider_calls": 0
+  }
+}

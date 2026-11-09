@@ -1,0 +1,18 @@
+test_live_signal_delivery_stop_retains_trusted_timeout_zero (pilot.test_verification.DockerVerificationTests.test_live_signal_delivery_stop_retains_trusted_timeout_zero) ... FAIL
+test_completed_outer_invocation_survives_deadline_before_read_or_after_eof (pilot.test_verification.DockerVerificationTests.test_completed_outer_invocation_survives_deadline_before_read_or_after_eof) ... ok
+test_delayed_genuine_sigkill_is_unscored_infrastructure (pilot.test_verification.DockerVerificationTests.test_delayed_genuine_sigkill_is_unscored_infrastructure) ... ok
+test_completed_queued_frame_is_drained_after_deadline (pilot.test_verification.DockerVerificationTests.test_completed_queued_frame_is_drained_after_deadline) ... ok
+test_competing_reader_cannot_block_supervisor_deadline_or_exit_drain (pilot.test_verification.DockerVerificationTests.test_competing_reader_cannot_block_supervisor_deadline_or_exit_drain) ... ok
+
+======================================================================
+FAIL: test_live_signal_delivery_stop_retains_trusted_timeout_zero (pilot.test_verification.DockerVerificationTests.test_live_signal_delivery_stop_retains_trusted_timeout_zero)
+----------------------------------------------------------------------
+Traceback (most recent call last):
+  File "/home/tim/worktrees/hone/hone-hone-pilot-seeds12-1/pilot/test_verification.py", line 798, in test_live_signal_delivery_stop_retains_trusted_timeout_zero
+    self.assertEqual(bytes.fromhex(invocation["stderr_hex"]), b"observed-signal-stop\n")
+AssertionError: b'' != b'observed-signal-stop\n'
+
+----------------------------------------------------------------------
+Ran 5 tests in 23.302s
+
+FAILED (failures=1)

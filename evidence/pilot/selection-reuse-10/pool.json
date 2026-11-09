@@ -1,0 +1,10 @@
+{
+  "account_domains": {
+    "gmail.com": 2,
+    "purdue.edu": 1
+  },
+  "pool_hash": "sha256:c95157948a5b83be8e349005855a8d58dacb7f2fbe5eb9eab0260139ff02d97b",
+  "api_keys_allowed": false,
+  "lindy_ai_allowed": false,
+  "model_calls": 0
+}

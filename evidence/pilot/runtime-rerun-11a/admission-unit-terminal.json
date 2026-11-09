@@ -1,0 +1,11 @@
+{
+  "unit": "hone-predecl11a-admit-20261107T122903Z.service",
+  "ActiveState": "inactive",
+  "ExecMainPID": "0",
+  "ExecMainStatus": "0",
+  "LoadState": "not-found",
+  "MainPID": "0",
+  "Result": "success",
+  "wait_seconds": 351.78,
+  "interpretation": "The transient unit was collected; admission.json passed=true is the retained success proof."
+}

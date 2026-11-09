@@ -16,7 +16,7 @@ import unicodedata
 import urllib.request
 
 from .program import ProgramError
-from .runtime import BudgetExhausted, CallFailed, ProviderRefusal, call_scope
+from .runtime import BudgetExhausted, CallFailed, ProviderRefusal, call_scope, digest
 from .tasks import ARTIFACT_REV, Task, _fetch, _response
 
 SOURCE_REV = "39b84697f196308f398a251a7aea9b82ae0f0562"
@@ -399,19 +399,28 @@ def _normalize(text: str) -> str:
 
 
 def score_hover_output(task: Task, row: dict, output: str) -> float:
+    from .campaign import check_disk
+    from .verification import grader_journal, record_grader_outcome
+    check_disk()
     allowed = {item["id"]: item for item in task.train + task.selection}
     if row["id"] not in allowed:
         raise ValueError("Scoring row is outside frozen development membership")
     row = allowed[row["id"]]
+    score = 0.0
+    reason = "invalid_passage_answer"
     try:
         passages = json.loads(output)
-        if not isinstance(passages, list) or any(not isinstance(passage, str) for passage in passages):
-            return 0.0
+        if isinstance(passages, list) and all(isinstance(passage, str) for passage in passages):
+            gold = {_normalize(fact["key"]) for fact in row["supporting_facts"]}
+            found = {_normalize(passage.split(" | ")[0]) for passage in passages}
+            score = float(gold.issubset(found))
+            reason = "protected_title_subset"
     except (ValueError, TypeError):
-        return 0.0
-    gold = {_normalize(fact["key"]) for fact in row["supporting_facts"]}
-    found = {_normalize(passage.split(" | ")[0]) for passage in passages}
-    return float(gold.issubset(found))
+        pass
+    with grader_journal(task="hover", row_id=row["id"], output_hash=digest(output)):
+        record_grader_outcome("pass" if score else "wrong_answer", score, reason=reason,
+                              input_hash=digest({"row_id": row["id"], "output": output}))
+    return score
 
 
 def evaluate_hover(task: Task, candidate: dict[str, str], rows: list[dict], call, capture_traces=False) -> dict:

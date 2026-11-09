@@ -1,0 +1,7 @@
+{
+  "returncode": 0,
+  "stdout": "{\"seize\": 0, \"errno\": 0, \"interrupt\": 0, \"stop_status\": 8390015, \"stopped\": true, \"event\": 128, \"exit_status\": 9}\n",
+  "stderr": "",
+  "model_calls": 0,
+  "source": "Observed parent tool invocation of trace-probe.py in the frozen sandbox"
+}

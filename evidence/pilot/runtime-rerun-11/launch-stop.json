@@ -1,0 +1,30 @@
+{
+  "action": "Honor the admission-failure stop; do not restart admission or launch search in this run.",
+  "admission_receipt": "admission-failure.json",
+  "campaign_call_budget_used": 0,
+  "campaign_call_cap": 35000,
+  "campaign_rerun": 2,
+  "campaign_rerun_started": false,
+  "exec_main_pid": 431140,
+  "exec_main_status": 1,
+  "failed_guard": "pilot/__main__.py:107-110 execution_limits; permitted != [6]",
+  "gateway_requests": 0,
+  "implementation_head": "0d929fa76b030aefe84c6de967362cf90b170f6c",
+  "initial_full_matrix_projection": 33438,
+  "live_unit_or_pid": null,
+  "main_pid": 0,
+  "model_calls": 0,
+  "new_cells_started": 0,
+  "observed_affinity_mask": null,
+  "observed_unit_properties": {
+    "AllowedCPUs": "6",
+    "Nice": 10,
+    "Restart": "no"
+  },
+  "phase": "zero-call admission",
+  "reason": "inherited-process-affinity-not-cpu6",
+  "recommendation": "Authorize a fresh zero-call admission unit with explicit taskset -c 6 before Python, preserving the same nice, Restart=no, threads, disk floor and pinned runtime. No engine/scorer change or measured-cell retry is needed.",
+  "schema": "pilot-launch-stop-v11",
+  "unit": "hone-predecl11-admit-r10-20261107T110326Z.service",
+  "unit_result": "exit-code"
+}

@@ -1,0 +1,48 @@
+**Verdict: NOT_READY** at exact head `28f723739fcc39f1e509aca992454c5e73604256`. I'm `anthropic/claude-opus-5-5`, which is cross-family to the author's `openai-codex/gpt-6.1-sol`.
+
+I stopped early because you asked me to stop reading the worktree. This is a partial review, not a full-head clearance. I ran no tests or builds and made no edits.
+
+**What this change does:** When the result checker sees the worker has exited, it now reads whatever result bytes are already waiting, up to the existing size limit, without waiting for the pipe to close. Before, a finished result could be dropped if the check happened after the deadline. The head also adds a Docker regression test, updates two source pins and the active 11c scripts, and keeps the fresh zero-call admission and native proof.
+
+## Must fix
+
+1. **A worker that has finished but is still shutting down at the deadline gets "time limit, score 0"** (`pilot/verification.py:426-437`, caller `:458-463`)
+   - **Defect class:** worker I/O at the exit/deadline boundary. This is the same class as review stop 11b, not a policy question.
+   - **What this is:** The fix only keeps the result once `waitid(... WNOHANG | WNOWAIT)` reports an exit. `waitid` is the call that asks whether the worker has exited. If that call still sees the worker running and the deadline has passed, line 437 returns `None`. That becomes the trusted "exceeded the 10 second time limit" result, scored 0.
+   - **Problem:** The worker writes its full result frame and calls `_exit` before the deadline. But Linux only reports the exit after the kernel frees the process's memory. The sandbox allows up to 256 MB (`pilot/program.py:38`) on one CPU (`:38-39`), so this cleanup can take time. Here is a concrete order of events:
+     1. The frame is written at deadline−2 ms.
+     2. The checker reads the whole frame (`:440-442`).
+     3. The next `waitid` call still sees the worker as not exited, because its memory is being freed.
+     4. `select` waits until the deadline. The pipe has not closed yet, because the kernel releases the worker's files only after freeing its memory.
+     5. Line 436-437 returns `None`.
+
+     So a pass that was fully delivered turns into a wrong-answer 0. That is a wrong score, not an unscored failure. How long the memory cleanup takes is my inference. I have not observed this happening in a real run.
+   - **Fix:** When the deadline passes and no exit has been seen, call `_kill(child)` first. Then wait for the worker with a blocking `os.waitid(os.P_PID, child, os.WEXITED | os.WNOWAIT)`.
+     - If our SIGKILL ended the worker (`si_code == CLD_KILLED`, `si_status == SIGKILL`), it was still running: return `None`, as now.
+     - Otherwise it had already started its own exit before the kill. A kill sent during exit does not change the exit status. In that case, reuse the same bounded read as lines 430-435 and return the bytes.
+
+     The worker gets no extra running time, because SIGKILL is still sent at the deadline. Add a Docker regression for both cases: the worker started exiting before the deadline (frame kept), and the worker still running at the deadline (score 0).
+   - **If we skip it:** A finished result, including a pass, can still be lost at the deadline and silently scored 0 inside the rankings.
+
+2. **The outer invocation loses a finished result at its own deadline** (`pilot/verification.py:513-519` and `:533-537`)
+   - **Defect class:** the same exit/deadline boundary, one level up in the outer invocation loop (`_run`).
+   - **What this is:** Your worker audit already found this. I reached it independently from the code. Line 515 gives up when time runs out before reading output that is already waiting. Lines 534-536 give up after both pipes have closed if time is up, before they collect an exit that has already happened.
+   - **Problem:** A complete result whose invocation already exited, read just after 15 s, becomes `timeout`. That is unscored, and it aborts rerun 2, which has no retry left.
+   - **Fix:** Apply the same pattern. When the deadline passes, check `process.poll()`. If the process has exited, do a bounded, nonblocking read of what is waiting, then use the real return code. You are already fixing this.
+
+## Checked and consistent within the reviewed scope
+- **Read limits:** both new read paths cap each read at `_WIRE + 1 - len(data)`. A detached child that keeps writing can't force a wait for the pipe to close or an unbounded read. It can only push the output past the limit, which ends as an unscored frame failure.
+- **Real exits stay unscored:** missing frames, malformed frames and real exit codes still follow the existing outcome checks (`:463`, `:570-576`, `:669-689`).
+- **Regression test:** `pilot/test_verification.py:634-691` runs the unchanged functions in Docker against a finished pass frame and a TypeError frame waiting in the pipe. `before.txt` shows both failing before the fix, and `after-regression.txt` shows them passing after. It does not cover a worker that is still exiting at the deadline (finding 1).
+- **Active scripts:** the 11c `launch.py`, `run.py` and `admit.py` differ from 11b only in the runtime-directory string. `smoke.py` is identical. The `test_rerun11.py` runner points at 11c.
+- **Pins:** `admission.py:152` and `source-transition-11.json` both pin `verification.py` as `sha256:d90429ea…`, matching the 11c `admission.json` source hash and implementation commit `b21f535`.
+- **Admission record:** `admission.json` shows `passed=true`, 0 model calls, 0 gateway requests, CPU 6, nice 10, 1,808 pass and 2,650 wrong answer.
+
+Verdict: fix 1 and 2 first.
+
+Not checked: these items were not reviewed in this pass and still need the fresh review of the new head:
+- re-hashing the admission journal and bundle;
+- the campaign guard code: order of the 12 cells, the 35,000-call cap and before-cell projection, the 100 GB floor, joined safety history, no per-row restart;
+- the selection-cache code;
+- the official GEPA hash;
+- exact-head CI.

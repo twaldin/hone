@@ -1,0 +1,88 @@
+{
+  "amendment_commit": "3d9da07960d74a846fe42f0d1b58f56255635f99",
+  "files": {
+    "pilot/__main__.py": {
+      "after": "sha256:1c6d2e5fec5b96d099a355b82c9ae11d9c56e706dd9d08441b199f94383a36d4",
+      "before": "sha256:2003ee4a51f4aa52cf7678486227452c5406c7eebd80963f0071b20ed09bcc97"
+    },
+    "pilot/admission.py": {
+      "after": "sha256:03ceac8553a236a7e3350f74619c6eea8b772c551f4499c9ef743a02a9dc8ae1",
+      "before": "sha256:94018cdfc5f5965fdfdb637fe003f10578a8f81b3fd6fc68349ac1b7b6ed5168"
+    },
+    "pilot/adversarial.py": {
+      "after": "sha256:4d3dbdede5cd6eab8bb03d640d7ab337099ef036e049b37f13657a2b861ba8a5",
+      "before": "sha256:eb0630056646d1ac4aafd505971582a1c7f56a6d785ff9c9aa4e2cc0724c39fe"
+    },
+    "pilot/campaign.py": {
+      "after": "sha256:c8f676a6bb5404a1a8d336681c332eab799b2b559417f7ec8280b4fa3eff6f14",
+      "before": null
+    },
+    "pilot/controls.py": {
+      "after": "sha256:41d32fd8fb5a2a7fe4456617e9f9040479682d4b6f3e9b300fcf270d8e7e3027",
+      "before": "sha256:c4756705a590110f9afb33c622143bc36a332ff5cf3a5f6c24afd9fe160aedc9"
+    },
+    "pilot/gateway-receipts.mjs": {
+      "after": "sha256:78b1a32c3525a6f546a8a1452116d11eb34caca6725c0ad4f55721182a377a0a",
+      "before": "sha256:78b1a32c3525a6f546a8a1452116d11eb34caca6725c0ad4f55721182a377a0a"
+    },
+    "pilot/gateway.mjs": {
+      "after": "sha256:a81a1fff9b8ad9859875da1c46f8a4039df2b996cc0819a935573ce7d67e9cb4",
+      "before": "sha256:a81a1fff9b8ad9859875da1c46f8a4039df2b996cc0819a935573ce7d67e9cb4"
+    },
+    "pilot/hover.py": {
+      "after": "sha256:cbda218bd660e66bb97dfae7602e6d4ef4fbb4b2ea0e03b8a7bd2ec67dc02e45",
+      "before": "sha256:439e1b64550a35711b9b1b58c647be8f39d9d3a644669e1826885c258b800c37"
+    },
+    "pilot/panel.py": {
+      "after": "sha256:06da06eca07aaf27b6d2a829a5b623cafaa5a95ea75a5e356c9cb4ae83ae24da",
+      "before": "sha256:874de0610d12e50805f379bc9eb17e0b824987be0175d1d1a99dd50616309e71"
+    },
+    "pilot/program.py": {
+      "after": "sha256:5a09799538b382d6212c744bd4e6e72abe009e764dc505d1aa034f51929cdd53",
+      "before": "sha256:5a09799538b382d6212c744bd4e6e72abe009e764dc505d1aa034f51929cdd53"
+    },
+    "pilot/published-controls.json": {
+      "after": "sha256:3800220f9484db58af0cfb4985ba5806179da1ecb0a3cfa6a265363a74edbfd9",
+      "before": "sha256:3800220f9484db58af0cfb4985ba5806179da1ecb0a3cfa6a265363a74edbfd9"
+    },
+    "pilot/published.py": {
+      "after": "sha256:a01e391ab349b5687c34b720929672ffdb9fc44b722d59482e28f482ec199938",
+      "before": "sha256:a01e391ab349b5687c34b720929672ffdb9fc44b722d59482e28f482ec199938"
+    },
+    "pilot/runtime.py": {
+      "after": "sha256:b52a725d30c85157f1419629be3df4f9f1fa9f49bb00a9dc4c1196c232490332",
+      "before": "sha256:0df06978ed8a053cc6fd6a5b6751d09d8731fea15ef034177a3db0737db24f41"
+    },
+    "pilot/search.py": {
+      "after": "sha256:8bf99067e6d87a12e124b849285e623e4e631f6707e2708822b8330d3f3ef3cb",
+      "before": "sha256:8bf99067e6d87a12e124b849285e623e4e631f6707e2708822b8330d3f3ef3cb"
+    },
+    "pilot/tasks.py": {
+      "after": "sha256:898dcbd8ba8bb133e122e1a658f96d1920eddae9b7966ceeaeebc30c4539de58",
+      "before": "sha256:95248dd235a525636af1726e25ab2e9bd15a75a584dc2535ff85713878a0a3d0"
+    },
+    "pilot/verification.py": {
+      "after": "sha256:aa3c7714257dcc76fac5155a89015cf5df3ba596db751c7ecc622c8b460931d5",
+      "before": "sha256:5b8cfac4162f31b154695b77172dd4b32da9e7ac7deb863f6053d575ed36b13d"
+    }
+  },
+  "grader_limits": {
+    "planner": {
+      "candidate_seconds": null,
+      "deadline_seconds": 10
+    },
+    "worker": {
+      "candidate_seconds": 10,
+      "deadline_seconds": 15
+    },
+    "wrapper": {
+      "candidate_seconds": null,
+      "deadline_seconds": 10
+    }
+  },
+  "predeclaration_hash": "sha256:5a5aa7275d72030f52b162680f0ac1bcab23b4044ba463e8d5c9d1c15b1bf4cc",
+  "prior_source_transition_hash": "sha256:246f206edfdd9b0bb9b602108b6bb86a40f3fa0f589c65f5efa1fe9a58c0ad08",
+  "source_head": "b453995e9add69d3d82a11673e80e0dfaa46c8d8",
+  "source_snapshot_hash": "sha256:a623997f21a0308003e9915287a16256c5fb66ea8cde28166b4fcddd26e269ba",
+  "version": "pilot-grader-transition-v11"
+}

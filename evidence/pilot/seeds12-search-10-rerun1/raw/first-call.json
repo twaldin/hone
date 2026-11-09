@@ -1,0 +1,36 @@
+{
+  "schema": "pilot-pinned-first-real-call-v10",
+  "unit": "hone-seeds12-10-rerun1-20261106T111249.service",
+  "main_pid": 2373777,
+  "gateway_processes": [
+    {
+      "pid": 2619716,
+      "omp_realpath": "/home/tim/worktrees/hone/hone-hone-pilot-seeds12-1/.pilot-cache/omp-18.16.0/node_modules/@oh-my-pi/pi-coding-agent/dist/cli.js",
+      "cpu_affinity": [
+        6
+      ],
+      "nice": 19
+    }
+  ],
+  "cell": "mbpp/1/plain",
+  "first_call_line_hash": "sha256:d5f839791d1bb1467c919d6333ea866254796b87156b622b1eeb9e92dc446951",
+  "call": {
+    "role": "task",
+    "status": 200,
+    "outcome": "answered",
+    "reported_tokens": 170,
+    "charged_tokens": 170,
+    "usd_equivalent": 0.001602,
+    "usage_missing": false,
+    "retry_observation": {
+      "apiKeyHeaderRejections": 0,
+      "coverage": "omp native Anthropic fetch override plus omp logger",
+      "hiddenAttempts": 0,
+      "httpAttempts": 1,
+      "logEvents": 0
+    }
+  },
+  "observed_at": "2026-11-06T11:30:00.747507+00:00",
+  "runtime_guard_18_16_0_passed_before_call": true,
+  "global_omp_broker_config_or_schedule_changed_by_lane": false
+}

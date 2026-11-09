@@ -1,0 +1,54 @@
+**NOT_READY.** I reviewed exact head `abd22a4aa87bfecbc80637d535000381669a9c10` with model `anthropic/claude-opus-5-5`, which is a different model family from the author's `openai-codex/gpt-6.1-sol`. This was read-only: I ran no tests, builds or linters, made no edits and posted nothing.
+
+There is one blocking finding. It is a worker I/O exit/deadline bug in the same class as the earlier ones, so it is a fix to make now, not a handback. Nothing I found is a policy question or a different class of defect.
+
+**What this change does:** The candidate-running code inside the container (the inner supervisor) now reads its result pipe without blocking. At the deadline it kills the worker first and then checks its real exit, so a worker that was already finishing keeps its result. The host-side code that launches Docker (`_run`, the outer invocation) now also reads without blocking, and checks whether `docker run` has exited before declaring a timeout. The head adds three Docker regression tests, refreshes the source pins and fresh admission, and moves the active 11d scripts.
+
+## Must fix
+
+1. **The outer invocation can still turn a finished result into a timeout at its deadline** (`pilot/verification.py:527-530`, `:535-537`, `:554-559`; receipt side `:567-578` with `pilot/program.py:46-49`)
+   - **Defect class:** Worker I/O at exit/deadline. This is the host-side version of the delayed-exit case already fixed inside the container at `:430-434`. It does not need a handback.
+   - **What this is:** `_run` only learns that `docker run` exited through `process.poll()`. That call never waits, so it misses an exit the kernel has not reported yet. If it says "still running" and the deadline has passed, the loop gives up at `:529-530` or `:537`. After both pipes have closed, `:555-559` polls first, then reads the clock and gives up.
+   - **Problem:** The Docker CLI is a multithreaded Go program. When it exits, Linux closes its pipes before the process becomes collectable by `waitpid`. During that short gap, the frame is fully read and the exit code (0) is already fixed, but `poll()` still returns `None`. A deadline that lands in this gap, or a delayed host reader (host, CLI and container all share CPU 6), gives `timeout` and unscored infrastructure. Cleanup then kills and waits; the kill is ignored because the process is already exiting, so the receipt records `outcome: timeout` with `exit_code: 0` and a valid frame. This matters a lot here: the joined history ends with the ENOSPC infrastructure-failure row, so one such loss in the first cell (MBPP seed 1, Hone) trips `consecutive-infrastructure-failures` (`pilot/__main__.py:974-976`) and ends rerun 2, the last allowed campaign. Later, each loss drops a cell for good. I worked this out from the code and kernel exit order; I have not seen it happen in a real run. In the retained smoke, the 10-second candidate timeout finished at 10.247 s against the 15 s outer limit.
+   - **Fix:** Use the same kill-then-wait pattern as inside the container. Add `import signal` and a helper:
+     ```python
+     def _expire(process, seconds):
+         process.kill()
+         if process.wait() == -signal.SIGKILL:
+             raise subprocess.TimeoutExpired("protected grader", seconds)
+         return process.returncode
+     ```
+     - At `:529-530`, set `exit_code = _expire(process, seconds)` and keep the existing bounded drain with zero wait.
+     - Replace `:535-537` with `continue`, so expiry is handled in one place.
+     - After the loop, use `process.wait(timeout=max(0, deadline - time.monotonic()))` and call `_expire` on `TimeoutExpired`.
+
+     A `docker run` that is still live is killed exactly at the deadline and stays `timeout`, so no extra candidate time is granted. The ruling is unchanged: candidate failures still score 0 and real infrastructure failures stay unscored.
+   - **Missing test:** Add a consumer-level Docker regression like the inner `os.waitid` patch at `pilot/test_verification.py:642-643`. Make `poll()` hide an exit that has already happened until `kill()`/`wait()` is called. Put the clock past the deadline both before reading and after both pipes close, and assert a pass of 1.0 and a TypeError score of 0.0, each with an exit-0 receipt. Keep `test_outer_timeout_without_trusted_verdict_is_unscored_infrastructure` as the live-timeout case. The current test (`:705-708`) waits for the process to finish inside `Popen`, so the exit is always already reported and this boundary is never exercised.
+   - **If we skip it:** A completed pass or TypeError zero can still become unscored infrastructure and end the final campaign. The claims at `docs/pilot.md:47` and `evidence/pilot/runtime-rerun-11d/README.md:9` that completed outer invocations survive deadline delays are also overstated until this is fixed.
+
+## Checked and consistent
+- **Inner supervisor (`:424-474`):**
+  - The read end is non-blocking. If another reader takes the data first, the resulting `BlockingIOError` can neither stall deadline enforcement nor the drain after exit.
+  - Each read is capped at `_WIRE + 1 - len(data)`, and there are no waits for the pipe to close.
+  - The deadline path kills, waits, and checks for SIGKILL. A live overrun is still the trusted time-limit 0. A worker already exiting keeps its frame and real status.
+  - Queued, partial, multiple and oversized frames follow the existing outcome checks.
+- **Outer reads:** non-blocking, capped by the combined wire limit, and pipes are cleaned up in `finally` and `_remove`.
+- **Receipts and consumers:** `_results`, `score_solution` and `validate_grader_receipt` are unchanged and agree with each other. Candidate exceptions, wrong output and trusted own timeouts score 0. `os._exit`, signal death and missing or malformed frames stay infrastructure, as the existing policy tests require.
+- **Source pins:** `verification.py` hashes to `sha256:0c12bfcf…`, matching `admission.py:152`, `source-transition-11.json` and the admission record.
+  - All 21 execution source hashes in `admission.json` match the current files.
+  - The predeclaration, transition and journal hashes match, and the 11d `bundle.json` file hashes match.
+  - Between `c97db9d` and HEAD, only evidence and prose changed.
+- **Admission:** `passed=true`, 0 model calls, 0 gateway requests, CPU 6, nice 10. The journal has 1,808 pass and 2,650 wrong-answer outcomes, the same counts as 11c, with no infrastructure outcomes.
+- **Active 11d scripts:** `launch.py`, `run.py` and `admit.py` differ from 11c only in the directory path; `smoke.py` is identical. `test_rerun11.py` points at 11d.
+- **Campaign rules:**
+  - Order is seed 1 then 2, each MBPP then HoVer, each Hone, official GEPA, plain.
+  - The initial forecast is 33,438 calls. The hard cap is 35,000 and the check before each cell stops before a cell projected to cross it; call 35,001 cannot dispatch.
+  - The 100 GB disk floor is checked at launch, before each cell, before each model call and before grading.
+  - Old safety history is joined. The run root can never be restarted, there is no per-row retry, and `Restart=no`.
+  - The source, runtime and index pins plus the exact-head gates are re-checked before every cell.
+- **Selection cache and GEPA:** `search.py` is unchanged (`sha256:8bf99067…`, equal to the rerun-10 pin). Hone/plain cache selection scores once per artifact per cell, Hone after its gate. Official GEPA keeps `cache_evaluation=False`.
+- **Policy, not findings:** A `docker run --rm` still live at the deadline while waiting for container removal stays infrastructure; killing it gives -9. Candidate death by its own signal, including out-of-memory kills, is infrastructure under the existing explicit tests.
+
+Verdict: fix 1 first. Then refresh the `verification.py` pins, the zero-call admission and the docs, and get a new exact-head READY.
+
+Not checked: exact-head CI status for `abd22a4`, the `bundle_hash` formula and CLI bundle verification (not re-run, read-only), and real Docker timing.

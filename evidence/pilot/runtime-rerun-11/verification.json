@@ -1,0 +1,54 @@
+{
+  "after": {
+    "command": "nice -n 10 taskset -c 6 env PYTHONDONTWRITEBYTECODE=1 OPENBLAS_NUM_THREADS=1 OMP_NUM_THREADS=1 MKL_NUM_THREADS=1 NUMEXPR_NUM_THREADS=1 PILOT_CI_CPU=6 PILOT_DOCKER_TESTS=1 PILOT_OFFICIAL_METRIC_TESTS=1 NLTK_DATA=$PWD/.pilot-cache/nltk pilot/.venv/bin/python -m unittest discover -s pilot -p test_*.py -v",
+    "log_artifact": "artifact://448",
+    "passed": true,
+    "seconds": 57.457,
+    "skipped": 0,
+    "tests": 325
+  },
+  "before": {
+    "failed": 3,
+    "observation": "The baseline returned zero; RuntimeError was not raised.",
+    "regressions": [
+      "test_timeout_is_unscored_infrastructure",
+      "test_nonzero_exit_is_unscored_infrastructure",
+      "test_missing_frame_is_unscored_infrastructure"
+    ],
+    "source_head": "b453995e9add69d3d82a11673e80e0dfaa46c8d8"
+  },
+  "declaration_commit": "b453995e9add69d3d82a11673e80e0dfaa46c8d8",
+  "native_smoke": {
+    "model_calls": 0,
+    "outcomes": [
+      "pass",
+      "wrong_answer",
+      "nonzero_exit",
+      "frame_failure",
+      "timeout"
+    ],
+    "passed": true,
+    "proof": "grader-smoke.json",
+    "receipts": "grader-smoke.jsonl"
+  },
+  "no_comments": {
+    "application_code_changed": false,
+    "audit": "CommentAudit11",
+    "deleted": 6,
+    "restored": 0
+  },
+  "official_gepa_and_adapter_unchanged": true,
+  "provider_receipt_tests": {
+    "bun_version": "1.4.4",
+    "command": "nice -n 10 taskset -c 6 bun test --max-concurrency=1 pilot/gateway-receipts.test.mjs",
+    "failed": 0,
+    "passed": 12
+  },
+  "run9_outage": {
+    "classification": "No new campaign cell or model call was dispatched; no measured score needs outage reclassification.",
+    "new_model_calls": 0,
+    "new_search_cells": 0
+  },
+  "schema": "pilot-grader-verification-v11",
+  "search_calls": 0
+}

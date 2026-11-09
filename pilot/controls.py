@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from collections import Counter
 from datetime import datetime, timezone
+from functools import partial
 import math
 from pathlib import Path
 import random
@@ -9,6 +10,7 @@ import statistics
 
 from .runtime import LIMITS, IMAGE, append_json, call_scope, canonical, digest
 from .tasks import Task, evaluate, score_output
+from .verification import GraderInfrastructureError, grader_input_hash, grader_journal, validate_grader_receipt
 
 PAIRS = 16
 CONTROL_ROWS = 20
@@ -23,6 +25,7 @@ PREVIOUS_MBPP_ROWS = frozenset(f"mbpp:train:{value}" for value in (
 ))
 
 EXPECTED_RANK = "known-improved > naive > max(broken, shortcut); broken = 0; MBPP shortcut = 0"
+NEGATIVE_PROBE = "negative-probe"
 SHORTCUT_CODE = '''import json,sys
 print("ready", flush=True)
 print(json.dumps({"result": "AlwaysEqual()"}), flush=True)
@@ -67,6 +70,44 @@ def mean(result: dict) -> float:
     return statistics.fmean(result["scores"])
 
 
+def task_mean(scores: list) -> float | None:
+    return None if None in scores else statistics.fmean(scores)
+
+
+def zero_arms(task_name: str) -> tuple[str, ...]:
+    return ("broken", "shortcut") if task_name == "mbpp" else ("broken",)
+
+
+def ranking_passed(task_name: str, controls: dict) -> bool:
+    zero = zero_arms(task_name)
+    bound = max(0 if name in zero else controls[name]["mean"] for name in ("broken", "shortcut"))
+    return (controls["known-improved"]["mean"] > controls["naive"]["mean"] > bound
+            and all(score is None or score == 0 for name in zero for score in controls[name]["scores"]))
+
+
+def validate_unscored_rejection(receipt: dict, row: dict, output: str, identity: dict, **context) -> None:
+    validate_grader_receipt(receipt)
+    try:
+        expected = {**context, "stage": NEGATIVE_PROBE, "task": "mbpp", "row_id": row["id"], "output_hash": digest(output)}
+        valid = (receipt["score"] is None and receipt["image"] == identity["image"]
+                 and all(receipt["context"].get(key) == value for key, value in expected.items())
+                 and receipt["input_hash"] == grader_input_hash(output, row["reference_code"],
+                                                                row["test_setup_code"], row["test_list"]))
+    except (KeyError, TypeError) as error:
+        raise ValueError("Unscored negative-probe receipt lacks its probe binding") from error
+    if not valid:
+        raise ValueError("Unscored negative-probe receipt differs from its probe stage, task, row, input or image")
+
+
+def negative_probe(evaluation, row: dict, output: str, identity: dict, **context) -> tuple:
+    try:
+        with grader_journal(stage=NEGATIVE_PROBE, **context):
+            return evaluation(), None
+    except GraderInfrastructureError as error:
+        validate_unscored_rejection(error.receipt, row, output, identity, **context)
+        return None, error.receipt
+
+
 def measure(task: Task, call, out: Path, identity: dict, *, rows: list[dict], adversarial: dict) -> dict:
     if task.name == "mbpp":
         from .adversarial import validate_task_admission
@@ -99,13 +140,28 @@ def measure(task: Task, call, out: Path, identity: dict, *, rows: list[dict], ad
     order = ("naive", "known-improved", "broken", "shortcut") if task.name == "ifbench" else tuple(candidates)
     for name in order:
         candidate = candidates[name]
-        refused = []
+        refused, unscored = [], {}
         if name == "known-improved" and task.name == "mbpp":
             outputs = [row["reference_code"] for row in rows]
-            scores = [score_output(task, row, output) for row, output in zip(rows, outputs, strict=True)]
+            with call_scope(arm=name):
+                scores = [score_output(task, row, output) for row, output in zip(rows, outputs, strict=True)]
         elif name == "shortcut" and task.name != "mbpp":
             outputs = [candidate["output"]] * len(rows)
             scores = [score_output(task, row, output) for row, output in zip(rows, outputs, strict=True)]
+        elif name == "shortcut":
+            outputs, scores = [], []
+            for row in rows:
+                with call_scope(arm=name):
+                    execution, receipt = negative_probe(partial(evaluate, task, candidate, [row], call),
+                                                        row, SHORTCUT_CODE, identity, arm=name)
+                if receipt is None:
+                    outputs += execution["outputs"]
+                    scores += execution["scores"]
+                    refused += execution["refusals"]
+                else:
+                    outputs.append(SHORTCUT_CODE)
+                    scores.append(None)
+                    unscored[row["id"]] = receipt
         else:
             with call_scope(arm=name):
                 execution = evaluate(task, candidate, rows, call)
@@ -114,17 +170,17 @@ def measure(task: Task, call, out: Path, identity: dict, *, rows: list[dict], ad
         result["refusals"] += len(refused)
         result["refusals_by_arm"][name] = len(refused)
         result["refusals_by_row"] = dict(Counter(result["refusals_by_row"]) + Counter(refused))
-        controls[name] = {"scores": scores, "outputs": outputs, "mean": statistics.fmean(scores),
+        controls[name] = {"scores": scores, "outputs": outputs, "mean": task_mean(scores),
                           "refusals": len(refused), "refusals_by_row": dict(Counter(refused))}
-        append_json(out / "evaluations.jsonl", {"control": name, "row_ids": result["rows"], "outputs": outputs,
-                    "scores": scores, "refusals": refused})
+        record = {"control": name, "row_ids": result["rows"], "outputs": outputs, "scores": scores, "refusals": refused}
+        if unscored:
+            controls[name]["unscored_receipts"] = record["unscored_receipts"] = unscored
+        append_json(out / "evaluations.jsonl", record)
         if task.name == "ifbench" and name == "naive" and controls[name]["mean"] >= 0.90:
             result.update(controls=controls, headroom_replacement="hover", ranking_passed=None, noise_passed=None)
             (out / "controls.json").write_text(canonical(result) + "\n")
             return result
-    ranking = (controls["known-improved"]["mean"] > controls["naive"]["mean"] >
-               max(controls["broken"]["mean"], controls["shortcut"]["mean"])
-               and controls["broken"]["mean"] == 0 and (task.name != "mbpp" or controls["shortcut"]["mean"] == 0))
+    ranking = ranking_passed(task.name, controls)
     result.update(controls=controls, ranking_passed=ranking)
     out.mkdir(parents=True, exist_ok=True)
     (out / "controls.json").write_text(canonical(result) + "\n")

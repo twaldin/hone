@@ -1,0 +1,83 @@
+test_completed_outer_invocation_survives_deadline_before_read_or_after_eof (pilot.test_verification.DockerVerificationTests.test_completed_outer_invocation_survives_deadline_before_read_or_after_eof) ... 
+  test_completed_outer_invocation_survives_deadline_before_read_or_after_eof (pilot.test_verification.DockerVerificationTests.test_completed_outer_invocation_survives_deadline_before_read_or_after_eof) (boundary='queued', expected=1.0) ... ERROR
+  test_completed_outer_invocation_survives_deadline_before_read_or_after_eof (pilot.test_verification.DockerVerificationTests.test_completed_outer_invocation_survives_deadline_before_read_or_after_eof) (boundary='queued', expected=0.0) ... ERROR
+  test_completed_outer_invocation_survives_deadline_before_read_or_after_eof (pilot.test_verification.DockerVerificationTests.test_completed_outer_invocation_survives_deadline_before_read_or_after_eof) (boundary='after-eof', expected=1.0) ... ERROR
+  test_completed_outer_invocation_survives_deadline_before_read_or_after_eof (pilot.test_verification.DockerVerificationTests.test_completed_outer_invocation_survives_deadline_before_read_or_after_eof) (boundary='after-eof', expected=0.0) ... ERROR
+test_delayed_genuine_sigkill_is_unscored_infrastructure (pilot.test_verification.DockerVerificationTests.test_delayed_genuine_sigkill_is_unscored_infrastructure) ... FAIL
+
+======================================================================
+ERROR: test_completed_outer_invocation_survives_deadline_before_read_or_after_eof (pilot.test_verification.DockerVerificationTests.test_completed_outer_invocation_survives_deadline_before_read_or_after_eof) (boundary='queued', expected=1.0)
+----------------------------------------------------------------------
+Traceback (most recent call last):
+  File "/home/tim/worktrees/hone/hone-hone-pilot-seeds12-1/pilot/test_verification.py", line 742, in test_completed_outer_invocation_survives_deadline_before_read_or_after_eof
+    self.assertEqual(verification.score_solution(output, ADD, "", ADD_TESTS), expected)
+                     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/tim/worktrees/hone/hone-hone-pilot-seeds12-1/pilot/verification.py", line 733, in score_solution
+    verdict = _results(_run("worker", payload), len(calls), invocations, input_hash)
+              ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/tim/worktrees/hone/hone-hone-pilot-seeds12-1/pilot/verification.py", line 711, in _results
+    _raise_infrastructure(result, invocations, input_hash)
+  File "/home/tim/worktrees/hone/hone-hone-pilot-seeds12-1/pilot/verification.py", line 182, in _raise_infrastructure
+    raise GraderInfrastructureError(record_grader_outcome(
+pilot.verification.GraderInfrastructureError: Protected grader infrastructure failure: timeout
+
+======================================================================
+ERROR: test_completed_outer_invocation_survives_deadline_before_read_or_after_eof (pilot.test_verification.DockerVerificationTests.test_completed_outer_invocation_survives_deadline_before_read_or_after_eof) (boundary='queued', expected=0.0)
+----------------------------------------------------------------------
+Traceback (most recent call last):
+  File "/home/tim/worktrees/hone/hone-hone-pilot-seeds12-1/pilot/test_verification.py", line 742, in test_completed_outer_invocation_survives_deadline_before_read_or_after_eof
+    self.assertEqual(verification.score_solution(output, ADD, "", ADD_TESTS), expected)
+                     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/tim/worktrees/hone/hone-hone-pilot-seeds12-1/pilot/verification.py", line 733, in score_solution
+    verdict = _results(_run("worker", payload), len(calls), invocations, input_hash)
+              ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/tim/worktrees/hone/hone-hone-pilot-seeds12-1/pilot/verification.py", line 711, in _results
+    _raise_infrastructure(result, invocations, input_hash)
+  File "/home/tim/worktrees/hone/hone-hone-pilot-seeds12-1/pilot/verification.py", line 182, in _raise_infrastructure
+    raise GraderInfrastructureError(record_grader_outcome(
+pilot.verification.GraderInfrastructureError: Protected grader infrastructure failure: timeout
+
+======================================================================
+ERROR: test_completed_outer_invocation_survives_deadline_before_read_or_after_eof (pilot.test_verification.DockerVerificationTests.test_completed_outer_invocation_survives_deadline_before_read_or_after_eof) (boundary='after-eof', expected=1.0)
+----------------------------------------------------------------------
+Traceback (most recent call last):
+  File "/home/tim/worktrees/hone/hone-hone-pilot-seeds12-1/pilot/test_verification.py", line 742, in test_completed_outer_invocation_survives_deadline_before_read_or_after_eof
+    self.assertEqual(verification.score_solution(output, ADD, "", ADD_TESTS), expected)
+                     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/tim/worktrees/hone/hone-hone-pilot-seeds12-1/pilot/verification.py", line 733, in score_solution
+    verdict = _results(_run("worker", payload), len(calls), invocations, input_hash)
+              ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/tim/worktrees/hone/hone-hone-pilot-seeds12-1/pilot/verification.py", line 711, in _results
+    _raise_infrastructure(result, invocations, input_hash)
+  File "/home/tim/worktrees/hone/hone-hone-pilot-seeds12-1/pilot/verification.py", line 182, in _raise_infrastructure
+    raise GraderInfrastructureError(record_grader_outcome(
+pilot.verification.GraderInfrastructureError: Protected grader infrastructure failure: timeout
+
+======================================================================
+ERROR: test_completed_outer_invocation_survives_deadline_before_read_or_after_eof (pilot.test_verification.DockerVerificationTests.test_completed_outer_invocation_survives_deadline_before_read_or_after_eof) (boundary='after-eof', expected=0.0)
+----------------------------------------------------------------------
+Traceback (most recent call last):
+  File "/home/tim/worktrees/hone/hone-hone-pilot-seeds12-1/pilot/test_verification.py", line 742, in test_completed_outer_invocation_survives_deadline_before_read_or_after_eof
+    self.assertEqual(verification.score_solution(output, ADD, "", ADD_TESTS), expected)
+                     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/tim/worktrees/hone/hone-hone-pilot-seeds12-1/pilot/verification.py", line 733, in score_solution
+    verdict = _results(_run("worker", payload), len(calls), invocations, input_hash)
+              ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/tim/worktrees/hone/hone-hone-pilot-seeds12-1/pilot/verification.py", line 711, in _results
+    _raise_infrastructure(result, invocations, input_hash)
+  File "/home/tim/worktrees/hone/hone-hone-pilot-seeds12-1/pilot/verification.py", line 182, in _raise_infrastructure
+    raise GraderInfrastructureError(record_grader_outcome(
+pilot.verification.GraderInfrastructureError: Protected grader infrastructure failure: timeout
+
+======================================================================
+FAIL: test_delayed_genuine_sigkill_is_unscored_infrastructure (pilot.test_verification.DockerVerificationTests.test_delayed_genuine_sigkill_is_unscored_infrastructure)
+----------------------------------------------------------------------
+Traceback (most recent call last):
+  File "/home/tim/worktrees/hone/hone-hone-pilot-seeds12-1/pilot/test_verification.py", line 763, in test_delayed_genuine_sigkill_is_unscored_infrastructure
+    with self.assertRaises(verification.GraderInfrastructureError) as caught:
+AssertionError: GraderInfrastructureError not raised
+
+----------------------------------------------------------------------
+Ran 2 tests in 11.563s
+
+FAILED (failures=1, errors=4)

@@ -1,0 +1,42 @@
+{
+  "schema": "pilot-enospc-artifact-verification-v10",
+  "outer_bundle_inventory_digest": "sha256:85cac8a4f5e181158247fa27d0dcffab1403370844c5721e392e4f9bee254e6f",
+  "outer_listed_files": 501,
+  "raw_bundle_inventory_digest": "sha256:b0d0ed27bc1710a145845bffc65b8f21bd95f26a47cb5788bdcfb594140c5433",
+  "report_input_bundle_inventory_digest": "sha256:f12582481ca1c31e5e167180fdd2dbb784b99ff004b91fe638339df6ae6ca640",
+  "producer_source_files_byte_identical": 254,
+  "completed_leaf_bundles_verified": 5,
+  "empty_manifest_and160byte_tail_preserved": true,
+  "report_projection_rebuild_inventory_identical": true,
+  "archive_derived_report_replay_byte_identical": true,
+  "machine_report_file_hash": "sha256:b29031353c588078622d4b68a836c1e13c9e5138c1dd6863bd124e81acd19b53",
+  "completed_metric_input_inventory_digest": "sha256:bd254c2e332fadba19173222cf93c96a4d10c2127356b441eab774b7dbdba256",
+  "metric_input_builder_smoke_matches_actual_inputs": true,
+  "sealed_source_output_rejected_before_creation": true,
+  "engine_files_identical_since_launch": 12,
+  "official_gepa_or_adapter_changed": false,
+  "protected_metric_replay": {
+    "status": "failed",
+    "expected_rollouts": 10236,
+    "successfully_replayed_count_before_failure": null,
+    "mismatch_location": null,
+    "exit_code": 1,
+    "wall_seconds": 2624.6,
+    "error": "Replay metric disagrees with a retained evaluation",
+    "receipt": "seeds12-search-10-rerun1/metric-replay.json",
+    "retries_or_grader_changes": 0
+  },
+  "earlier_seed0_raw_replay": "selection-reuse-10/metric-replay.json (12764 passed before this rerun)",
+  "method_primary_aggregates_all_unavailable": true,
+  "quality_figures": "as-recorded; not independently validated by the failed protected-metric replay",
+  "comment_audit": {
+    "files": 2,
+    "comments": 0,
+    "suppressions": 0,
+    "edits": 0
+  },
+  "new_model_calls_for_all_forensic_projection_and_replay_steps": 0,
+  "measurement_unit_main_pid": 0,
+  "cgroup_absent": true,
+  "merge_authorized": false
+}
