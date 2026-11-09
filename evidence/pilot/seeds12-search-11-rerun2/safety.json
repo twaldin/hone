@@ -1,0 +1,161 @@
+{
+  "abort_summary": "One unscored grader-infrastructure cell; completed neighbors reset the consecutive-failure streak. No dispatch-level stop fired.",
+  "actual_dispatch_ordinals_contiguous": true,
+  "before_cell_receipts": [
+    {
+      "actual": 0,
+      "cap": 35000,
+      "cell": [
+        1,
+        "mbpp",
+        "hone"
+      ],
+      "event": "cell-start",
+      "projected": 33438,
+      "remaining": 33438
+    },
+    {
+      "actual": 3392,
+      "cap": 35000,
+      "cell": [
+        1,
+        "mbpp",
+        "gepa"
+      ],
+      "event": "cell-start",
+      "projected": 33396,
+      "remaining": 30004
+    },
+    {
+      "actual": 6533,
+      "cap": 35000,
+      "cell": [
+        1,
+        "mbpp",
+        "plain"
+      ],
+      "event": "cell-start",
+      "projected": 34270,
+      "remaining": 27737
+    },
+    {
+      "actual": 9369,
+      "cap": 35000,
+      "cell": [
+        1,
+        "hover",
+        "hone"
+      ],
+      "event": "cell-start",
+      "projected": 33790,
+      "remaining": 24421
+    },
+    {
+      "actual": 11913,
+      "cap": 35000,
+      "cell": [
+        1,
+        "hover",
+        "gepa"
+      ],
+      "event": "cell-start",
+      "projected": 33972,
+      "remaining": 22059
+    },
+    {
+      "actual": 14452,
+      "cap": 35000,
+      "cell": [
+        1,
+        "hover",
+        "plain"
+      ],
+      "event": "cell-start",
+      "projected": 33842,
+      "remaining": 19390
+    },
+    {
+      "actual": 16927,
+      "cap": 35000,
+      "cell": [
+        2,
+        "mbpp",
+        "hone"
+      ],
+      "event": "cell-start",
+      "projected": 34506,
+      "remaining": 17579
+    },
+    {
+      "actual": 20011,
+      "cap": 35000,
+      "cell": [
+        2,
+        "mbpp",
+        "gepa"
+      ],
+      "event": "cell-start",
+      "projected": 34156,
+      "remaining": 14145
+    },
+    {
+      "actual": 20372,
+      "cap": 35000,
+      "cell": [
+        2,
+        "mbpp",
+        "plain"
+      ],
+      "event": "cell-start",
+      "projected": 31376,
+      "remaining": 11004
+    },
+    {
+      "actual": 23352,
+      "cap": 35000,
+      "cell": [
+        2,
+        "hover",
+        "hone"
+      ],
+      "event": "cell-start",
+      "projected": 31040,
+      "remaining": 7688
+    },
+    {
+      "actual": 25215,
+      "cap": 35000,
+      "cell": [
+        2,
+        "hover",
+        "gepa"
+      ],
+      "event": "cell-start",
+      "projected": 30359,
+      "remaining": 5144
+    },
+    {
+      "actual": 27830,
+      "cap": 35000,
+      "cell": [
+        2,
+        "hover",
+        "plain"
+      ],
+      "event": "cell-start",
+      "projected": 30305,
+      "remaining": 2475
+    }
+  ],
+  "disk_floor_bytes": 100000000000,
+  "disk_history_limit": "The guard checked free disk before dispatch and grading. This archive does not contain a continuous disk trace or a measured minimum. No disk-floor stop was recorded.",
+  "hard_call_cap": 35000,
+  "hidden_attempts": 10,
+  "last_ordinal": 30285,
+  "max_before_cell_projection": 34506,
+  "pause_limit_seconds": 21600,
+  "pause_seconds": 13133.284367322922,
+  "refusals": 0,
+  "schema": "pilot-final-safety-summary-v11",
+  "usage_missing_calls": 1
+}

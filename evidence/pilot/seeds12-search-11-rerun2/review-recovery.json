@@ -1,0 +1,31 @@
+{
+  "files": [
+    {
+      "agent": "ReleaseReview11d",
+      "authenticated_against_original": true,
+      "bytes": 8005,
+      "file": "reviews/ReleaseReview11d.md",
+      "file_hash": "sha256:fde35eb67acdf7f97442d82bb1882823ef0aec9367f7d0a700e2948f407e0df8"
+    },
+    {
+      "agent": "ReleaseReview11f",
+      "authenticated_against_original": true,
+      "bytes": 9295,
+      "file": "reviews/ReleaseReview11f.md",
+      "file_hash": "sha256:3a33fa71706c63095174b68502cb296b918fbaef628de3bfdab189790019c737"
+    },
+    {
+      "agent": "IOAudit11f",
+      "authenticated_against_original": true,
+      "bytes": 2955,
+      "file": "reviews/IOAudit11f.md",
+      "file_hash": "sha256:dabd52530f7ea04d0574df039ffa8a79e209265062397fc5d57580cc1088d37a"
+    }
+  ],
+  "notes": [
+    "Include authenticated complete 8005-byte ReleaseReview11d copy in final evidence; private exact copy already recovered.",
+    "Clarify both removed incidental assertions (stderr and reason wording); retain behavioral native-stop and score/receipt checks, do not restore wording-only test."
+  ],
+  "schema": "pilot-original-review-recovery-v11",
+  "wording_assertion_restored": false
+}
