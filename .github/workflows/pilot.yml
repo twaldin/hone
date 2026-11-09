@@ -77,6 +77,7 @@ jobs:
           from pilot.runtime import IMAGE
           from pilot.tasks import load_task
 
+          os.umask(0o077)
           revision = '550b6625bcef1f2abff2ff770a5a0d272c9c6b2a'
           root = Path(os.environ['NLTK_DATA'])
           for category, name in (

@@ -35,18 +35,20 @@ class EnvironmentTests(unittest.TestCase):
     def test_admission_finds_nlp_assets_without_launch_environment(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
-            resource = root / ".pilot-cache/nltk/tokenizers/punkt"
-            resource.mkdir(parents=True)
-            (resource / "pilot-fixture").write_text("installed-resource")
             pool = root / "pool.json"
             pool.write_text(json.dumps({"*": False, "anthropic": {"accounts": ["email:pilot@gmail.com"], "apiKeys": False}}))
             script = textwrap.dedent("""
                 from pathlib import Path
+                import os
                 import sys
                 from unittest.mock import patch
                 from pilot import __main__ as cli
 
                 root = Path(sys.argv[1])
+                os.umask(0o077)
+                resource = root / ".pilot-cache/nltk/tokenizers/punkt"
+                resource.mkdir(parents=True)
+                (resource / "pilot-fixture").write_text("installed-resource")
 
                 class AdmissionComplete(Exception):
                     pass

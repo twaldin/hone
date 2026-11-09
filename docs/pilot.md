@@ -60,7 +60,10 @@ Run from the repository root on Linux with Docker, Bun, uv, pnpm, and omp 18.16.
 
 Before `prepare` or any admission/search command, verify and copy the admitted HoVer retrieval artifact using the [predeclaration-9 reuse evidence](../evidence/pilot/index-artifact-9/README.md). Do not let an empty cache trigger a fresh index build for an admitted rerun. A source or copy hash mismatch requires handback, not rebuilding or relaxing the exact gate.
 
+NLTK is now pinned to 3.10.4. Its data loader rejects resource files and directories writable by another account. Use a private umask for new resources, as below. Recreate any previously shared-writable NLTK data from trusted packages in a private directory; changing permissions alone does not establish provenance. Resource names and grading code are unchanged. The new package version changes the environment fingerprint, not the archived campaign evidence.
+
 ```sh
+umask 077
 nice -n 10 taskset -c 6 uv sync --project pilot --frozen --extra retrieval
 nice -n 10 taskset -c 6 pnpm install --frozen-lockfile --ignore-scripts --network-concurrency=2 --child-concurrency=1
 nice -n 10 taskset -c 6 pilot/.venv/bin/python -m nltk.downloader -d .pilot-cache/nltk punkt punkt_tab stopwords averaged_perceptron_tagger_eng
